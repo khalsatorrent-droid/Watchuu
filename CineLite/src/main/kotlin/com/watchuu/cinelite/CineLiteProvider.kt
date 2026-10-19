@@ -361,6 +361,29 @@ class CineLiteProvider : MainAPI() {
         return true
     }
 
+    private fun fileOf(n: JsonNode?): String? = when {
+        n == null -> null
+        n.isTextual -> n.asText()
+        n.isArray -> n.firstNotNullOfOrNull { fileOf(it) }
+        n.isObject -> n.get("file")?.asText() ?: n.get("url")?.asText() ?: n.get("src")?.asText()
+        else -> null
+    }
+
+    private suspend fun emitHls(label: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        val h = mapOf("Referer" to referer, "Origin" to referer.trimEnd('/'), "User-Agent" to ua)
+        callback.invoke(
+            newExtractorLink(name, "$name $label (Auto)", url, ExtractorLinkType.M3U8) {
+                this.referer = referer
+                this.headers = h
+                this.quality = Qualities.Unknown.value
+            }
+        )
+        try {
+            M3u8Helper.generateM3u8("$name $label", url, referer, headers = h).forEach(callback)
+        } catch (_: Exception) {
+        }
+    }
+
     private val anilistCache = HashMap<String, Int?>()
 
     /** Best-effort TMDB title -> AniList id (AniList lists every season as its own entry). */
@@ -416,34 +439,18 @@ class CineLiteProvider : MainAPI() {
                     if (audio == "sub") dbg.add("mp src ${gr.code} ${json.take(130)}")
                     val root = mapper.readTree(json)
                     if (root != null) {
-                        if (collectStreams(root, "Megaplay $tag", callback, "https://megaplay.buzz/")) any = true
+                        val srcNode = root.get("sources")
+                        if (audio == "sub") dbg.add("mp sources=${srcNode?.toString()?.take(200)}")
+                        val file = fileOf(srcNode)
+                        if (file != null && file.startsWith("http")) {
+                            any = true
+                            emitHls("Megaplay $tag", file, "https://megaplay.buzz/", callback)
+                        } else if (collectStreams(root, "Megaplay $tag", callback, "https://megaplay.buzz/")) any = true
                         if (audio == "sub") collectSubtitles(root.get("tracks"), subtitleCallback)
                     }
                 }
             } catch (e: Exception) {
                 dbg.add("mp EXC ${e.message?.take(80)}")
-            }
-
-            // vidnest (hianime mirror)
-            try {
-                val vr = app.get(
-                    "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio",
-                    headers = mapOf(
-                        "Accept" to "application/json, text/javascript, */*; q=0.01",
-                        "Referer" to "https://vidnest.fun/",
-                        "User-Agent" to ua,
-                    ),
-                    timeout = 20_000L
-                )
-                val json = vr.text
-                if (audio == "sub") dbg.add("vn ${vr.code} ${json.take(130)}")
-                val root = mapper.readTree(json)
-                if (root != null) {
-                    if (collectStreams(root, "Vidnest $tag", callback, "https://vidnest.fun/")) any = true
-                    if (audio == "sub") collectSubtitles(root, subtitleCallback)
-                }
-            } catch (e: Exception) {
-                dbg.add("vn EXC ${e.message?.take(80)}")
             }
         }
         return any

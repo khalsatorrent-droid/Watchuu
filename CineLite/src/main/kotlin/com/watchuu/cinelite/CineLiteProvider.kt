@@ -866,7 +866,9 @@ class CineLiteProvider : MainAPI() {
             timeout = 20_000L
         ).text
         val h = playHeaders("https://megaplay.buzz/")
-        for (c in parseCandidates(json)) {
+        val mc = parseCandidates(json)
+        if (mc.isEmpty()) dbg.add("megaplay $tag: ${describeJson(json)}")
+        for (c in mc) {
             emitStream("Megaplay $tag", c.url, c.quality, c.kind, h, "https://megaplay.buzz/", null, out)
         }
         if (audio == "sub") mapper.readTree(json)?.get("tracks")?.let { collectSubtitles(it, subtitleCallback) }
@@ -930,13 +932,29 @@ class CineLiteProvider : MainAPI() {
             timeout = 20_000L
         ).text
         val h = playHeaders("https://cdn.4animo.xyz/")
-        for (c in parseCandidates(json)) {
+        val ac = parseCandidates(json)
+        if (ac.isEmpty()) dbg.add("4animo $tag: ${describeJson(json)}")
+        for (c in ac) {
             emitStream("4Animo $tag", c.url, c.quality, c.kind, h, "https://cdn.4animo.xyz/", null, out)
         }
         if (audio == "sub") mapper.readTree(json)?.let { r ->
             (r.get("tracks") ?: r.get("subtitles"))?.let { collectSubtitles(it, subtitleCallback) }
         }
     }
+
+    private fun describeJson(body: String): String = try {
+        val r = mapper.readTree(body)
+        if (r == null || !r.isObject) body.take(100)
+        else "keys=" + r.fieldNames().asSequence().toList() + " sources=" +
+            (r.get("sources") ?: r.get("source"))?.toString().orEmpty().ifBlank { "-" }.take(160)
+    } catch (_: Exception) {
+        body.take(100)
+    }
+
+    private fun queryParam(qs: String, key: String): String? =
+        Regex("(?:^|&)" + key + "=([^&]*)").find(qs)?.groupValues?.get(1)?.let {
+            try { URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { it }
+        }
 
     private fun refererForHost(host: String): String = when {
         host.contains("megaplay") -> "https://megaplay.buzz/"
@@ -962,7 +980,31 @@ class CineLiteProvider : MainAPI() {
             delay(3000L)
             s.quiet()
             val seen = s.events.filter { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() }
-            dbg.add("player proxy responses=${seen.size}")
+            dbg.add("player proxy responses=${seen.size} playlists=${s.playlists.size}")
+
+            // playlists the player itself asked for:  .../hls.m3u8?url=<real master>&ref=..&origin=..&h={headers}
+            // (or .../hls.m3u8?t=<token> / proxy/hls?t=..). This is the decrypted, final address.
+            var pn = 0
+            for (pl in s.playlists.distinct()) {
+                val qs = pl.substringAfter("?", "")
+                val inner = queryParam(qs, "url")
+                pn++
+                if (inner != null && inner.startsWith("http")) {
+                    val ref = queryParam(qs, "ref") ?: "$embedUrl/"
+                    val hdr = HashMap(playHeaders(ref))
+                    queryParam(qs, "origin")?.let { hdr["Origin"] = it }
+                    queryParam(qs, "h")?.let { hs ->
+                        try {
+                            mapper.readTree(hs)?.fields()?.forEach { e -> if (e.value.isTextual) hdr[e.key] = e.value.asText() }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    val host = ref.substringAfter("://").substringBefore("/")
+                    emitStream(serverLabelForHost(host) + (if (pn > 1) " #$pn" else ""), inner, null, MK.HLS, hdr, ref, s, out)
+                } else {
+                    emitStream("Player" + (if (pn > 1) " #$pn" else ""), pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
+                }
+            }
             for (ev in seen) {
                 val dec = try {
                     URLDecoder.decode(ev.url, "UTF-8")
@@ -976,7 +1018,9 @@ class CineLiteProvider : MainAPI() {
                 val label = listOfNotNull(serverLabelForHost(host), audio).joinToString(" ")
                 val ref = refererForHost(host)
                 val h = playHeaders(ref)
-                for (c in parseCandidates(ev.body)) {
+                val pc = parseCandidates(ev.body)
+                if (pc.isEmpty()) dbg.add("$label: ${describeJson(ev.body)}")
+                for (c in pc) {
                     emitStream(label, c.url, c.quality, c.kind, h + (c.headers ?: emptyMap()), ref, s, out)
                 }
                 if (audio == "SUB") {

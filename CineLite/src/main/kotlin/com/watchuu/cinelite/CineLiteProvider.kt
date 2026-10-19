@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
@@ -298,80 +299,27 @@ class CineLiteProvider : MainAPI() {
                 additionalUrls = listOf(Regex("""(?i)\.m3u8""")),
                 userAgent = ua,
                 useOkhttp = false,
-                timeout = 25_000L
+                timeout = 20_000L
             )
             val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
             if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
                 found = true
                 callback.invoke(
-                    newExtractorLink(name, "$name HLS", m3u8, ExtractorLinkType.M3U8) {
+                    newExtractorLink(name, "$name HLS (Auto)", m3u8, ExtractorLinkType.M3U8) {
                         this.referer = "$embedUrl/"
                         this.headers = embedHeaders
                         this.quality = Qualities.Unknown.value
                     }
                 )
+                // also list each quality variant of the master playlist separately
+                try {
+                    M3u8Helper.generateM3u8(name, m3u8, "$embedUrl/", headers = embedHeaders)
+                        .forEach(callback)
+                } catch (_: Exception) {
+                }
             } else dbg.add("p1 -> ${m3u8.take(100)}")
         } catch (e: Exception) {
             dbg.add("p1 EXC ${e.message?.take(80)}")
-        }
-
-        // Phase 2: once the page has passed Turnstile, ask the API for every server from
-        // inside the page and hand the answers back through a beacon request whose url
-        // carries the data (the resolver intercepts it).
-        try {
-            val js = """
-                (function(){
-                  var P=${providers.joinToString(",", "[", "]") { "'$it'" }};
-                  var Q='$apiQuery';
-                  var out={};
-                  function send(){ try{ new Image().src='https://cs-probe.invalid/?d='+encodeURIComponent(JSON.stringify(out)); }catch(e){} }
-                  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-                  (async function(){
-                    var t0=Date.now(), ok=false;
-                    while(Date.now()-t0<20000){
-                      try{ var r=await fetch('https://api.cinelite.xyz/servers',{credentials:'include'});
-                           out.servers={s:r.status,b:(await r.text()).slice(0,500)};
-                           if(r.status==200){ ok=true; break; } }catch(e){ out.servers={s:0,b:String(e).slice(0,100)}; }
-                      await sleep(1500);
-                    }
-                    for(var i=0;i<P.length;i++){
-                      try{ var r2=await fetch('https://api.cinelite.xyz/provider/'+P[i]+'?'+Q,{credentials:'include'});
-                           out[P[i]]={s:r2.status,b:(await r2.text()).slice(0,6000)}; }
-                      catch(e){ out[P[i]]={s:0,b:String(e).slice(0,100)}; }
-                    }
-                    send();
-                  })();
-                })();
-            """.trimIndent()
-            val resolver2 = WebViewResolver(
-                interceptUrl = Regex("""cs-probe\.invalid"""),
-                additionalUrls = listOf(Regex("""cs-probe\.invalid""")),
-                script = js,
-                userAgent = ua,
-                useOkhttp = false,
-                timeout = 60_000L
-            )
-            val beacon = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver2).url
-            val payload = java.net.URLDecoder.decode(beacon.substringAfter("?d=", ""), "UTF-8")
-            if (payload.isBlank()) {
-                dbg.add("p2 no beacon: ${beacon.take(80)}")
-            } else {
-                val root = mapper.readTree(payload)
-                root.fields().forEach { (key, v) ->
-                    val status = v.get("s")?.asInt() ?: 0
-                    val body = v.get("b")?.asText() ?: ""
-                    var got = false
-                    if (key != "servers" && status in 200..299) {
-                        try {
-                            got = collectStreams(mapper.readTree(body), key, callback)
-                        } catch (_: Exception) {
-                        }
-                    }
-                    if (got) found = true else dbg.add("$key $status ${body.take(150)}")
-                }
-            }
-        } catch (e: Exception) {
-            dbg.add("p2 EXC ${e.message?.take(100)}")
         }
 
         if (found) return true

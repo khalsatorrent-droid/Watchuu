@@ -377,7 +377,7 @@ class CineLiteProvider : MainAPI() {
         return any
     }
 
-    private fun collectSubtitles(node: JsonNode?, cb: (SubtitleFile) -> Unit) {
+    private suspend fun collectSubtitles(node: JsonNode?, cb: (SubtitleFile) -> Unit) {
         if (node == null) return
         if (node.isArray) {
             node.forEach { collectSubtitles(it, cb) }

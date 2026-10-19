@@ -287,9 +287,11 @@ class CineLiteProvider : MainAPI() {
         }
 
         // The provider API answers 403 TURNSTILE_REQUIRED without a solved Cloudflare
-        // Turnstile check, so go straight to the real watch page in a WebView (which
-        // solves it) and capture the playlist request its player makes.
+        // Turnstile check, so everything goes through a WebView on the real watch page.
+        var found = false
         val dbg = mutableListOf<String>()
+
+        // Phase 1: capture the first playlist the player requests (known to work).
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(?i)\.m3u8"""),
@@ -299,8 +301,8 @@ class CineLiteProvider : MainAPI() {
                 timeout = 25_000L
             )
             val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
-            dbg.add("webview -> ${m3u8.take(140)}")
             if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
+                found = true
                 callback.invoke(
                     newExtractorLink(name, "$name HLS", m3u8, ExtractorLinkType.M3U8) {
                         this.referer = "$embedUrl/"
@@ -308,16 +310,76 @@ class CineLiteProvider : MainAPI() {
                         this.quality = Qualities.Unknown.value
                     }
                 )
-                return true
+            } else dbg.add("p1 -> ${m3u8.take(100)}")
+        } catch (e: Exception) {
+            dbg.add("p1 EXC ${e.message?.take(80)}")
+        }
+
+        // Phase 2: once the page has passed Turnstile, ask the API for every server from
+        // inside the page and hand the answers back through a beacon request whose url
+        // carries the data (the resolver intercepts it).
+        try {
+            val js = """
+                (function(){
+                  var P=${providers.joinToString(",", "[", "]") { "'$it'" }};
+                  var Q='$apiQuery';
+                  var out={};
+                  function send(){ try{ new Image().src='https://cs-probe.invalid/?d='+encodeURIComponent(JSON.stringify(out)); }catch(e){} }
+                  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+                  (async function(){
+                    var t0=Date.now(), ok=false;
+                    while(Date.now()-t0<20000){
+                      try{ var r=await fetch('https://api.cinelite.xyz/servers',{credentials:'include'});
+                           out.servers={s:r.status,b:(await r.text()).slice(0,500)};
+                           if(r.status==200){ ok=true; break; } }catch(e){ out.servers={s:0,b:String(e).slice(0,100)}; }
+                      await sleep(1500);
+                    }
+                    for(var i=0;i<P.length;i++){
+                      try{ var r2=await fetch('https://api.cinelite.xyz/provider/'+P[i]+'?'+Q,{credentials:'include'});
+                           out[P[i]]={s:r2.status,b:(await r2.text()).slice(0,6000)}; }
+                      catch(e){ out[P[i]]={s:0,b:String(e).slice(0,100)}; }
+                    }
+                    send();
+                  })();
+                })();
+            """.trimIndent()
+            val resolver2 = WebViewResolver(
+                interceptUrl = Regex("""cs-probe\.invalid"""),
+                additionalUrls = listOf(Regex("""cs-probe\.invalid""")),
+                script = js,
+                userAgent = ua,
+                useOkhttp = false,
+                timeout = 60_000L
+            )
+            val beacon = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver2).url
+            val payload = java.net.URLDecoder.decode(beacon.substringAfter("?d=", ""), "UTF-8")
+            if (payload.isBlank()) {
+                dbg.add("p2 no beacon: ${beacon.take(80)}")
+            } else {
+                val root = mapper.readTree(payload)
+                root.fields().forEach { (key, v) ->
+                    val status = v.get("s")?.asInt() ?: 0
+                    val body = v.get("b")?.asText() ?: ""
+                    var got = false
+                    if (key != "servers" && status in 200..299) {
+                        try {
+                            got = collectStreams(mapper.readTree(body), key, callback)
+                        } catch (_: Exception) {
+                        }
+                    }
+                    if (got) found = true else dbg.add("$key $status ${body.take(150)}")
+                }
             }
         } catch (e: Exception) {
-            dbg.add("webview EXC ${e.message?.take(100)}")
+            dbg.add("p2 EXC ${e.message?.take(100)}")
         }
+
+        if (found) return true
 
         // TEMPORARY diagnostics
         dbg.forEachIndexed { i, line ->
             callback.invoke(
-                newExtractorLink(name, "DBG${i + 1} $pageUrl $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
+                newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
                     this.quality = Qualities.Unknown.value
                 }
             )

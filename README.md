@@ -19,7 +19,7 @@
 **2. Paste the repository link:**
 
 ```
-https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/plugins.json
+https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 ```
 
 > Prefer a shortcode? Create one for the link above at [cutt.ly](https://cutt.ly) and enter it in the same box, then list it here: `SHORTCODE_HERE`

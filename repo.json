@@ -1,7 +1,9 @@
 {
-  "name": "Watchuu",
-  "description": "Cloudstream extensions by khalsatorrent-droid",
+  "name": "Watchuu Extensions",
+  "description": "Movies and TV Providers (CineLite)",
   "manifestVersion": 1,
+  "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+  "iconUrl": "https://cinelite.xyz/cinelite-logo.png",
   "pluginLists": [
     "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/plugins.json"
   ]

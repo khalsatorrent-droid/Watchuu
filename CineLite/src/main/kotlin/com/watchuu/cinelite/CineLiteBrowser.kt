@@ -132,15 +132,9 @@ object CineLiteBrowser {
         return l.contains(".m3u8") || l.contains("/proxy/hls")
     }
 
-    private val heavyExt = listOf(
-        ".ts", ".m4s", ".mp4", ".m4v", ".webm", ".mkv", ".aac", ".mp3",
-        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico",
-        ".woff", ".woff2", ".ttf", ".otf", ".css"
-    )
-    private val heavyHosts = listOf(
-        "google-analytics.com", "googletagmanager.com", "gstatic.com", "googleapis.com",
-        "flagsapi.com", "cloudflareinsights.com", "image.tmdb.org", "theintrodb.org"
-    )
+    // Only actual media is blocked (video/audio chunks, hidden behind fake names too), so the
+    // hidden player can never produce sound. Everything else loads exactly as in a normal page.
+    private val mediaExt = listOf(".ts", ".m4s", ".mp4", ".m4v", ".webm", ".mkv", ".aac", ".mp3", ".m4a", ".ogg")
 
     private fun allowedWhenStrict(u: String): Boolean {
         val l = u.lowercase()
@@ -151,13 +145,10 @@ object CineLiteBrowser {
 
     private fun isHeavy(u: String): Boolean {
         val l = u.lowercase()
-        val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
-        if (host.endsWith("cloudflare.com")) return false // Turnstile needs all of its own files
-        if (heavyHosts.any { host.endsWith(it) }) return true
         if (isPlaylistUrl(l)) return false
         val path = l.substringBefore("?").substringBefore("#")
-        if (heavyExt.any { path.endsWith(it) }) return true
-        // video segments hidden behind fake names (…/pipe/…/00001.png?v=.ts, /vault/segment.ts)
+        if (mediaExt.any { path.endsWith(it) }) return true
+        // segments hidden behind fake names (.../pipe/.../00001.png?v=.ts, /vault/segment.ts)
         return l.contains("/pipe/") || l.contains("segment") || l.contains("v=.ts")
     }
 
@@ -173,8 +164,6 @@ object CineLiteBrowser {
                     domStorageEnabled = true
                     userAgentString = userAgent
                     mediaPlaybackRequiresUserGesture = true
-                    loadsImagesAutomatically = false
-                    blockNetworkImage = true
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
                 CookieManager.getInstance().setAcceptCookie(true)

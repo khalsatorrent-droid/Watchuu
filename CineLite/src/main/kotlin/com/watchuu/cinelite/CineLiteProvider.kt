@@ -33,7 +33,7 @@ class CineLiteProvider : MainAPI() {
     override var name = "CineLite"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     private val embedUrl = "https://embed.cinelite.xyz"
     private val apiUrl = "https://api.cinelite.xyz"
@@ -73,6 +73,8 @@ class CineLiteProvider : MainAPI() {
         @JsonProperty("poster_path") val posterPath: String? = null,
         @JsonProperty("release_date") val releaseDate: String? = null,
         @JsonProperty("first_air_date") val firstAirDate: String? = null,
+        @JsonProperty("genre_ids") val genreIds: List<Int>? = null,
+        @JsonProperty("original_language") val originalLanguage: String? = null,
     )
 
     data class TmdbResp(
@@ -101,6 +103,7 @@ class CineLiteProvider : MainAPI() {
         @JsonProperty("vote_average") val voteAverage: Double? = null,
         val genres: List<TmdbGenre>? = null,
         val status: String? = null,
+        @JsonProperty("original_language") val originalLanguage: String? = null,
         val seasons: List<TmdbSeason>? = null,
     )
 
@@ -141,8 +144,10 @@ class CineLiteProvider : MainAPI() {
         if (t.isBlank()) return null
         val poster = posterPath?.let { tmdbImg + it }
         val year = (releaseDate ?: firstAirDate)?.take(4)?.toIntOrNull()
-        val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
-        return newMovieSearchResponse(t, "$mainUrl/$type|$id|$t", tvType) {
+        val isAnime = type == "tv" && (genreIds ?: emptyList()).contains(16) && originalLanguage == "ja"
+        val tvType = if (type == "movie") TvType.Movie else if (isAnime) TvType.Anime else TvType.TvSeries
+        val token = if (isAnime) "atv" else type
+        return newMovieSearchResponse(t, "$mainUrl/$token|$id|$t", tvType) {
             this.posterUrl = poster
             this.year = year
         }
@@ -185,7 +190,11 @@ class CineLiteProvider : MainAPI() {
         val fallbackTitle = parts.drop(2).joinToString("|")
 
         return try {
-            val detail = parseJson<TmdbDetail>(tmdbGet("/$type/$tmdbId"))
+            val tmdbType = if (type == "atv") "tv" else type
+            val detail = parseJson<TmdbDetail>(tmdbGet("/$tmdbType/$tmdbId"))
+            val isAnime = type == "atv" ||
+                (tmdbType == "tv" && detail.originalLanguage == "ja" && (detail.genres?.any { it.id == 16 } == true))
+            val epToken = if (isAnime) "atv" else "tv"
             val title = detail.title ?: detail.name ?: fallbackTitle
             val year = (detail.releaseDate ?: detail.firstAirDate)?.take(4)?.toIntOrNull()
             val poster = detail.posterPath?.let { tmdbImg + it }
@@ -213,7 +222,7 @@ class CineLiteProvider : MainAPI() {
                                 tmdbGet("/tv/$tmdbId/season/${season.seasonNumber}")
                             )
                             sd.episodes?.forEach { ep ->
-                                val epData = "$mainUrl/tv|$tmdbId|${ep.seasonNumber}|${ep.episodeNumber}|$title"
+                                val epData = "$mainUrl/$epToken|$tmdbId|${ep.seasonNumber}|${ep.episodeNumber}|$title"
                                 episodes.add(
                                     newEpisode(epData) {
                                         this.name = ep.name
@@ -229,7 +238,7 @@ class CineLiteProvider : MainAPI() {
                         }
                     }
 
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                newTvSeriesLoadResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries, episodes) {
                     this.posterUrl = poster
                     this.backgroundPosterUrl = bg
                     this.year = year
@@ -291,6 +300,22 @@ class CineLiteProvider : MainAPI() {
         // Turnstile check, so everything goes through a WebView on the real watch page.
         var found = false
         val dbg = mutableListOf<String>()
+        var pageUrlFinal = pageUrl
+
+        // Anime: the player calls public sources (megaplay / vidnest) keyed by the AniList id,
+        // so no Turnstile is involved and several sub/dub servers can be listed.
+        if (type == "atv") {
+            try {
+                val aid = findAniListId(title, season ?: 1)
+                if (aid != null) {
+                    found = animeSources(aid, episode ?: 1, subtitleCallback, callback)
+                    pageUrlFinal = "$mainUrl/watch/anime/$aid/${episode ?: 1}"
+                } else dbg.add("anilist: no match for $title")
+            } catch (e: Exception) {
+                dbg.add("anime EXC ${e.message?.take(80)}")
+            }
+            if (found) return true
+        }
 
         // Phase 1: capture the first playlist the player requests (known to work).
         try {
@@ -301,7 +326,7 @@ class CineLiteProvider : MainAPI() {
                 useOkhttp = false,
                 timeout = 20_000L
             )
-            val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
+            val m3u8 = app.get(pageUrlFinal, referer = "$mainUrl/", interceptor = resolver).url
             if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
                 found = true
                 callback.invoke(
@@ -335,12 +360,97 @@ class CineLiteProvider : MainAPI() {
         return true
     }
 
+    private val anilistCache = HashMap<String, Int?>()
+
+    /** Best-effort TMDB title -> AniList id (AniList lists every season as its own entry). */
+    private suspend fun findAniListId(title: String, season: Int): Int? {
+        val search = if (season > 1) "$title Season $season" else title
+        anilistCache[search]?.let { return it }
+        val query = "query(\$s:String){Page(perPage:5){media(search:\$s,type:ANIME,format_in:[TV,TV_SHORT],sort:SEARCH_MATCH){id}}}"
+        val res = app.post(
+            "https://graphql.anilist.co",
+            headers = mapOf("Accept" to "application/json", "User-Agent" to ua),
+            json = mapOf("query" to query, "variables" to mapOf("s" to search)),
+            timeout = 20_000L
+        )
+        val id = mapper.readTree(res.text)?.get("data")?.get("Page")?.get("media")?.get(0)?.get("id")?.asInt()
+        anilistCache[search] = id
+        return id
+    }
+
+    private suspend fun animeSources(
+        aid: Int,
+        ep: Int,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var any = false
+        for (audio in listOf("sub", "dub")) {
+            val tag = audio.uppercase()
+
+            // megaplay: embed page carries a data-id, getSources returns the playlist
+            try {
+                val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
+                val html = app.get(
+                    page,
+                    headers = mapOf("Referer" to "https://megaplay.buzz/", "User-Agent" to ua),
+                    timeout = 20_000L
+                ).text
+                val dataId = Regex("""data-id=["'](\d+)["']""").find(html)?.groupValues?.get(1)
+                if (dataId != null) {
+                    val json = app.get(
+                        "https://megaplay.buzz/stream/getSources?id=$dataId&id=$dataId",
+                        headers = mapOf(
+                            "Accept" to "application/json, text/javascript, */*; q=0.01",
+                            "Referer" to page,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "User-Agent" to ua,
+                        ),
+                        timeout = 20_000L
+                    ).text
+                    val root = mapper.readTree(json)
+                    if (root != null) {
+                        if (collectStreams(root, "Megaplay $tag", callback, "https://megaplay.buzz/")) any = true
+                        if (audio == "sub") collectSubtitles(root.get("tracks"), subtitleCallback)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+
+            // vidnest (hianime mirror)
+            try {
+                val json = app.get(
+                    "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio",
+                    headers = mapOf(
+                        "Accept" to "application/json, text/javascript, */*; q=0.01",
+                        "Referer" to "https://vidnest.fun/",
+                        "User-Agent" to ua,
+                    ),
+                    timeout = 20_000L
+                ).text
+                val root = mapper.readTree(json)
+                if (root != null) {
+                    if (collectStreams(root, "Vidnest $tag", callback, "https://vidnest.fun/")) any = true
+                    if (audio == "sub") collectSubtitles(root, subtitleCallback)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return any
+    }
+
     /** Walks any JSON shape and emits every http(s) .m3u8/.mp4 string it finds. */
     private suspend fun collectStreams(
         node: JsonNode,
         provider: String,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        referer: String = "$embedUrl/"
     ): Boolean {
+        val linkHeaders = mapOf(
+            "Referer" to referer,
+            "Origin" to referer.trimEnd('/'),
+            "User-Agent" to ua,
+        )
         var any = false
         val seen = HashSet<String>()
         suspend fun walk(n: JsonNode) {
@@ -359,8 +469,8 @@ class CineLiteProvider : MainAPI() {
                                     v,
                                     if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = "$embedUrl/"
-                                    this.headers = embedHeaders
+                                    this.referer = referer
+                                    this.headers = linkHeaders
                                     this.quality = Qualities.Unknown.value
                                 }
                             )
@@ -380,6 +490,7 @@ class CineLiteProvider : MainAPI() {
         if (node.isArray) {
             node.forEach { collectSubtitles(it, cb) }
         } else if (node.isObject) {
+            if (node.get("kind")?.asText().equals("thumbnails", true)) return
             val url = listOf("url", "file", "src").firstNotNullOfOrNull { node.get(it)?.asText()?.takeIf { s -> s.startsWith("http") } }
             if (url != null) {
                 val lang = listOf("lang", "language", "label", "name")

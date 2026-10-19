@@ -1,4 +1,4 @@
-version = 4
+version = 5
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -10,6 +10,6 @@ cloudstream {
     authors = listOf("khalsatorrent-droid")
 
     status = 1
-    tvTypes = listOf("Movie", "TvSeries")
+    tvTypes = listOf("Movie", "TvSeries", "Anime")
     iconUrl = "https://cinelite.xyz/cinelite-logo.png"
 }

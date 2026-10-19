@@ -1,0 +1,8 @@
+{
+  "name": "Watchuu",
+  "description": "Cloudstream extensions by khalsatorrent-droid",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/plugins.json"
+  ]
+}

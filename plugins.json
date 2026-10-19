@@ -1,0 +1,129 @@
+[
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/CineLite.cs3",
+        "status": 1,
+        "version": 23,
+        "name": "CineLite",
+        "internalName": "CineLite",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies and TV shows from CineLite (cinelite.xyz) - TMDB catalog with HLS streams",
+        "fileSize": 108464,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://cinelite.xyz/cinelite-logo.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-c7364b3a57ea7eeb8656e3d9075d5b1d1673747baa33cd15ed59036bb6518bf2"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/DashReels.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "DashReels",
+        "internalName": "DashReels",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Short dramas from the DashReels app (Dashtoon) - free episodes, with subtitles",
+        "fileSize": 31332,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=dashreels.com&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-d71bfb39be2ed496d240551d4467fc99ad2c1cac830e22285f70ed955f8bb528"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/KiligDrama.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "KiligDrama",
+        "internalName": "KiligDrama",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Vertical short dramas from KiligDrama (kiligdrama.com) - ReelShort, DramaBox, ShortMax, GoodShort and more, free in HD",
+        "fileSize": 78892,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=kiligdrama.com&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-2a5be4ca0ab1934fd1a06fc689e52f05fc1101ef38281a87447f5c698446a41c"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Monochrome.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "Monochrome",
+        "internalName": "Monochrome",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Lossless music from Monochrome (monochrome.st) - search songs, albums and artists",
+        "fileSize": 25731,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Music"
+        ],
+        "iconUrl": "https://monochrome.st/assets/appicon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-71307f9e04b61eabc6ca65c97687159b89e488d46e4ba97047b31d596edadda9"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/NartoDrama.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "NartoDrama",
+        "internalName": "NartoDrama",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Short dramas, movies and anime from Narto Drama (narto-drama.com) - DramaBox, ReelShort, ShortMax and 50+ providers",
+        "fileSize": 77617,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "iconUrl": "https://narto-drama.com/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-fc489bcc339c6a88ce88a66b5cf2103e08a1f197983eff20c7ccd407c4d0bbab"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/RedFlix.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "RedFlix",
+        "internalName": "RedFlix",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies, TV and anime from RedFlix (redflix.one) - TMDB catalog, 13 embed servers incl. Hindi",
+        "fileSize": 51486,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=redflix.one&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-34df83feb495f378504b6166961bc96ce09e80302ae52cd93b2e73489b4a373d"
+    }
+]

@@ -393,6 +393,7 @@ class CineLiteProvider : MainAPI() {
                 dbg.add("embed#$idx ready=$ready events=${s.events.size} verify=${s.events.firstOrNull { it.kind == "verify" }?.status}")
                 if (!ready) continue
                 delay(1500L) // let /servers land
+                s.quiet() // the player is not needed any more: silence it, block its other traffic
 
                 // same query the player used (works for tv even though the pattern is inferred)
                 val query = s.events.firstOrNull { it.kind == "provider" }
@@ -958,6 +959,7 @@ class CineLiteProvider : MainAPI() {
         try {
             s.waitFor(25_000L) { s.events.count { it.kind == "proxy" && it.status in 200..299 } >= 4 }
             delay(3000L)
+            s.quiet()
             val seen = s.events.filter { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() }
             dbg.add("player proxy responses=${seen.size}")
             for (ev in seen) {

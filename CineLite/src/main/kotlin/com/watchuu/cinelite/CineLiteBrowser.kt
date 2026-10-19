@@ -51,6 +51,22 @@ object CineLiteBrowser {
         @Volatile
         var closed = false
 
+        /** Once the data is in, the page only needs to reach the api and small playlists. */
+        @Volatile
+        var strict = false
+
+        /** Stop the player for good: silence/pause all media and cut every non-essential request. */
+        suspend fun quiet() {
+            strict = true
+            if (closed) return
+            try {
+                withContext(Dispatchers.Main) {
+                    webView.evaluateJavascript("try{window.__cineQuiet&&window.__cineQuiet();}catch(e){}", null)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
         fun has(kind: String): Boolean = events.any { it.kind == kind }
 
         suspend fun waitFor(timeoutMs: Long, cond: () -> Boolean): Boolean {
@@ -126,6 +142,13 @@ object CineLiteBrowser {
         "flagsapi.com", "cloudflareinsights.com", "image.tmdb.org", "theintrodb.org"
     )
 
+    private fun allowedWhenStrict(u: String): Boolean {
+        val l = u.lowercase()
+        val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
+        return host == "api.cinelite.xyz" || host.endsWith("cloudflare.com") ||
+            isPlaylistUrl(l) || l.contains("/vault/proxy?")
+    }
+
     private fun isHeavy(u: String): Boolean {
         val l = u.lowercase()
         val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
@@ -170,7 +193,9 @@ object CineLiteBrowser {
                         if (isPlaylistUrl(u)) session.playlists.add(u)
                         // only the page scripts, the Turnstile check, the api calls and the (small)
                         // playlists are needed; everything else is answered empty to save bandwidth
-                        if (isHeavy(u)) return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        if (isHeavy(u) || (session.strict && !allowedWhenStrict(u))) {
+                            return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        }
                         return null
                     }
                 }
@@ -232,6 +257,44 @@ object CineLiteBrowser {
     HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };
     HTMLMediaElement.prototype.load = function(){};
   } catch(e){}
+
+  // never make sound: autoplay attributes do not call play(), so also force every media
+  // element muted / volume 0 / paused, at creation and on a timer
+  try {
+    ['volume', 'muted'].forEach(function(p){
+      var d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, p);
+      if (d && d.set) {
+        Object.defineProperty(HTMLMediaElement.prototype, p, {
+          get: d.get,
+          set: function(v){ d.set.call(this, p === 'volume' ? 0 : true); },
+          configurable: true
+        });
+      }
+    });
+    var ce = document.createElement;
+    document.createElement = function(t){
+      var el = ce.apply(document, arguments);
+      try {
+        var n = String(t).toLowerCase();
+        if (n === 'video' || n === 'audio') { el.muted = true; el.volume = 0; el.autoplay = false; }
+      } catch(e){}
+      return el;
+    };
+  } catch(e){}
+  function hush(){
+    try {
+      var m = document.querySelectorAll('video,audio');
+      for (var i = 0; i < m.length; i++) {
+        var v = m[i];
+        try { v.autoplay = false; v.muted = true; v.volume = 0; if (!v.paused) v.pause(); } catch(e){}
+      }
+    } catch(e){}
+  }
+  setInterval(hush, 200);
+  window.__cineQuiet = function(){
+    hush();
+    try { if (window.AudioContext) { AudioContext.prototype.resume = function(){ return Promise.resolve(); }; } } catch(e){}
+  };
 
   var origFetch = window.fetch;
   window.fetch = function(input, init){

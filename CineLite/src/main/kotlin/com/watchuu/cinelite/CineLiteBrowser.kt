@@ -11,6 +11,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -115,6 +116,28 @@ object CineLiteBrowser {
         return l.contains(".m3u8") || l.contains("/proxy/hls")
     }
 
+    private val heavyExt = listOf(
+        ".ts", ".m4s", ".mp4", ".m4v", ".webm", ".mkv", ".aac", ".mp3",
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico",
+        ".woff", ".woff2", ".ttf", ".otf", ".css"
+    )
+    private val heavyHosts = listOf(
+        "google-analytics.com", "googletagmanager.com", "gstatic.com", "googleapis.com",
+        "flagsapi.com", "cloudflareinsights.com", "image.tmdb.org", "theintrodb.org"
+    )
+
+    private fun isHeavy(u: String): Boolean {
+        val l = u.lowercase()
+        val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
+        if (host.endsWith("cloudflare.com")) return false // Turnstile needs all of its own files
+        if (heavyHosts.any { host.endsWith(it) }) return true
+        if (isPlaylistUrl(l)) return false
+        val path = l.substringBefore("?").substringBefore("#")
+        if (heavyExt.any { path.endsWith(it) }) return true
+        // video segments hidden behind fake names (…/pipe/…/00001.png?v=.ts, /vault/segment.ts)
+        return l.contains("/pipe/") || l.contains("segment") || l.contains("v=.ts")
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun open(url: String, userAgent: String, referer: String): Session? {
         val ctx = appContext ?: return null
@@ -126,7 +149,9 @@ object CineLiteBrowser {
                     javaScriptEnabled = true
                     domStorageEnabled = true
                     userAgentString = userAgent
-                    mediaPlaybackRequiresUserGesture = false
+                    mediaPlaybackRequiresUserGesture = true
+                    loadsImagesAutomatically = false
+                    blockNetworkImage = true
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
                 CookieManager.getInstance().setAcceptCookie(true)
@@ -141,8 +166,11 @@ object CineLiteBrowser {
                         view: WebView?,
                         request: WebResourceRequest?
                     ): WebResourceResponse? {
-                        val u = request?.url?.toString()
-                        if (u != null && isPlaylistUrl(u)) session.playlists.add(u)
+                        val u = request?.url?.toString() ?: return null
+                        if (isPlaylistUrl(u)) session.playlists.add(u)
+                        // only the page scripts, the Turnstile check, the api calls and the (small)
+                        // playlists are needed; everything else is answered empty to save bandwidth
+                        if (isHeavy(u)) return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                         return null
                     }
                 }
@@ -198,6 +226,12 @@ object CineLiteBrowser {
     window.__cineTmpl = { headers: headers || {}, credentials: creds || 'same-origin' };
     emit('template', url, JSON.stringify(window.__cineTmpl), 0);
   }
+
+  // nothing here is ever watched, never start playback
+  try {
+    HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };
+    HTMLMediaElement.prototype.load = function(){};
+  } catch(e){}
 
   var origFetch = window.fetch;
   window.fetch = function(input, init){

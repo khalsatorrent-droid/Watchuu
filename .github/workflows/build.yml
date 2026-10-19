@@ -47,7 +47,15 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          ./gradlew make makePluginsJson
+          set +e
+          ./gradlew make makePluginsJson --console=plain --stacktrace 2>&1 | tee $GITHUB_WORKSPACE/gradle.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != "0" ]; then
+            msg=$(grep -E "^e: |What went wrong|Could not|FAILED|error:|Caused by|Execution failed" -A3 $GITHUB_WORKSPACE/gradle.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Gradle build failed::${msg}"
+            exit $rc
+          fi
+          set -e
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds/ || echo "No .cs3 files found"
           cp build/plugins.json $GITHUB_WORKSPACE/builds/ || echo "No plugins.json found"
 

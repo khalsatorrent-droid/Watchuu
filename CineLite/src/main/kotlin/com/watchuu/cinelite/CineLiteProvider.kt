@@ -273,7 +273,7 @@ class CineLiteProvider : MainAPI() {
         if (type == "movie") {
             season = null; episode = null
             title = parts.drop(2).joinToString("|")
-            pageUrl = "$embedUrl/$tmdbId"
+            pageUrl = "$mainUrl/watch/$tmdbId"
             apiQuery = "id=$tmdbId"
         } else {
             season = parts.getOrNull(2)?.toIntOrNull()
@@ -281,58 +281,24 @@ class CineLiteProvider : MainAPI() {
             if (season == null || episode == null) return false
             title = parts.drop(4).joinToString("|")
             // NOTE: the log only contains a movie embed (/{id}) and an anime embed
-            // (/anime/{id}/{ep}); the TV pattern below is inferred, not observed.
-            pageUrl = "$embedUrl/tv/$tmdbId/$season/$episode"
+            // (/anime/{id}/{ep}) and watch pages /watch/{id} and /watch/anime/{id}/{ep}; the TV pattern below is inferred, not observed.
+            pageUrl = "$mainUrl/watch/tv/$tmdbId/$season/$episode"
             apiQuery = "id=$tmdbId&season=$season&episode=$episode"
         }
 
-        var found = false
+        // The provider API answers 403 TURNSTILE_REQUIRED without a solved Cloudflare
+        // Turnstile check, so go straight to the real watch page in a WebView (which
+        // solves it) and capture the playlist request its player makes.
         val dbg = mutableListOf<String>()
-
-        // 1) provider API (best effort - may be rejected without a Turnstile session)
-        val apiHeaders = embedHeaders + mapOf("Accept" to "application/json, text/plain, */*")
-        try {
-            val r = app.get("$apiUrl/servers", headers = apiHeaders, timeout = 15_000L)
-            dbg.add("servers ${r.code}: ${r.text.take(120)}")
-        } catch (e: Exception) {
-            dbg.add("servers EXC ${e.message?.take(80)}")
-        }
-        for (p in providers) {
-            try {
-                val res = app.get("$apiUrl/provider/$p?$apiQuery", headers = apiHeaders, timeout = 20_000L)
-                dbg.add("$p ${res.code}: ${res.text.take(160)}")
-                if (res.code !in 200..299) continue
-                val root = mapper.readTree(res.text) ?: continue
-                found = collectStreams(root, p, callback) || found
-            } catch (e: Exception) {
-                dbg.add("$p EXC ${e.message?.take(80)}")
-            }
-        }
-
-        // subtitles endpoint seen in the log: /subtitles?id=&title=&year=
-        try {
-            val t = URLEncoder.encode(title, "UTF-8")
-            val res = app.get("$apiUrl/subtitles?$apiQuery&title=$t", headers = apiHeaders, timeout = 15_000L)
-            if (res.code in 200..299) collectSubtitles(mapper.readTree(res.text), subtitleCallback)
-        } catch (_: Exception) {
-        }
-
-        if (found) return true
-
-        // 2) WebView: let the real player solve Turnstile and capture the playlist request
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(?i)\.m3u8"""),
                 additionalUrls = listOf(Regex("""(?i)\.m3u8""")),
-                script = """document.querySelector('button,[role="button"],.jw-icon-display,.vds-play-button')?.click();""",
+                userAgent = ua,
                 useOkhttp = false,
-                timeout = 40_000L
+                timeout = 25_000L
             )
-            val m3u8 = app.get(
-                "$pageUrl?t=0&reset=1&nosuggestionui=true&color=e50914&quality=1080p",
-                referer = "$mainUrl/",
-                interceptor = resolver
-            ).url
+            val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
             dbg.add("webview -> ${m3u8.take(140)}")
             if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
                 callback.invoke(
@@ -348,10 +314,10 @@ class CineLiteProvider : MainAPI() {
             dbg.add("webview EXC ${e.message?.take(100)}")
         }
 
-        // TEMPORARY diagnostics: show what each step returned as fake "links"
+        // TEMPORARY diagnostics
         dbg.forEachIndexed { i, line ->
             callback.invoke(
-                newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
+                newExtractorLink(name, "DBG${i + 1} $pageUrl $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
                     this.quality = Qualities.Unknown.value
                 }
             )

@@ -308,7 +308,8 @@ class CineLiteProvider : MainAPI() {
             try {
                 val aid = findAniListId(title, season ?: 1)
                 if (aid != null) {
-                    found = animeSources(aid, episode ?: 1, subtitleCallback, callback)
+                    dbg.add("anilist id=$aid ep=${episode ?: 1}")
+                    found = animeSources(aid, episode ?: 1, subtitleCallback, callback, dbg)
                     pageUrlFinal = "$mainUrl/watch/anime/$aid/${episode ?: 1}"
                 } else dbg.add("anilist: no match for $title")
             } catch (e: Exception) {
@@ -347,9 +348,9 @@ class CineLiteProvider : MainAPI() {
             dbg.add("p1 EXC ${e.message?.take(80)}")
         }
 
-        if (found) return true
+        if (found && type != "atv") return true
 
-        // TEMPORARY diagnostics
+        // TEMPORARY diagnostics (always shown for anime while debugging)
         dbg.forEachIndexed { i, line ->
             callback.invoke(
                 newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
@@ -382,7 +383,8 @@ class CineLiteProvider : MainAPI() {
         aid: Int,
         ep: Int,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        dbg: MutableList<String>
     ): Boolean {
         var any = false
         for (audio in listOf("sub", "dub")) {
@@ -391,14 +393,16 @@ class CineLiteProvider : MainAPI() {
             // megaplay: embed page carries a data-id, getSources returns the playlist
             try {
                 val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
-                val html = app.get(
+                val pr = app.get(
                     page,
                     headers = mapOf("Referer" to "https://megaplay.buzz/", "User-Agent" to ua),
                     timeout = 20_000L
-                ).text
+                )
+                val html = pr.text
                 val dataId = Regex("""data-id=["'](\d+)["']""").find(html)?.groupValues?.get(1)
+                if (audio == "sub") dbg.add("mp page ${pr.code} len=${html.length} id=$dataId ${if (dataId == null) html.take(80) else ""}")
                 if (dataId != null) {
-                    val json = app.get(
+                    val gr = app.get(
                         "https://megaplay.buzz/stream/getSources?id=$dataId&id=$dataId",
                         headers = mapOf(
                             "Accept" to "application/json, text/javascript, */*; q=0.01",
@@ -407,19 +411,22 @@ class CineLiteProvider : MainAPI() {
                             "User-Agent" to ua,
                         ),
                         timeout = 20_000L
-                    ).text
+                    )
+                    val json = gr.text
+                    if (audio == "sub") dbg.add("mp src ${gr.code} ${json.take(130)}")
                     val root = mapper.readTree(json)
                     if (root != null) {
                         if (collectStreams(root, "Megaplay $tag", callback, "https://megaplay.buzz/")) any = true
                         if (audio == "sub") collectSubtitles(root.get("tracks"), subtitleCallback)
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                dbg.add("mp EXC ${e.message?.take(80)}")
             }
 
             // vidnest (hianime mirror)
             try {
-                val json = app.get(
+                val vr = app.get(
                     "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio",
                     headers = mapOf(
                         "Accept" to "application/json, text/javascript, */*; q=0.01",
@@ -427,13 +434,16 @@ class CineLiteProvider : MainAPI() {
                         "User-Agent" to ua,
                     ),
                     timeout = 20_000L
-                ).text
+                )
+                val json = vr.text
+                if (audio == "sub") dbg.add("vn ${vr.code} ${json.take(130)}")
                 val root = mapper.readTree(json)
                 if (root != null) {
                     if (collectStreams(root, "Vidnest $tag", callback, "https://vidnest.fun/")) any = true
                     if (audio == "sub") collectSubtitles(root, subtitleCallback)
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                dbg.add("vn EXC ${e.message?.take(80)}")
             }
         }
         return any

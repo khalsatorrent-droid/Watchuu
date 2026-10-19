@@ -334,17 +334,8 @@ class CineLiteProvider : MainAPI() {
             }
         }
 
-        if (!found || dbg.isNotEmpty()) {
-            // something failed: show what happened so the next screenshot tells us why
-            dbg.forEachIndexed { i, line ->
-                callback.invoke(
-                    newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            }
-        }
-        return true
+        // diagnostics are kept in dbg for debugging but never shown as fake links
+        return found
     }
 
     // ---------------------------------------------------------- movies / tv shows

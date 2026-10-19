@@ -8,10 +8,15 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URLDecoder
 import java.net.URLEncoder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 
 /**
  * CineLite (cinelite.xyz) - a TMDB front-end with an embed player.
@@ -23,10 +28,14 @@ import java.net.URLEncoder
  *                                 (gated by a Cloudflare Turnstile check on the site)
  *  - streams                    : HLS, served through a rotating proxy host
  *
- * The log has no response bodies, so link resolution is defensive:
- *  1. try the provider API directly and scan the JSON for stream urls,
- *  2. otherwise load the embed page in a WebView (which solves Turnstile) and
- *     capture the .m3u8 request the player makes.
+ * Link resolution (v8):
+ *  - movies / tv : a hidden WebView loads the embed player (passes Turnstile), hooks fetch/XHR,
+ *                  then asks EVERY server (/servers + known provider names) from inside the page
+ *                  with the player's own request headers, and lists all streams found.
+ *  - anime       : megaplay + vidnest + 4animo directly, plus whatever the real player requests
+ *                  through the site proxy.
+ *  - every HLS master playlist is read and each resolution is listed as its own link
+ *    (plus one "Auto" link with the master).
  */
 class CineLiteProvider : MainAPI() {
     override var mainUrl = "https://cinelite.xyz"
@@ -265,6 +274,8 @@ class CineLiteProvider : MainAPI() {
         "User-Agent" to ua,
     )
 
+    private val embedQuery = "nosuggestionui=true&quality=1080p&stremio_addons=%5B%5D"
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -275,50 +286,180 @@ class CineLiteProvider : MainAPI() {
         val type = parts.getOrNull(0) ?: return false
         val tmdbId = parts.getOrNull(1)?.toIntOrNull() ?: return false
 
-        val season: Int?
-        val episode: Int?
+        var season: Int? = null
+        var episode: Int? = null
         val title: String
-        val pageUrl: String
-        val apiQuery: String
         if (type == "movie") {
-            season = null; episode = null
             title = parts.drop(2).joinToString("|")
-            pageUrl = "$mainUrl/watch/$tmdbId"
-            apiQuery = "id=$tmdbId"
         } else {
             season = parts.getOrNull(2)?.toIntOrNull()
             episode = parts.getOrNull(3)?.toIntOrNull()
             if (season == null || episode == null) return false
             title = parts.drop(4).joinToString("|")
-            // NOTE: the log only contains a movie embed (/{id}) and an anime embed
-            // (/anime/{id}/{ep}) and watch pages /watch/{id} and /watch/anime/{id}/{ep}; the TV pattern below is inferred, not observed.
-            pageUrl = "$mainUrl/watch/tv/$tmdbId/$season/$episode"
-            apiQuery = "id=$tmdbId&season=$season&episode=$episode"
         }
 
-        // The provider API answers 403 TURNSTILE_REQUIRED without a solved Cloudflare
-        // Turnstile check, so everything goes through a WebView on the real watch page.
+        // every link goes through here so the same url is never listed twice
+        val emitted = HashSet<String>()
         var found = false
+        val out: (ExtractorLink) -> Unit = { link ->
+            if (emitted.add(link.url)) {
+                found = true
+                callback.invoke(link)
+            }
+        }
         val dbg = mutableListOf<String>()
-        var pageUrlFinal = pageUrl
 
-        // Anime: the player calls public sources (megaplay / vidnest) keyed by the AniList id,
-        // so no Turnstile is involved and several sub/dub servers can be listed.
         if (type == "atv") {
             try {
-                val aid = findAniListId(title, season ?: 1)
-                if (aid != null) {
-                    dbg.add("anilist id=$aid ep=${episode ?: 1}")
-                    found = animeSources(aid, episode ?: 1, subtitleCallback, callback, dbg)
-                    pageUrlFinal = "$mainUrl/watch/anime/$aid/${episode ?: 1}"
-                } else dbg.add("anilist: no match for $title")
+                animeLinks(title, season ?: 1, episode ?: 1, subtitleCallback, out, dbg)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 dbg.add("anime EXC ${e.message?.take(80)}")
             }
-            if (found) return true
+        } else {
+            try {
+                movieTvLinks(type, tmdbId, season, episode, title, subtitleCallback, out, dbg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dbg.add("web EXC ${e.message?.take(80)}")
+            }
+            if (!found) {
+                // last resort: the old single-playlist capture on the watch page
+                val pageUrl = if (type == "movie") "$mainUrl/watch/$tmdbId"
+                else "$mainUrl/watch/tv/$tmdbId/$season/$episode"
+                legacyCapture(pageUrl, out, dbg)
+            }
         }
 
-        // Phase 1: capture the first playlist the player requests (known to work).
+        if (!found) {
+            // nothing worked: show what happened so the next log tells us why
+            dbg.forEachIndexed { i, line ->
+                callback.invoke(
+                    newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+        }
+        return true
+    }
+
+    // ---------------------------------------------------------- movies / tv shows
+
+    private suspend fun movieTvLinks(
+        type: String,
+        tmdbId: Int,
+        season: Int?,
+        episode: Int?,
+        title: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        out: (ExtractorLink) -> Unit,
+        dbg: MutableList<String>
+    ) {
+        val isMovie = type == "movie"
+        val defaultQuery = if (isMovie) "id=$tmdbId" else "id=$tmdbId&season=$season&episode=$episode"
+
+        // The movie/anime embed urls are taken from the log. The tv one is inferred, so a second
+        // pattern is tried when the first one never reaches the stream api.
+        val embeds = if (isMovie) listOf("$embedUrl/$tmdbId?$embedQuery")
+        else listOf(
+            "$embedUrl/tv/$tmdbId/$season/$episode?$embedQuery",
+            "$embedUrl/$tmdbId/$season/$episode?$embedQuery",
+        )
+
+        val year = try {
+            val d = parseJson<TmdbDetail>(tmdbGet("/${if (isMovie) "movie" else "tv"}/$tmdbId"))
+            (d.releaseDate ?: d.firstAirDate)?.take(4)
+        } catch (_: Exception) {
+            null
+        }
+        var subUrl = "$apiUrl/subtitles?id=$tmdbId&title=${URLEncoder.encode(title, "UTF-8")}" +
+            (if (year != null) "&year=$year" else "")
+        if (!isMovie) subUrl += "&season=$season&episode=$episode"
+
+        for ((idx, embed) in embeds.withIndex()) {
+            val s = CineLiteBrowser.open(embed, ua, "$mainUrl/")
+            if (s == null) {
+                dbg.add("webview unavailable")
+                return
+            }
+            try {
+                val ready = s.waitFor(if (idx == 0) 30_000L else 20_000L) {
+                    s.has("template") ||
+                        s.events.any { (it.kind == "provider" || it.kind == "servers") && it.status in 200..299 }
+                }
+                dbg.add("embed#$idx ready=$ready events=${s.events.size} verify=${s.events.firstOrNull { it.kind == "verify" }?.status}")
+                if (!ready) continue
+                delay(1500L) // let /servers land
+
+                // same query the player used (works for tv even though the pattern is inferred)
+                val query = s.events.firstOrNull { it.kind == "provider" }
+                    ?.url?.substringAfter("?", "")?.takeIf { it.isNotBlank() } ?: defaultQuery
+
+                // server list: the api's own list first, our known names as a safety net
+                val names = LinkedHashSet<String>()
+                names.addAll(providers)
+                var serversBody = s.events.firstOrNull { it.kind == "servers" && it.status in 200..299 }?.body
+                if (serversBody == null) {
+                    val r = s.get("$apiUrl/servers", true)
+                    if (r != null && r.first in 200..299) serversBody = r.second
+                }
+                serversBody?.let { names.addAll(parseServerNames(it)) }
+                s.events.filter { it.kind == "provider" }.forEach { e -> providerName(e.url)?.let { names.add(it) } }
+
+                // responses the player already got ...
+                val bodies = LinkedHashMap<String, Pair<Int, String>>()
+                s.events.filter { it.kind == "provider" && it.status in 200..299 && it.body.isNotBlank() }
+                    .forEach { e ->
+                        val n = providerName(e.url)
+                        if (n != null && !bodies.containsKey(n)) bodies[n] = Pair(e.status, e.body)
+                    }
+
+                // ... plus every other server, asked from inside the page
+                coroutineScope {
+                    names.filter { it !in bodies }.take(12).map { n ->
+                        async { n to s.get("$apiUrl/provider/$n?$query", true, 25_000L) }
+                    }.awaitAll().forEach { (n, r) ->
+                        if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
+                            bodies[n] = r
+                        } else {
+                            dbg.add("$n -> ${r?.first} ${r?.second?.take(60)}")
+                        }
+                    }
+                }
+                dbg.add("servers=${names.joinToString(",")} ok=${bodies.keys.joinToString(",")}")
+
+                // subtitles
+                try {
+                    val sr = s.get(subUrl, true)
+                    if (sr != null && sr.first in 200..299) {
+                        mapper.readTree(sr.second)?.let { collectSubtitles(it, subtitleCallback) }
+                    }
+                } catch (_: Exception) {
+                }
+
+                for ((n, r) in bodies) {
+                    val label = prettyServer(n)
+                    val cands = parseCandidates(r.second)
+                    if (cands.isEmpty()) dbg.add("$n: no stream in ${r.second.take(120)}")
+                    for (c in cands) {
+                        val h = embedHeaders + (c.headers ?: emptyMap())
+                        emitStream(
+                            listOfNotNull(label, c.label).joinToString(" "),
+                            c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
+                        )
+                    }
+                }
+                return
+            } finally {
+                s.close()
+            }
+        }
+    }
+
+    private suspend fun legacyCapture(pageUrl: String, out: (ExtractorLink) -> Unit, dbg: MutableList<String>) {
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(?i)\.m3u8"""),
@@ -327,62 +468,297 @@ class CineLiteProvider : MainAPI() {
                 useOkhttp = false,
                 timeout = 20_000L
             )
-            val m3u8 = app.get(pageUrlFinal, referer = "$mainUrl/", interceptor = resolver).url
+            val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
             if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
-                found = true
-                callback.invoke(
-                    newExtractorLink(name, "$name HLS (Auto)", m3u8, ExtractorLinkType.M3U8) {
-                        this.referer = "$embedUrl/"
-                        this.headers = embedHeaders
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                // also list each quality variant of the master playlist separately
-                try {
-                    M3u8Helper.generateM3u8(name, m3u8, "$embedUrl/", headers = embedHeaders)
-                        .forEach(callback)
-                } catch (_: Exception) {
-                }
-            } else dbg.add("p1 -> ${m3u8.take(100)}")
+                emitStream("HLS", m3u8, null, MK.HLS, embedHeaders, "$embedUrl/", null, out)
+            } else dbg.add("legacy -> ${m3u8.take(100)}")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            dbg.add("p1 EXC ${e.message?.take(80)}")
+            dbg.add("legacy EXC ${e.message?.take(80)}")
+        }
+    }
+
+    private fun providerName(url: String): String? =
+        Regex("""/provider/([^?/#]+)""").find(url)?.groupValues?.get(1)
+
+    private fun prettyServer(n: String): String =
+        n.split("-", "_").filter { it.isNotBlank() }.joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+
+    /** Pulls server ids out of whatever shape /servers has (array of strings, or objects with id/name/slug). */
+    private fun parseServerNames(body: String): List<String> {
+        val root = try {
+            mapper.readTree(body)
+        } catch (_: Exception) {
+            null
+        } ?: return emptyList()
+        val ok = Regex("""^[a-z][a-z0-9_-]{1,40}\z""")
+        val names = LinkedHashSet<String>()
+        fun add(s: String?) {
+            if (s != null && ok.matches(s)) names.add(s)
         }
 
-        if (found && type != "atv") return true
+        fun walk(n: JsonNode, depth: Int) {
+            if (depth > 4) return
+            if (n.isArray) {
+                n.forEach { if (it.isTextual) add(it.asText()) else walk(it, depth + 1) }
+            } else if (n.isObject) {
+                for (k in listOf("id", "name", "slug", "provider", "key")) {
+                    n.get(k)?.takeIf { it.isTextual }?.let { add(it.asText()) }
+                }
+                n.fields().forEach { if (it.value.isContainerNode) walk(it.value, depth + 1) }
+            }
+        }
+        walk(root, 0)
+        return names.toList()
+    }
 
-        // TEMPORARY diagnostics (always shown for anime while debugging)
-        dbg.forEachIndexed { i, line ->
-            callback.invoke(
-                newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
-                    this.quality = Qualities.Unknown.value
+    // ------------------------------------------------------ generic stream parsing
+
+    private enum class MK { HLS, VIDEO, UNKNOWN }
+
+    private class Cand(
+        val url: String,
+        val quality: Int?,
+        val kind: MK,
+        val headers: Map<String, String>?,
+        val label: String?
+    )
+
+    private val notMediaExt = listOf(
+        ".vtt", ".srt", ".ass", ".ssa", ".sub", ".jpg", ".jpeg", ".png", ".webp", ".gif",
+        ".ico", ".svg", ".css", ".js", ".json", ".html", ".htm", ".mpd"
+    )
+
+    private fun mediaKind(raw: String): MK? {
+        val v = raw.trim()
+        if (!(v.startsWith("http://") || v.startsWith("https://"))) return null
+        val p = v.substringBefore("?").substringBefore("#").lowercase()
+        if (notMediaExt.any { p.endsWith(it) }) return null
+        if (p.contains(".m3u8")) return MK.HLS
+        if (p.endsWith(".mp4") || p.endsWith(".mkv") || p.endsWith(".webm") || p.endsWith(".m4v")) return MK.VIDEO
+        val l = v.lowercase()
+        return if (l.contains("/hls") || l.contains("/proxy/") || l.contains("/pipe/") ||
+            l.contains("master") || l.contains("playlist")
+        ) MK.UNKNOWN else null
+    }
+
+    private fun qualityOf(text: String?): Int? {
+        if (text.isNullOrBlank()) return null
+        val t = text.lowercase()
+        if (t.contains("4k") || t.contains("uhd")) return 2160
+        Regex("""(\d{3,4})\s*p""").find(t)?.let { return it.groupValues[1].toInt() }
+        Regex("""^\s*(\d{3,4})\s*\z""").find(t)?.let {
+            val v = it.groupValues[1].toInt()
+            if (v in 144..4320) return v
+        }
+        return null
+    }
+
+    private val skipKeys = setOf(
+        "subtitles", "subtitle", "tracks", "captions", "thumbnails", "thumbnail", "poster",
+        "image", "images", "intro", "outro", "headers"
+    )
+
+    /** Walks any json shape and collects every playable-looking url with the quality/label found next to it. */
+    private fun parseCandidates(body: String): List<Cand> {
+        val out = ArrayList<Cand>()
+        val root = try {
+            mapper.readTree(body)
+        } catch (_: Exception) {
+            null
+        }
+        if (root == null || !(root.isContainerNode)) {
+            // not json: scan the text for urls
+            Regex("""https?://[^\s"'\\<>]+""").findAll(body).forEach { m ->
+                val u = m.value
+                mediaKind(u)?.let { out.add(Cand(u, qualityOf(u), it, null, null)) }
+            }
+            return out.distinctBy { it.url }
+        }
+
+        fun walk(n: JsonNode, q: Int?, label: String?, hdr: Map<String, String>?, depth: Int) {
+            if (depth > 12) return
+            when {
+                n.isTextual -> {
+                    val k = mediaKind(n.asText()) ?: return
+                    out.add(Cand(n.asText().trim(), q, k, hdr, label))
+                }
+                n.isArray -> n.forEach { walk(it, q, label, hdr, depth + 1) }
+                n.isObject -> {
+                    var q2 = q
+                    var l2 = label
+                    var h2 = hdr
+                    for (k in listOf("quality", "resolution", "res", "height", "label", "name", "size")) {
+                        val f = n.get(k) ?: continue
+                        if (f.isTextual || f.isNumber) qualityOf(f.asText())?.let { q2 = it }
+                    }
+                    listOf("label", "server", "name", "title", "provider", "lang", "language")
+                        .firstNotNullOfOrNull { k ->
+                            n.get(k)?.takeIf { it.isTextual }?.asText()
+                                ?.takeIf { it.isNotBlank() && !it.startsWith("http") && qualityOf(it) == null }
+                        }?.let { l2 = it }
+                    n.get("headers")?.takeIf { it.isObject }?.let { h ->
+                        h2 = h.fields().asSequence()
+                            .filter { it.value.isTextual }
+                            .associate { it.key to it.value.asText() }
+                    }
+                    n.fields().forEach { e ->
+                        if (e.key.lowercase() !in skipKeys) walk(e.value, q2, l2, h2, depth + 1)
+                    }
+                }
+            }
+        }
+        walk(root, null, null, null, 0)
+        return out.distinctBy { it.url }
+    }
+
+    // ------------------------------------------------------------ emit / resolutions
+
+    private class Variant(val url: String, val quality: Int?, val bandwidth: Long?)
+
+    private fun resolveUrl(base: String, ref: String): String {
+        if (ref.startsWith("http://") || ref.startsWith("https://")) return ref
+        return try {
+            java.net.URI(base).resolve(ref).toString()
+        } catch (_: Exception) {
+            if (ref.startsWith("/")) base.substringBefore("://") + "://" + base.substringAfter("://").substringBefore("/") + ref
+            else base.substringBefore("?").substringBeforeLast("/") + "/" + ref
+        }
+    }
+
+    private fun standardQuality(w: Int?, h: Int?): Int? {
+        fun byH(x: Int) = when {
+            x >= 2000 -> 2160
+            x >= 1300 -> 1440
+            x >= 1000 -> 1080
+            x >= 700 -> 720
+            x >= 460 -> 480
+            x >= 340 -> 360
+            x >= 230 -> 240
+            else -> 144
+        }
+
+        fun byW(x: Int) = when {
+            x >= 3600 -> 2160
+            x >= 2400 -> 1440
+            x >= 1800 -> 1080
+            x >= 1200 -> 720
+            x >= 800 -> 480
+            x >= 600 -> 360
+            x >= 400 -> 240
+            else -> 144
+        }
+        if (w == null && h == null) return null
+        return maxOf(w?.let { byW(it) } ?: 0, h?.let { byH(it) } ?: 0)
+    }
+
+    private fun parseMaster(text: String, base: String): List<Variant> {
+        val lines = text.lines().map { it.trim() }
+        val resRe = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+        val bwRe = Regex("""(?:^|[:,])BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
+        val res = ArrayList<Variant>()
+        var i = 0
+        while (i < lines.size) {
+            val l = lines[i]
+            if (l.startsWith("#EXT-X-STREAM-INF")) {
+                val m = resRe.find(l)
+                val bw = bwRe.find(l)?.groupValues?.get(1)?.toLongOrNull()
+                var j = i + 1
+                while (j < lines.size && (lines[j].isEmpty() || lines[j].startsWith("#"))) j++
+                if (j < lines.size) {
+                    val q = standardQuality(m?.groupValues?.get(1)?.toIntOrNull(), m?.groupValues?.get(2)?.toIntOrNull())
+                    res.add(Variant(resolveUrl(base, lines[j]), q, bw))
+                    i = j
+                }
+            }
+            i++
+        }
+        return res.distinctBy { it.url }
+    }
+
+    /** Master playlist text: plain http first, then from inside the page (cookies / token bound urls). */
+    private suspend fun fetchPlaylist(
+        url: String,
+        headers: Map<String, String>,
+        session: CineLiteBrowser.Session?,
+        sniff: Boolean
+    ): String? {
+        try {
+            val h = if (sniff) headers + ("Range" to "bytes=0-1023") else headers
+            val head = app.get(url, headers = h, timeout = 20_000L).text
+            if (head.trimStart().startsWith("#EXTM3U")) {
+                return if (sniff) app.get(url, headers = headers, timeout = 20_000L).text else head
+            }
+            if (sniff) return null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
+        if (session != null && !session.closed) {
+            val r = session.get(url, false, 20_000L)
+            if (r != null && r.first in 200..299 && r.second.trimStart().startsWith("#EXTM3U")) return r.second
+        }
+        return null
+    }
+
+    /**
+     * Lists a stream. For HLS the master playlist is read and every resolution becomes its own
+     * link (plus one "Auto" link with the master itself); other files are listed as they are.
+     */
+    private suspend fun emitStream(
+        server: String,
+        url: String,
+        quality: Int?,
+        kind: MK,
+        headers: Map<String, String>,
+        referer: String,
+        session: CineLiteBrowser.Session?,
+        out: (ExtractorLink) -> Unit
+    ) {
+        val base = "$name $server".trim()
+
+        if (kind == MK.VIDEO) {
+            out.invoke(
+                newExtractorLink(name, base + (quality?.let { " ${it}p" } ?: ""), url, ExtractorLinkType.VIDEO) {
+                    this.referer = referer
+                    this.headers = headers
+                    this.quality = quality ?: Qualities.Unknown.value
+                }
+            )
+            return
+        }
+
+        val text = fetchPlaylist(url, headers, session, sniff = kind == MK.UNKNOWN)
+        if (kind == MK.UNKNOWN && text == null) return // not a playlist, not something we can play
+
+        val variants = if (text != null) parseMaster(text, url) else emptyList()
+        for (v in variants.sortedWith(compareByDescending<Variant> { it.quality ?: 0 }.thenByDescending { it.bandwidth ?: 0L })) {
+            val label = v.quality?.let { "${it}p" } ?: v.bandwidth?.let { "${it / 1000}kbps" } ?: "Stream"
+            out.invoke(
+                newExtractorLink(name, "$base $label", v.url, ExtractorLinkType.M3U8) {
+                    this.referer = referer
+                    this.headers = headers
+                    this.quality = v.quality ?: Qualities.Unknown.value
                 }
             )
         }
-        return true
-    }
-
-    private fun fileOf(n: JsonNode?): String? = when {
-        n == null -> null
-        n.isTextual -> n.asText()
-        n.isArray -> n.firstNotNullOfOrNull { fileOf(it) }
-        n.isObject -> n.get("file")?.asText() ?: n.get("url")?.asText() ?: n.get("src")?.asText()
-        else -> null
-    }
-
-    private suspend fun emitHls(label: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        val h = mapOf("Referer" to referer, "Origin" to referer.trimEnd('/'), "User-Agent" to ua)
-        callback.invoke(
-            newExtractorLink(name, "$name $label (Auto)", url, ExtractorLinkType.M3U8) {
+        // the master itself (adaptive); when it is a plain media playlist this is the only link
+        out.invoke(
+            newExtractorLink(
+                name,
+                if (variants.isEmpty()) base + (quality?.let { " ${it}p" } ?: " (Auto)") else "$base (Auto)",
+                url,
+                ExtractorLinkType.M3U8
+            ) {
                 this.referer = referer
-                this.headers = h
-                this.quality = Qualities.Unknown.value
+                this.headers = headers
+                this.quality = if (variants.isEmpty()) (quality ?: Qualities.Unknown.value) else Qualities.Unknown.value
             }
         )
-        try {
-            M3u8Helper.generateM3u8("$name $label", url, referer, headers = h).forEach(callback)
-        } catch (_: Exception) {
-        }
     }
+
+    // ---------------------------------------------------------------------- anime
 
     private val anilistCache = HashMap<String, Int?>()
 
@@ -402,104 +778,216 @@ class CineLiteProvider : MainAPI() {
         return id
     }
 
-    private suspend fun animeSources(
-        aid: Int,
+    private fun jsonHeaders(referer: String) = mapOf(
+        "Accept" to "application/json, text/javascript, */*; q=0.01",
+        "Referer" to referer,
+        "X-Requested-With" to "XMLHttpRequest",
+        "User-Agent" to ua,
+    )
+
+    private fun playHeaders(referer: String) = mapOf(
+        "Referer" to referer,
+        "Origin" to referer.trimEnd('/'),
+        "User-Agent" to ua,
+    )
+
+    private suspend fun animeLinks(
+        title: String,
+        season: Int,
         ep: Int,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
+        out: (ExtractorLink) -> Unit,
         dbg: MutableList<String>
-    ): Boolean {
-        var any = false
+    ) {
+        val aid = findAniListId(title, season)
+        if (aid == null) {
+            dbg.add("anilist: no match for $title")
+            return
+        }
+        dbg.add("anilist id=$aid ep=$ep")
+
+        // the three public sources the player itself uses (see log): megaplay, vidnest, 4animo
         for (audio in listOf("sub", "dub")) {
             val tag = audio.uppercase()
-
-            // megaplay: embed page carries a data-id, getSources returns the playlist
             try {
-                val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
-                val pr = app.get(
-                    page,
-                    headers = mapOf("Referer" to "https://megaplay.buzz/", "User-Agent" to ua),
-                    timeout = 20_000L
-                )
-                val html = pr.text
-                val dataId = Regex("""data-id=["'](\d+)["']""").find(html)?.groupValues?.get(1)
-                if (audio == "sub") dbg.add("mp page ${pr.code} len=${html.length} id=$dataId ${if (dataId == null) html.take(80) else ""}")
-                if (dataId != null) {
-                    val gr = app.get(
-                        "https://megaplay.buzz/stream/getSources?id=$dataId&id=$dataId",
-                        headers = mapOf(
-                            "Accept" to "application/json, text/javascript, */*; q=0.01",
-                            "Referer" to page,
-                            "X-Requested-With" to "XMLHttpRequest",
-                            "User-Agent" to ua,
-                        ),
-                        timeout = 20_000L
-                    )
-                    val json = gr.text
-                    if (audio == "sub") dbg.add("mp src ${gr.code} ${json.take(130)}")
-                    val root = mapper.readTree(json)
-                    if (root != null) {
-                        val srcNode = root.get("sources")
-                        if (audio == "sub") dbg.add("mp sources=${srcNode?.toString()?.take(200)}")
-                        val file = fileOf(srcNode)
-                        if (file != null && file.startsWith("http")) {
-                            any = true
-                            emitHls("Megaplay $tag", file, "https://megaplay.buzz/", callback)
-                        } else if (collectStreams(root, "Megaplay $tag", callback, "https://megaplay.buzz/")) any = true
-                        if (audio == "sub") collectSubtitles(root.get("tracks"), subtitleCallback)
-                    }
-                }
+                megaplay(aid, ep, audio, tag, subtitleCallback, out, dbg)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                dbg.add("mp EXC ${e.message?.take(80)}")
+                dbg.add("megaplay $tag EXC ${e.message?.take(80)}")
+            }
+            try {
+                vidnest(aid, ep, audio, tag, subtitleCallback, out, dbg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dbg.add("vidnest $tag EXC ${e.message?.take(80)}")
+            }
+            try {
+                fourAnimo(aid, ep, audio, tag, subtitleCallback, out, dbg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dbg.add("4animo $tag EXC ${e.message?.take(80)}")
             }
         }
-        return any
+
+        // catch-all: let the real player run and take every source response it gets through the
+        // site proxy, whatever the json looks like
+        try {
+            animeFromPlayer(aid, ep, subtitleCallback, out, dbg)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            dbg.add("player EXC ${e.message?.take(80)}")
+        }
     }
 
-    /** Walks any JSON shape and emits every http(s) .m3u8/.mp4 string it finds. */
-    private suspend fun collectStreams(
-        node: JsonNode,
-        provider: String,
-        callback: (ExtractorLink) -> Unit,
-        referer: String = "$embedUrl/"
-    ): Boolean {
-        val linkHeaders = mapOf(
-            "Referer" to referer,
-            "Origin" to referer.trimEnd('/'),
-            "User-Agent" to ua,
+    private suspend fun megaplay(
+        aid: Int, ep: Int, audio: String, tag: String,
+        subtitleCallback: (SubtitleFile) -> Unit, out: (ExtractorLink) -> Unit, dbg: MutableList<String>
+    ) {
+        val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
+        val html = app.get(
+            page,
+            headers = mapOf("Referer" to "https://megaplay.buzz/", "User-Agent" to ua),
+            timeout = 20_000L
+        ).text
+        val dataId = Regex("""data-id=["'](\d+)["']""").find(html)?.groupValues?.get(1)
+        if (dataId == null) {
+            dbg.add("megaplay $tag: no data-id")
+            return
+        }
+        val json = app.get(
+            "https://megaplay.buzz/stream/getSources?id=$dataId&id=$dataId",
+            headers = jsonHeaders(page),
+            timeout = 20_000L
+        ).text
+        val h = playHeaders("https://megaplay.buzz/")
+        for (c in parseCandidates(json)) {
+            emitStream("Megaplay $tag", c.url, c.quality, c.kind, h, "https://megaplay.buzz/", null, out)
+        }
+        if (audio == "sub") mapper.readTree(json)?.get("tracks")?.let { collectSubtitles(it, subtitleCallback) }
+    }
+
+    private suspend fun vidnest(
+        aid: Int, ep: Int, audio: String, tag: String,
+        subtitleCallback: (SubtitleFile) -> Unit, out: (ExtractorLink) -> Unit, dbg: MutableList<String>
+    ) {
+        val res = app.get(
+            "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio",
+            headers = mapOf(
+                "Accept" to "application/json, text/javascript, */*; q=0.01",
+                "Referer" to "https://vidnest.fun/",
+                "User-Agent" to ua,
+            ),
+            timeout = 20_000L
         )
-        var any = false
-        val seen = HashSet<String>()
-        suspend fun walk(n: JsonNode) {
-            when {
-                n.isTextual -> {
-                    val v = n.asText()
-                    if (v.startsWith("http") && seen.add(v)) {
-                        val isHls = v.contains(".m3u8", true) || v.contains("/hls", true)
-                        val isMp4 = v.substringBefore("?").endsWith(".mp4", true)
-                        if (isHls || isMp4) {
-                            any = true
-                            callback.invoke(
-                                newExtractorLink(
-                                    name,
-                                    "$name $provider",
-                                    v,
-                                    if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = referer
-                                    this.headers = linkHeaders
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
+        if (res.code !in 200..299) {
+            dbg.add("vidnest $tag ${res.code}")
+            return
+        }
+        val h = playHeaders("https://vidnest.fun/")
+        val cands = parseCandidates(res.text)
+        if (cands.isEmpty()) dbg.add("vidnest $tag: no stream in ${res.text.take(100)}")
+        for (c in cands) {
+            val ch = h + (c.headers ?: emptyMap())
+            emitStream(listOfNotNull("Vidnest $tag", c.label).joinToString(" "), c.url, c.quality, c.kind, ch,
+                ch["Referer"] ?: "https://vidnest.fun/", null, out)
+        }
+        if (audio == "sub") {
+            val root = mapper.readTree(res.text)
+            (root?.get("subtitles") ?: root?.get("tracks"))?.let { collectSubtitles(it, subtitleCallback) }
+        }
+    }
+
+    private suspend fun fourAnimo(
+        aid: Int, ep: Int, audio: String, tag: String,
+        subtitleCallback: (SubtitleFile) -> Unit, out: (ExtractorLink) -> Unit, dbg: MutableList<String>
+    ) {
+        val embed = "https://cdn.4animo.xyz/embed/ani/$aid/$ep/$audio?k=1"
+        val html = app.get(
+            embed,
+            headers = mapOf("Referer" to "https://cdn.4animo.xyz/", "User-Agent" to ua),
+            timeout = 20_000L
+        ).text
+        // the page carries a signed token that getSources wants as ?t=
+        val token = Regex("""getSources\?t=([A-Za-z0-9._~%\-]+)""").find(html)?.groupValues?.get(1)
+            ?: Regex("""["']t["']\s*[:=]\s*["']([A-Za-z0-9._~%\-]{20,})["']""").find(html)?.groupValues?.get(1)
+        if (token == null) {
+            dbg.add("4animo $tag: no token")
+            return
+        }
+        val json = app.get(
+            "https://cdn.4animo.xyz/stream/getSources?t=$token",
+            headers = mapOf(
+                "Accept" to "application/json, text/plain, */*",
+                "Referer" to embed,
+                "User-Agent" to ua,
+            ),
+            timeout = 20_000L
+        ).text
+        val h = playHeaders("https://cdn.4animo.xyz/")
+        for (c in parseCandidates(json)) {
+            emitStream("4Animo $tag", c.url, c.quality, c.kind, h, "https://cdn.4animo.xyz/", null, out)
+        }
+        if (audio == "sub") mapper.readTree(json)?.let { r ->
+            (r.get("tracks") ?: r.get("subtitles"))?.let { collectSubtitles(it, subtitleCallback) }
+        }
+    }
+
+    private fun refererForHost(host: String): String = when {
+        host.contains("megaplay") -> "https://megaplay.buzz/"
+        host.contains("vidnest") -> "https://vidnest.fun/"
+        host.contains("4animo") -> "https://cdn.4animo.xyz/"
+        else -> "https://$host/"
+    }
+
+    private fun serverLabelForHost(host: String): String = when {
+        host.contains("megaplay") -> "Megaplay"
+        host.contains("vidnest") -> "Vidnest"
+        host.contains("4animo") -> "4Animo"
+        else -> host.substringBefore(".").replaceFirstChar { it.uppercase() }
+    }
+
+    private suspend fun animeFromPlayer(
+        aid: Int, ep: Int,
+        subtitleCallback: (SubtitleFile) -> Unit, out: (ExtractorLink) -> Unit, dbg: MutableList<String>
+    ) {
+        val s = CineLiteBrowser.open("$embedUrl/anime/$aid/$ep?$embedQuery", ua, "$mainUrl/") ?: return
+        try {
+            s.waitFor(25_000L) { s.events.count { it.kind == "proxy" && it.status in 200..299 } >= 4 }
+            delay(3000L)
+            val seen = s.events.filter { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() }
+            dbg.add("player proxy responses=${seen.size}")
+            for (ev in seen) {
+                val dec = try {
+                    URLDecoder.decode(ev.url, "UTF-8")
+                } catch (_: Exception) {
+                    ev.url
+                }
+                val inner = Regex("""[?&]url=([^&]+)""").find(ev.url)?.groupValues?.get(1)
+                    ?.let { try { URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { it } } ?: continue
+                val host = inner.substringAfter("://").substringBefore("/")
+                val audio = Regex("""/(sub|dub)(?:[/?&"]|\z)""").find(dec)?.groupValues?.get(1)?.uppercase()
+                val label = listOfNotNull(serverLabelForHost(host), audio).joinToString(" ")
+                val ref = refererForHost(host)
+                val h = playHeaders(ref)
+                for (c in parseCandidates(ev.body)) {
+                    emitStream(label, c.url, c.quality, c.kind, h + (c.headers ?: emptyMap()), ref, s, out)
+                }
+                if (audio == "SUB") {
+                    try {
+                        mapper.readTree(ev.body)?.let { r ->
+                            (r.get("tracks") ?: r.get("subtitles"))?.let { collectSubtitles(it, subtitleCallback) }
                         }
+                    } catch (_: Exception) {
                     }
                 }
-                n.isArray -> n.forEach { walk(it) }
-                n.isObject -> n.fields().forEach { walk(it.value) }
             }
+        } finally {
+            s.close()
         }
-        walk(node)
-        return any
     }
 
     private suspend fun collectSubtitles(node: JsonNode?, cb: (SubtitleFile) -> Unit) {

@@ -287,26 +287,32 @@ class CineLiteProvider : MainAPI() {
         }
 
         var found = false
+        val dbg = mutableListOf<String>()
 
         // 1) provider API (best effort - may be rejected without a Turnstile session)
+        val apiHeaders = embedHeaders + mapOf("Accept" to "application/json, text/plain, */*")
+        try {
+            val r = app.get("$apiUrl/servers", headers = apiHeaders, timeout = 15_000L)
+            dbg.add("servers ${r.code}: ${r.text.take(120)}")
+        } catch (e: Exception) {
+            dbg.add("servers EXC ${e.message?.take(80)}")
+        }
         for (p in providers) {
             try {
-                val res = app.get(
-                    "$apiUrl/provider/$p?$apiQuery",
-                    headers = embedHeaders,
-                    timeout = 20_000L
-                )
+                val res = app.get("$apiUrl/provider/$p?$apiQuery", headers = apiHeaders, timeout = 20_000L)
+                dbg.add("$p ${res.code}: ${res.text.take(160)}")
                 if (res.code !in 200..299) continue
                 val root = mapper.readTree(res.text) ?: continue
                 found = collectStreams(root, p, callback) || found
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                dbg.add("$p EXC ${e.message?.take(80)}")
             }
         }
 
         // subtitles endpoint seen in the log: /subtitles?id=&title=&year=
         try {
             val t = URLEncoder.encode(title, "UTF-8")
-            val res = app.get("$apiUrl/subtitles?$apiQuery&title=$t", headers = embedHeaders, timeout = 15_000L)
+            val res = app.get("$apiUrl/subtitles?$apiQuery&title=$t", headers = apiHeaders, timeout = 15_000L)
             if (res.code in 200..299) collectSubtitles(mapper.readTree(res.text), subtitleCallback)
         } catch (_: Exception) {
         }
@@ -314,27 +320,43 @@ class CineLiteProvider : MainAPI() {
         if (found) return true
 
         // 2) WebView: let the real player solve Turnstile and capture the playlist request
-        return try {
+        try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(?i)\.m3u8"""),
                 additionalUrls = listOf(Regex("""(?i)\.m3u8""")),
                 script = """document.querySelector('button,[role="button"],.jw-icon-display,.vds-play-button')?.click();""",
                 useOkhttp = false,
-                timeout = 30_000L
+                timeout = 40_000L
             )
-            val m3u8 = app.get(pageUrl, referer = "$mainUrl/", interceptor = resolver).url
-            if (m3u8.isBlank() || !m3u8.contains(".m3u8", ignoreCase = true)) return false
+            val m3u8 = app.get(
+                "$pageUrl?t=0&reset=1&nosuggestionui=true&color=e50914&quality=1080p",
+                referer = "$mainUrl/",
+                interceptor = resolver
+            ).url
+            dbg.add("webview -> ${m3u8.take(140)}")
+            if (m3u8.isNotBlank() && m3u8.contains(".m3u8", ignoreCase = true)) {
+                callback.invoke(
+                    newExtractorLink(name, "$name HLS", m3u8, ExtractorLinkType.M3U8) {
+                        this.referer = "$embedUrl/"
+                        this.headers = embedHeaders
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                return true
+            }
+        } catch (e: Exception) {
+            dbg.add("webview EXC ${e.message?.take(100)}")
+        }
+
+        // TEMPORARY diagnostics: show what each step returned as fake "links"
+        dbg.forEachIndexed { i, line ->
             callback.invoke(
-                newExtractorLink(name, "$name HLS", m3u8, ExtractorLinkType.M3U8) {
-                    this.referer = "$embedUrl/"
-                    this.headers = embedHeaders
+                newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
                     this.quality = Qualities.Unknown.value
                 }
             )
-            true
-        } catch (_: Exception) {
-            false
         }
+        return true
     }
 
     /** Walks any JSON shape and emits every http(s) .m3u8/.mp4 string it finds. */

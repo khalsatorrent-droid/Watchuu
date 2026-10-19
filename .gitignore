@@ -1,0 +1,17 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+**/build
+/captures
+.externalNativeBuild
+.cxx
+.kotlin
+local.properties
+.vscode
+damitv_monetization/build_log.txt
+dummy_trigger.txt
+local.properties*
+*.log

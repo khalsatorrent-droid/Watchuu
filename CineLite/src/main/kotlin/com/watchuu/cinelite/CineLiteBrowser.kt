@@ -258,29 +258,8 @@ object CineLiteBrowser {
     HTMLMediaElement.prototype.load = function(){};
   } catch(e){}
 
-  // never make sound: autoplay attributes do not call play(), so also force every media
-  // element muted / volume 0 / paused, at creation and on a timer
-  try {
-    ['volume', 'muted'].forEach(function(p){
-      var d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, p);
-      if (d && d.set) {
-        Object.defineProperty(HTMLMediaElement.prototype, p, {
-          get: d.get,
-          set: function(v){ d.set.call(this, p === 'volume' ? 0 : true); },
-          configurable: true
-        });
-      }
-    });
-    var ce = document.createElement;
-    document.createElement = function(t){
-      var el = ce.apply(document, arguments);
-      try {
-        var n = String(t).toLowerCase();
-        if (n === 'video' || n === 'audio') { el.muted = true; el.volume = 0; el.autoplay = false; }
-      } catch(e){}
-      return el;
-    };
-  } catch(e){}
+  // never make sound: autoplay attributes do not call play(), so pause/mute every media
+  // element on a timer (read-only on the page, nothing is overridden)
   function hush(){
     try {
       var m = document.querySelectorAll('video,audio');

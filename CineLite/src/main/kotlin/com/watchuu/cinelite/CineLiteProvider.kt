@@ -326,6 +326,7 @@ class CineLiteProvider : MainAPI() {
                 dbg.add("web EXC ${e.message?.take(80)}")
             }
             if (!found) {
+                dbg.add("multi-server path found nothing (see lines above)")
                 // last resort: the old single-playlist capture on the watch page
                 val pageUrl = if (type == "movie") "$mainUrl/watch/$tmdbId"
                 else "$mainUrl/watch/tv/$tmdbId/$season/$episode"
@@ -333,8 +334,8 @@ class CineLiteProvider : MainAPI() {
             }
         }
 
-        if (!found) {
-            // nothing worked: show what happened so the next log tells us why
+        if (!found || dbg.isNotEmpty()) {
+            // something failed: show what happened so the next screenshot tells us why
             dbg.forEachIndexed { i, line ->
                 callback.invoke(
                     newExtractorLink(name, "DBG${i + 1} $line", "https://example.com/debug$i.m3u8", ExtractorLinkType.M3U8) {
@@ -393,7 +394,6 @@ class CineLiteProvider : MainAPI() {
                 dbg.add("embed#$idx ready=$ready events=${s.events.size} verify=${s.events.firstOrNull { it.kind == "verify" }?.status}")
                 if (!ready) continue
                 delay(1500L) // let /servers land
-                s.quiet() // the player is not needed any more: silence it, block its other traffic
 
                 // same query the player used (works for tv even though the pattern is inferred)
                 val query = s.events.firstOrNull { it.kind == "provider" }
@@ -441,6 +441,7 @@ class CineLiteProvider : MainAPI() {
                 } catch (_: Exception) {
                 }
 
+                s.quiet() // everything is collected: silence the player, block its other traffic
                 for ((n, r) in bodies) {
                     val label = prettyServer(n)
                     val cands = parseCandidates(r.second)

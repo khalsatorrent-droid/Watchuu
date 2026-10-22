@@ -14,11 +14,9 @@ package com.watchuu.monochrome
  * Payload format:  track|{tidalTrackId}|{releaseId}|{title}|{artist}
  */
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -217,9 +215,8 @@ class MonochromeProvider : MainAPI() {
                 }
 
                 val linkType = when {
-                    streamUrl.contains(".flac") || codec.equals("FLAC", ignoreCase = true) -> ExtractorLinkType.AUDIO
                     streamUrl.contains(".m3u8") -> ExtractorLinkType.M3U8
-                    else -> ExtractorLinkType.AUDIO
+                    else -> ExtractorLinkType.VIDEO
                 }
 
                 callback.invoke(
@@ -266,7 +263,7 @@ class MonochromeProvider : MainAPI() {
                             val isM3u8 = urlMatch.contains(".m3u8")
                             callback.invoke(
                                 newExtractorLink(name, "$name Stream", urlMatch,
-                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.AUDIO) {
+                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                                     this.referer = "$mainUrl/"
                                     this.quality = Qualities.Unknown.value
                                 }

@@ -1,170 +1,293 @@
 package com.watchuu.monochrome
 
 /**
- * Monochrome (monochrome.st) — music extension for Cloudstream.
+ * Monochrome (monochrome.st) - music extension for Cloudstream.
  *
- * Built from a captured network log.
+ * The site moved its catalog + playback to its own service, tracks.monochrome.st
+ * (the old Tidal proxy at tidal-proxy.monochrome.tf / hot.monochrome.tf no longer answers):
  *
- * Architecture:
- *  - Catalog/search : tracks.monochrome.st  (no auth)
- *  - Home page      : monochrome.st/editors-picks.json
- *  - Audio stream   : Tidal, proxied via tidal-proxy.monochrome.tf
- *                     Requires a Tidal client-credentials token (public client keys from the site).
+ *  - search    : GET /search?q=          -> {tracks, releases, artists, topResults}
+ *                GET /search/releases?q=  -> {releases:[{releaseId,title,artistNames,artwork}]}
+ *  - album     : GET /releases/{id}      -> {title, artists, artwork, tracks:[{trackId,title,duration,...}]}
+ *  - artist    : GET /artists/{id}       -> {name, avatar, banner, topTracks, albums, releases, ...}
+ *  - stream    : GET /track/{trackId}    -> the FLAC file itself (range requests supported)
  *
- * Payload format:  track|{tidalTrackId}|{releaseId}|{title}|{artist}
+ * Home rows are built from release searches; "Editor's Picks" are the site's picks
+ * (editors-picks.json) matched to tracks.monochrome.st releases.
+ *
+ * URLs used inside Cloudstream:
+ *   https://monochrome.st/album/{releaseId}   (series, tracks = episodes)
+ *   https://monochrome.st/artist/{artistId}   (series, top tracks = episodes, albums as recommendations)
+ *   https://monochrome.st/track/{trackId}     (single)
  */
 
-import com.fasterxml.jackson.databind.JsonNode
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MonochromeProvider : MainAPI() {
     override var mainUrl = "https://monochrome.st"
     override var name = "Monochrome"
+    override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Others)
+    override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
-    private val tracksApi = "https://tracks.monochrome.st"
-    private val tidalProxy = "https://tidal-proxy.monochrome.tf"
-
-    // Tidal client credentials (public, taken from the monochrome.st site bundle)
-    private val tidalClientId = "txNoH4kkV41MfH25"
-    private val tidalClientSecret = "dQjy0MinCEvxi1O4UmxvxWnDjt4cgHBPw8ll6nYBk98="
+    private val api = "https://tracks.monochrome.st"
 
     private val ua =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    private val mapper = ObjectMapper()
-
-    // Cache the Tidal access token (expires in ~1 day)
-    @Volatile private var tidalToken: String? = null
-    @Volatile private var tidalTokenExpiry: Long = 0L
-
-    private val baseHeaders = mapOf(
+    private val headers = mapOf(
         "Origin" to mainUrl,
         "Referer" to "$mainUrl/",
         "User-Agent" to ua,
         "Accept" to "application/json",
     )
 
+    // ---------------------------------------------------------------- networking
+
+    private suspend fun getJson(url: String): JSONObject {
+        var r = app.get(url, headers = headers, timeout = 30L)
+        if (r.code >= 500 || r.code == 429) { // the server sometimes answers 502 - try again once
+            kotlinx.coroutines.delay(700L)
+            r = app.get(url, headers = headers, timeout = 30L)
+        }
+        if (r.code !in 200..299) throw ErrorLoadingException("Monochrome: HTTP ${r.code} for ${url.substringAfter("://").take(60)}")
+        return try {
+            JSONObject(r.text)
+        } catch (_: Throwable) {
+            throw ErrorLoadingException("Monochrome: bad answer from server")
+        }
+    }
+
+    private fun q(s: String) = URLEncoder.encode(s.trim(), "UTF-8")
+
+    // ---------------------------------------------------------------- json helpers
+
+    private fun JSONObject.str(vararg keys: String): String? {
+        for (k in keys) {
+            val v = optString(k, "")
+            if (v.isNotBlank() && v != "null") return v
+        }
+        return null
+    }
+
+    private fun JSONArray?.objects(): List<JSONObject> {
+        if (this == null) return emptyList()
+        return (0 until length()).mapNotNull { optJSONObject(it) }
+    }
+
+    /** "Pritam, Mohit Chauhan" from either artistNames[] or artists[{name}] */
+    private fun artistsOf(o: JSONObject): String {
+        o.optJSONArray("artistNames")?.let { a ->
+            val names = (0 until a.length()).mapNotNull { a.optString(it).ifBlank { null } }
+            if (names.isNotEmpty()) return names.take(3).joinToString(", ")
+        }
+        val names = o.optJSONArray("artists").objects().mapNotNull { it.str("name", "displayName") }
+        return names.take(3).joinToString(", ")
+    }
+
+    private fun artwork(o: JSONObject, releaseId: String?): String? =
+        o.str("artwork", "cover", "avatar") ?: releaseId?.let { "$api/proxy/mi/$it-1A01.jpg" }
+
+    private fun yearOf(o: JSONObject): Int? = o.str("releaseDate")?.take(4)?.toIntOrNull()
+
+    // ---------------------------------------------------------------- cards
+
+    private fun releaseCard(o: JSONObject): SearchResponse? {
+        val id = o.str("releaseId", "id") ?: return null
+        val title = o.str("title") ?: return null
+        val artist = artistsOf(o)
+        return newTvSeriesSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/album/$id", TvType.Music) {
+            this.posterUrl = artwork(o, id)
+            this.year = yearOf(o)
+        }
+    }
+
+    private fun trackCard(o: JSONObject): SearchResponse? {
+        if (o.has("playable") && !o.optBoolean("playable", true)) return null
+        val id = o.str("trackId", "id") ?: return null
+        val title = o.str("title") ?: return null
+        val artist = artistsOf(o)
+        val rel = o.str("releaseId")?.let { "?album=$it" } ?: ""
+        return newMovieSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/track/$id$rel", TvType.Music) {
+            this.posterUrl = artwork(o, o.str("releaseId"))
+        }
+    }
+
+    private fun artistCard(o: JSONObject): SearchResponse? {
+        val id = o.str("artistId", "id") ?: return null
+        val name = o.str("displayName", "name") ?: return null
+        return newTvSeriesSearchResponse(name, "$mainUrl/artist/$id", TvType.Music) {
+            this.posterUrl = o.str("avatar")
+        }
+    }
+
     // ---------------------------------------------------------------- home page
 
     override val mainPage = mainPageOf(
-        "editors-picks" to "Editor's Picks",
-        "hot" to "Hot Right Now",
-        "new" to "New Releases",
+        "picks" to "Editor's Picks",
+        "q:hits 2025" to "Hits",
+        "q:bollywood" to "Bollywood",
+        "q:arijit singh" to "Arijit Singh",
+        "q:punjabi" to "Punjabi",
+        "q:romantic" to "Romantic",
+        "q:lofi" to "Lo-fi & Chill",
+        "q:hip hop" to "Hip Hop",
+        "q:pop" to "Pop",
+        "q:phonk" to "Phonk",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(request.name, emptyList())
-        return try {
-            val items = when (request.data) {
-                "editors-picks" -> fetchEditorsPicks()
-                "hot" -> fetchHot()
-                else -> emptyList()
-            }
-            newHomePageResponse(request.name, items)
-        } catch (_: Exception) {
-            newHomePageResponse(request.name, emptyList())
-        }
+        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
+        val items = if (request.data == "picks") editorsPicks()
+        else releaseSearch(request.data.removePrefix("q:"), 30)
+        return newHomePageResponse(HomePageList(request.name, items), false)
     }
 
-    private suspend fun fetchEditorsPicks(): List<SearchResponse> {
-        val json = app.get("$mainUrl/editors-picks.json", headers = baseHeaders, timeout = 20_000L).text
-        val arr = mapper.readTree(json) ?: return emptyList()
-        if (!arr.isArray) return emptyList()
-        return arr.mapNotNull { node ->
-            val id = node.get("id")?.asText() ?: return@mapNotNull null
-            val title = node.get("title")?.asText() ?: return@mapNotNull null
-            val artist = node.get("artist")?.get("name")?.asText() ?: ""
-            val cover = coverUrl(id)
-            newMovieSearchResponse("$title — $artist", trackPayload(id, id, title, artist), TvType.Others) {
-                this.posterUrl = cover
-            }
-        }
-    }
+    private suspend fun releaseSearch(query: String, limit: Int): List<SearchResponse> =
+        getJson("$api/search/releases?q=${q(query)}&limit=$limit")
+            .optJSONArray("releases").objects().mapNotNull { releaseCard(it) }
 
-    private suspend fun fetchHot(): List<SearchResponse> {
-        val json = app.get("https://hot.monochrome.tf/", headers = baseHeaders, timeout = 20_000L).text
-        val arr = mapper.readTree(json) ?: return emptyList()
-        val list = when {
-            arr.isArray -> arr
-            arr.get("tracks")?.isArray == true -> arr.get("tracks")
-            else -> return emptyList()
+    /** The site's editor picks are Tidal albums - find the same album on tracks.monochrome.st. */
+    private suspend fun editorsPicks(): List<SearchResponse> {
+        val picks = try {
+            JSONArray(app.get("$mainUrl/editors-picks.json", headers = headers, timeout = 30L).text).objects()
+        } catch (_: Throwable) {
+            emptyList()
         }
-        return list.mapNotNull { parseTrackNode(it) }
+        val found = picks.take(24).amap { p ->
+            try {
+                val title = p.str("title") ?: return@amap null
+                val artist = p.optJSONObject("artist")?.str("name") ?: ""
+                val hits = getJson("$api/search/releases?q=${q("$artist $title")}&limit=5")
+                    .optJSONArray("releases").objects()
+                val norm = { s: String -> s.lowercase().replace(Regex("[^a-z0-9]"), "") }
+                val best = hits.firstOrNull { norm(it.str("title") ?: "") == norm(title) }
+                    ?: hits.firstOrNull { norm(it.str("title") ?: "").contains(norm(title).take(8)) }
+                best?.let { releaseCard(it) }
+            } catch (_: Throwable) {
+                null
+            }
+        }.filterNotNull()
+        // fall back to something useful if the picks can't be matched
+        return found.ifEmpty { releaseSearch("hits", 30) }
     }
 
     // ---------------------------------------------------------------- search
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        return try {
-            val q = URLEncoder.encode(query.trim(), "UTF-8")
-            val json = app.get(
-                "$tracksApi/search/tracks?q=$q&limit=20",
-                headers = baseHeaders,
-                timeout = 20_000L
-            ).text
-            val root = mapper.readTree(json) ?: return emptyList()
-            val arr = root.get("tracks") ?: return emptyList()
-            arr.mapNotNull { parseTrackNode(it) }
-        } catch (_: Exception) {
-            emptyList()
+        val root = getJson("$api/search?q=${q(query)}")
+        val out = ArrayList<SearchResponse>()
+        root.optJSONArray("artists").objects().take(4).mapNotNullTo(out) { artistCard(it) }
+        root.optJSONArray("tracks").objects().mapNotNullTo(out) { trackCard(it) }
+        root.optJSONArray("releases").objects().mapNotNullTo(out) { releaseCard(it) }
+        // more tracks than the combined search gives
+        try {
+            getJson("$api/search/tracks?q=${q(query)}&limit=30").optJSONArray("tracks").objects()
+                .mapNotNull { trackCard(it) }.forEach { t -> if (out.none { it.url == t.url }) out.add(t) }
+        } catch (_: Throwable) {
         }
-    }
-
-    private fun parseTrackNode(node: JsonNode): SearchResponse? {
-        val trackId = (node.get("trackId") ?: node.get("id"))?.asText() ?: return null
-        val releaseId = node.get("releaseId")?.asText() ?: trackId
-        val title = node.get("title")?.asText() ?: return null
-        val artist = node.get("artists")
-            ?.firstOrNull { it.isObject }?.get("name")?.asText()
-            ?: node.get("artistName")?.asText()
-            ?: ""
-        val cover = coverUrl(releaseId)
-        return newMovieSearchResponse(
-            if (artist.isNotBlank()) "$title — $artist" else title,
-            trackPayload(trackId, releaseId, title, artist),
-            TvType.Others
-        ) {
-            this.posterUrl = cover
-        }
+        return out.distinctBy { it.url }
     }
 
     // ---------------------------------------------------------------- load
 
+    private fun idFrom(url: String, kind: String): String? =
+        Regex("/$kind/(\\d+)").find(url)?.groupValues?.get(1)
+
     override suspend fun load(url: String): LoadResponse? {
-        val parts = url.split("|")
-        if (parts.size < 5 || parts[0] != "track") return null
-        val trackId = parts[1]
-        val releaseId = parts[2]
-        val title = parts[3]
-        val artist = parts[4]
-
-        // Try to load richer release details
-        val (richTitle, richArtist, cover) = try {
-            val json = app.get("$tracksApi/releases/$releaseId", headers = baseHeaders, timeout = 15_000L).text
-            val root = mapper.readTree(json)
-            val t = root?.get("title")?.asText() ?: title
-            val a = root?.get("artists")?.firstOrNull { it.isObject }?.get("name")?.asText() ?: artist
-            val c = coverUrl(releaseId)
-            Triple(t, a, c)
-        } catch (_: Exception) {
-            Triple(title, artist, coverUrl(releaseId))
+        // links saved by older versions: track|id|releaseId|title|artist
+        if (url.startsWith("track|")) {
+            val p = url.split("|")
+            val rel = p.getOrNull(2)?.takeIf { it.isNotBlank() && it != p.getOrNull(1) }?.let { "?album=$it" } ?: ""
+            return load("$mainUrl/track/${p.getOrNull(1) ?: return null}$rel")
         }
+        idFrom(url, "album")?.let { return loadAlbum(it) }
+        idFrom(url, "artist")?.let { return loadArtist(it) }
+        idFrom(url, "track")?.let { return loadTrack(it, Regex("[?&]album=(\\d+)").find(url)?.groupValues?.get(1)) }
+        throw ErrorLoadingException("Monochrome: unknown link")
+    }
 
-        val displayTitle = if (richArtist.isNotBlank()) "$richTitle — $richArtist" else richTitle
+    private fun trackEpisode(t: JSONObject, n: Int, fallbackPoster: String?): Episode? {
+        if (t.has("playable") && !t.optBoolean("playable", true)) return null
+        val id = t.str("trackId", "id") ?: return null
+        val title = t.str("title") ?: "Track $n"
+        val artist = artistsOf(t)
+        return newEpisode(id) {
+            this.name = title
+            this.episode = t.optInt("trackNumber", n).takeIf { it > 0 } ?: n
+            this.season = t.optInt("discNumber", 1).takeIf { it > 0 } ?: 1
+            this.posterUrl = t.str("artwork") ?: fallbackPoster
+            this.description = artist.ifBlank { null }
+            this.runTime = (t.optLong("duration", 0L) / 1000L).toInt().takeIf { it > 0 }
+        }
+    }
 
-        return newMovieLoadResponse(displayTitle, url, TvType.Others, url) {
+    private suspend fun loadAlbum(id: String): LoadResponse {
+        val r = getJson("$api/releases/$id")
+        val title = r.str("title") ?: "Album"
+        val artist = artistsOf(r)
+        val cover = artwork(r, id)
+        var n = 0
+        val eps = r.optJSONArray("tracks").objects().mapNotNull { trackEpisode(it, ++n, cover) }
+        return newTvSeriesLoadResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/album/$id", TvType.Music, eps) {
             this.posterUrl = cover
             this.backgroundPosterUrl = cover
+            this.year = yearOf(r)
+            this.plot = listOfNotNull(
+                artist.ifBlank { null },
+                r.str("releaseType")?.lowercase()?.replaceFirstChar { it.uppercase() },
+                r.str("label"),
+                "${eps.size} tracks",
+            ).joinToString(" | ")
+            this.tags = listOfNotNull(r.str("label"))
+        }
+    }
+
+    private suspend fun loadArtist(id: String): LoadResponse {
+        val a = getJson("$api/artists/$id")
+        val name = a.str("displayName", "name") ?: "Artist"
+        val avatar = a.str("avatar")
+        var n = 0
+        val eps = a.optJSONArray("topTracks").objects().mapNotNull { trackEpisode(it, ++n, avatar) }
+            .mapIndexed { i, e -> e.apply { episode = i + 1; season = 1 } }
+        val albums = (a.optJSONArray("albums").objects() + a.optJSONArray("releases").objects() +
+            a.optJSONArray("singles").objects() + a.optJSONArray("compilations").objects())
+            .mapNotNull { releaseCard(it) }.distinctBy { it.url }
+        return newTvSeriesLoadResponse(name, "$mainUrl/artist/$id", TvType.Music, eps) {
+            this.posterUrl = avatar
+            this.backgroundPosterUrl = a.str("banner") ?: avatar
+            this.plot = a.str("biography", "bio")
+                ?: "Top tracks by $name. Albums are listed below."
+            this.recommendations = albums
+        }
+    }
+
+    private suspend fun loadTrack(id: String, releaseId: String?): LoadResponse {
+        // there is no single-track endpoint; the track is read from its album
+        val album = releaseId?.let { rid -> try { getJson("$api/releases/$rid") } catch (_: Throwable) { null } }
+        val t = album?.optJSONArray("tracks").objects().firstOrNull { it.str("trackId", "id") == id }
+        val title = t?.str("title") ?: "Track"
+        val artist = t?.let { artistsOf(it) } ?: ""
+        val cover = t?.let { artwork(it, releaseId) } ?: releaseId?.let { "$api/proxy/mi/$it-1A01.jpg" }
+        val others = album?.optJSONArray("tracks").objects()
+            .filter { it.str("trackId") != id }
+            .mapNotNull { trackCard(it.apply { if (!has("artwork")) put("artwork", cover); if (!has("releaseId")) put("releaseId", releaseId) }) }
+        val self = "$mainUrl/track/$id" + (releaseId?.let { "?album=$it" } ?: "")
+        return newMovieLoadResponse(if (artist.isNotBlank()) "$title - $artist" else title, self, TvType.Music, id) {
+            this.posterUrl = cover
+            this.backgroundPosterUrl = cover
+            this.plot = listOfNotNull(artist.ifBlank { null }, album?.str("title")?.let { "from $it" }).joinToString(" | ")
+            this.duration = t?.optLong("duration", 0L)?.let { (it / 60000L).toInt() }?.takeIf { it > 0 }
+            this.recommendations = others
         }
     }
 
@@ -176,148 +299,20 @@ class MonochromeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
-        if (parts.size < 2 || parts[0] != "track") return false
-        val trackId = parts[1]
+        val id = when {
+            data.startsWith("track|") -> data.split("|").getOrNull(1)
+            data.startsWith("http") -> idFrom(data, "track")
+            else -> data
+        }?.takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return false
 
-        // Get Tidal access token
-        val token = getTidalToken() ?: return false
-
-        // Try each quality in order: highest first
-        val qualities = listOf("LOSSLESS", "HIGH", "LOW")
-        var found = false
-
-        for (quality in qualities) {
-            try {
-                val streamJson = app.get(
-                    "$tidalProxy/tidal/v1/tracks/$trackId/streamUrl?soundQuality=$quality&countryCode=US",
-                    headers = mapOf(
-                        "Authorization" to "Bearer $token",
-                        "Origin" to mainUrl,
-                        "Referer" to "$mainUrl/",
-                        "User-Agent" to ua,
-                        "Accept" to "application/json",
-                    ),
-                    timeout = 20_000L
-                )
-                if (streamJson.code !in 200..299) continue
-
-                val root = mapper.readTree(streamJson.text) ?: continue
-                val streamUrl = root.get("url")?.asText()?.takeIf { it.startsWith("http") } ?: continue
-                val codec = root.get("codec")?.asText() ?: ""
-                val bitDepth = root.get("bitDepth")?.asInt()
-                val sampleRate = root.get("sampleRate")?.asInt()
-
-                val qualityLabel = when (quality) {
-                    "LOSSLESS" -> if (bitDepth != null && sampleRate != null) "FLAC ${sampleRate / 1000}kHz/${bitDepth}bit" else "FLAC"
-                    "HIGH" -> "AAC 320kbps"
-                    else -> "AAC 96kbps"
-                }
-
-                val linkType = when {
-                    streamUrl.contains(".m3u8") -> ExtractorLinkType.M3U8
-                    else -> ExtractorLinkType.VIDEO
-                }
-
-                callback.invoke(
-                    newExtractorLink(name, "$name $qualityLabel", streamUrl, linkType) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Authorization" to "Bearer $token",
-                            "Origin" to mainUrl,
-                            "User-Agent" to ua,
-                        )
-                    }
-                )
-                found = true
-                // Only emit the best working quality
-                break
-            } catch (_: Exception) {
-                continue
+        // the stream endpoint returns the FLAC file itself
+        callback.invoke(
+            newExtractorLink(name, "$name FLAC (lossless)", "$api/track/$id", ExtractorLinkType.VIDEO) {
+                this.referer = "$mainUrl/"
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf("Origin" to mainUrl, "User-Agent" to ua)
             }
-        }
-
-        // Fallback: try the OpenAPI v2 playback manifest endpoint
-        if (!found) {
-            try {
-                val manifestJson = app.get(
-                    "$tidalProxy/openapi/v2/tracks/$trackId/playbackInfo?audioquality=HIGH&playbackmode=STREAM&assetpresentation=FULL",
-                    headers = mapOf(
-                        "Authorization" to "Bearer $token",
-                        "Origin" to mainUrl,
-                        "Referer" to "$mainUrl/",
-                        "User-Agent" to ua,
-                        "Accept" to "application/json",
-                    ),
-                    timeout = 20_000L
-                )
-                if (manifestJson.code in 200..299) {
-                    val root = mapper.readTree(manifestJson.text)
-                    val manifest = root?.get("manifest")?.asText()
-                    if (manifest != null) {
-                        // manifest is base64-encoded XML or JSON; look for URL inside
-                        val decoded = android.util.Base64.decode(manifest, android.util.Base64.DEFAULT).decodeToString()
-                        val urlMatch = Regex("""https?://[^\s<>"']+""").find(decoded)?.value
-                        if (urlMatch != null) {
-                            val isM3u8 = urlMatch.contains(".m3u8")
-                            callback.invoke(
-                                newExtractorLink(name, "$name Stream", urlMatch,
-                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                                    this.referer = "$mainUrl/"
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            found = true
-                        }
-                    }
-                }
-            } catch (_: Exception) {
-            }
-        }
-
-        return found
+        )
+        return true
     }
-
-    // ---------------------------------------------------------------- Tidal token
-
-    private suspend fun getTidalToken(): String? {
-        val now = System.currentTimeMillis()
-        if (tidalToken != null && now < tidalTokenExpiry - 60_000L) return tidalToken
-
-        return try {
-            val credentials = android.util.Base64.encodeToString(
-                "$tidalClientId:$tidalClientSecret".toByteArray(),
-                android.util.Base64.NO_WRAP
-            )
-            val resp = app.post(
-                "https://auth.tidal.com/v1/oauth2/token",
-                headers = mapOf(
-                    "Authorization" to "Basic $credentials",
-                    "Content-Type" to "application/x-www-form-urlencoded",
-                    "Origin" to mainUrl,
-                    "User-Agent" to ua,
-                ),
-                data = mapOf("grant_type" to "client_credentials"),
-                timeout = 20_000L
-            )
-            if (resp.code !in 200..299) return null
-            val root = mapper.readTree(resp.text) ?: return null
-            val token = root.get("access_token")?.asText() ?: return null
-            val expiresIn = root.get("expires_in")?.asLong() ?: 86400L
-            tidalToken = token
-            tidalTokenExpiry = now + expiresIn * 1000L
-            token
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    // ---------------------------------------------------------------- helpers
-
-    private fun coverUrl(releaseId: String): String =
-        "$tracksApi/proxy/mi/$releaseId-1A01.jpg"
-
-    private fun trackPayload(trackId: String, releaseId: String, title: String, artist: String): String =
-        "track|$trackId|$releaseId|$title|$artist"
 }

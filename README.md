@@ -31,6 +31,8 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | Extension | Site | Types | Language | Status |
 |-----------|------|-------|----------|--------|
 | **CineLite** | [cinelite.xyz](https://cinelite.xyz) | Movie · TV Series | 🇬🇧 EN | ✅ Beta |
+| **Monochrome** | [monochrome.st](https://monochrome.st) | Music | 🇬🇧 EN | ✅ Beta |
+| **KiligDrama** | [kiligdrama.com](https://kiligdrama.com) | Short Drama | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

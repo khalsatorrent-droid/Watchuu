@@ -90,6 +90,15 @@ object KiligSettings {
         get() = str("site_url", DEFAULT_URL).trim().trimEnd('/').ifBlank { DEFAULT_URL }
         set(v) = put { putString("site_url", v.trim().trimEnd('/')) }
 
+    /** If the API gives nothing, open the episode page in a hidden browser and catch the player's video. */
+    var sniffFallback: Boolean
+        get() = bool("sniff_fallback", true)
+        set(v) = put { putBoolean("sniff_fallback", v) }
+
+    /** Result of the last loadLinks (for "Show last link report"). */
+    @Volatile
+    var lastLinkReport: String = "No episode played yet."
+
     fun currentActivity(ctx: Context? = null): Activity? =
         (ctx as? Activity) ?: try { CommonActivity.activity } catch (_: Throwable) { null }
 
@@ -182,6 +191,31 @@ object KiligSettings {
                 }
             }
         })
+        root.addView(button("Test streaming links (Tangled in Desire ep 1)") {
+            Toast.makeText(act, "Loading episode 1 - can take up to a minute...", Toast.LENGTH_LONG).show()
+            scope.launch {
+                val msg = try {
+                    val p = KiligDramaProvider()
+                    val lr = p.load("$siteUrl/en/drama/tangled-in-desire-5") as? com.lagradost.cloudstream3.TvSeriesLoadResponse
+                    val ep = lr?.episodes?.firstOrNull()
+                    if (ep == null) "Series page loaded but no episodes found." else {
+                        val links = ArrayList<String>()
+                        var subs = 0
+                        p.loadLinks(ep.data, false, { subs++ }, { links.add(it.name + "\n" + it.url.take(110)) })
+                        "Episode data: ${ep.data}\n\nLinks: ${links.size}, subtitles: $subs\n\n" +
+                            links.joinToString("\n\n") + "\n\nReport: " + lastLinkReport
+                    }
+                } catch (e: Throwable) {
+                    "Error: ${e.message ?: e.javaClass.simpleName}\n\nTrace: ${KiligBrowser.lastTrace}\n\nReport: $lastLinkReport"
+                }
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(act).setTitle("KiligDrama link test").setMessage(msg).setPositiveButton("OK", null).show()
+                }
+            }
+        })
+        root.addView(button("Show last link report") {
+            AlertDialog.Builder(act).setTitle("Last link report").setMessage(lastLinkReport).setPositiveButton("OK", null).show()
+        })
         root.addView(button("Clear Cloudflare cookies") {
             scope.launch {
                 KiligBrowser.reset(clearCookies = true)
@@ -215,7 +249,8 @@ object KiligSettings {
         val cbPrompt = CheckBox(act).apply { text = "Open solver window automatically when needed"; isChecked = autoPrompt }
         val cbWv = CheckBox(act).apply { text = "Hide WebView marker in user agent (\"; wv\")"; isChecked = stripWv }
         val cbLight = CheckBox(act).apply { text = "Lightweight hidden browser (no images)"; isChecked = lightweight }
-        root.addView(cbPrompt); root.addView(cbWv); root.addView(cbLight)
+        val cbSniff = CheckBox(act).apply { text = "If no links: play the episode page in a hidden browser and catch the video"; isChecked = sniffFallback }
+        root.addView(cbPrompt); root.addView(cbWv); root.addView(cbLight); root.addView(cbSniff)
 
         root.addView(header("Hidden browser timeout (seconds)"))
         val etTimeout = field("35", timeoutSec.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }
@@ -246,6 +281,7 @@ object KiligSettings {
                 val uaChanged = stripWv != cbWv.isChecked || customUa != etUa.text.toString().trim()
                 stripWv = cbWv.isChecked
                 lightweight = cbLight.isChecked
+                sniffFallback = cbSniff.isChecked
                 timeoutSec = etTimeout.text.toString().toIntOrNull() ?: 35
                 customUa = etUa.text.toString()
                 manualCookie = etCookie.text.toString()

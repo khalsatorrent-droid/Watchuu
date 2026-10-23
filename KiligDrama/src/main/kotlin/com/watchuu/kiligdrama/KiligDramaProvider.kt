@@ -105,8 +105,15 @@ class KiligDramaProvider : MainAPI() {
             if (url == exclude || !seen.add(url)) continue
             val title = a.attr("aria-label").trim()
             if (title.isBlank()) continue
-            out.add(newTvSeriesSearchResponse(title, url, TvType.AsianDrama) {
+            // card text looks like "EP 50 8.1 Title ..." (catalog) or "English · 30 Episodes" (search)
+            val text = a.text() + " " + (a.parent()?.text() ?: "")
+            val eps = Regex("""\bEP\s*(\d{1,4})\b""", RegexOption.IGNORE_CASE).find(text)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""(\d{1,4})\s*Episodes?\b""", RegexOption.IGNORE_CASE).find(text)?.groupValues?.get(1)?.toIntOrNull()
+            val rating = Regex("""(?<![\d.])([1-9]\.\d|10\.0)(?![\d.])""").find(a.text())?.groupValues?.get(1)
+            out.add(newAnimeSearchResponse(title, url, TvType.AsianDrama) {
                 this.posterUrl = posterOf(a)
+                if (eps != null && eps > 0) addSub(eps)
+                rating?.let { r -> this.score = Score.from10(r) }
             })
         }
         return out
@@ -196,13 +203,27 @@ class KiligDramaProvider : MainAPI() {
         }
         val firstSerial = first ?: 1
 
-        val episodes = (1..count).map { n ->
+        // exact serial numbers + thumbnails from the RSC episode list
+        //   {"chapter_id":"..","serial_number":1,"cover":"https://..."}
+        val serials = ArrayList<Int>()
+        val covers = HashMap<Int, String>()
+        Regex("""\\?"serial_number\\?"\s*:\s*(\d+)(?:\s*,\s*\\?"cover\\?"\s*:\s*\\?"(https?:[^"\\]+))?""")
+            .findAll(html).forEach { m ->
+                val sn = m.groupValues[1].toIntOrNull() ?: return@forEach
+                if (!serials.contains(sn)) serials.add(sn)
+                m.groupValues.getOrNull(2)?.ifBlank { null }?.let { covers[sn] = it }
+            }
+        serials.sort()
+        val total = maxOf(count, serials.size)
+
+        val episodes = (1..total).map { n ->
             val epUrl = "$seriesUrl/episode-$n"
-            newEpisode("${bookId ?: ""}|${firstSerial + n - 1}|$epUrl") {
+            val serial = serials.getOrNull(n - 1) ?: (firstSerial + n - 1)
+            newEpisode("${bookId ?: ""}|$serial|$epUrl") {
                 this.name = "Episode $n"
                 this.season = 1
                 this.episode = n
-                this.posterUrl = poster
+                this.posterUrl = covers[serial] ?: poster
             }
         }
 
@@ -292,29 +313,29 @@ class KiligDramaProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
+    /** Turns one /api/episode-source JSON into links. Returns how many links were sent. */
+    private suspend fun emitFromJson(
+        body: String,
+        seen: HashSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val parts = data.split("|", limit = 3)
-        var bookId = parts.getOrNull(0)?.ifBlank { null }
-        val serial = parts.getOrNull(1)?.toIntOrNull() ?: return false
-        val epUrl = parts.getOrNull(2) ?: "$mainUrl/$locale"
-        if (bookId == null) bookId = rscString(getText(epUrl), "bookId") ?: return false
-
-        val api = "$mainUrl/api/episode-source/$bookId/$serial?lang=$locale"
-        val json = JSONObject(getText(api, epUrl))
+        callback: (ExtractorLink) -> Unit,
+        notes: StringBuilder,
+    ): Int {
+        val json = try {
+            JSONObject(body.trim())
+        } catch (_: Throwable) {
+            notes.append("api answer is not JSON (").append(body.take(60).replace("\n", " ")).append("); ")
+            return 0
+        }
         val desc = json.optJSONObject("descriptor") ?: json
-        val chain = desc.optJSONArray("chain") ?: return false
+        val chain = desc.optJSONArray("chain")
+        if (chain == null || chain.length() == 0) {
+            notes.append("api has no chain (").append(json.optString("error", json.optString("message")).take(60)).append("); ")
+            return 0
+        }
         val defaultSource = desc.optString("source").ifBlank { name }
-
-        val seen = HashSet<String>()
-        var found = false
-        val ua = mapOf("User-Agent" to KiligBrowser.userAgent())
-        KiligProxy.userAgent = KiligBrowser.userAgent()
-
+        var n = 0
+        var decFail = 0
         for (i in 0 until chain.length()) {
             val item = chain.optJSONObject(i) ?: continue
             val type = item.optString("type").lowercase()
@@ -323,41 +344,159 @@ class KiligDramaProvider : MainAPI() {
 
             val urls = ArrayList<Pair<String?, String>>()
             item.optJSONObject("encByQuality")?.let { byQ ->
-                byQ.keys().forEach { k -> decrypt(byQ.optString(k))?.let { urls.add(k to it) } }
+                byQ.keys().forEach { k ->
+                    val d = decrypt(byQ.optString(k))
+                    if (d != null) urls.add(k to d) else decFail++
+                }
             }
-            decrypt(item.optString("enc"))?.let { u -> if (urls.none { it.second == u }) urls.add(null to u) }
-            item.optString("url").takeIf { it.startsWith("http") }?.let { urls.add(null to it) }
+            item.optString("enc").ifBlank { null }?.let { e ->
+                val d = decrypt(e)
+                if (d == null) decFail++ else if (urls.none { it.second == d }) urls.add(null to d)
+            }
+            for (k in listOf("url", "src", "source_url")) {
+                item.optString(k).takeIf { it.startsWith("http") }?.let { urls.add(null to it) }
+            }
 
             for ((qKey, u) in urls) {
                 if (!u.startsWith("http")) continue
-                for (c in candidates(type, source, u, qKey)) {
-                    if (!seen.add(c.url)) continue
-                    found = true
-                    // the site's proxies only answer requests coming from kiligdrama.com,
-                    // the original CDNs are fetched with no referrer (referrerPolicy: no-referrer)
-                    val proxied = c.url.startsWith(mediaProxy) || c.url.startsWith(bcdnProxy)
-                    callback.invoke(
-                        newExtractorLink(name, "$name - ${c.label}", c.url, c.type) {
-                            this.referer = if (proxied) "$mainUrl/" else ""
-                            this.headers = if (proxied) ua + ("Origin" to mainUrl) else ua
-                            this.quality = c.quality
-                        }
-                    )
+                val cands = try {
+                    candidates(type, source, u, qKey)
+                } catch (e: Throwable) {
+                    notes.append("$type: ${e.javaClass.simpleName}; ")
+                    listOf(Cand("$source ${qKey ?: ""}".trim(), u, if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, qualityOf(qKey, u)))
                 }
+                for (c in cands) if (emit(c, seen, callback)) n++
             }
         }
+        if (decFail > 0) notes.append("decrypt failed x").append(decFail).append("; ")
 
         desc.optJSONObject("subtitle")?.let { sub ->
             val u = decrypt(sub.optString("enc")) ?: sub.optString("url").takeIf { it.startsWith("http") }
-            if (u != null) {
+            if (u != null && u.startsWith("http")) {
                 val code = sub.optString("language").ifBlank { sub.optString("lang") }
-                val lang = when {
-                    code.isBlank() || code.startsWith("en", true) -> "English"
-                    else -> code
-                }
+                val lang = if (code.isBlank() || code.startsWith("en", true)) "English" else code
                 subtitleCallback.invoke(newSubtitleFile(lang, u))
             }
         }
-        return found
+        return n
+    }
+
+    private suspend fun emit(c: Cand, seen: HashSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+        if (!seen.add(c.url)) return false
+        // the site's proxies only answer requests coming from kiligdrama.com,
+        // the original CDNs are fetched with no referrer (referrerPolicy: no-referrer)
+        val proxied = c.url.startsWith(mediaProxy) || c.url.startsWith(bcdnProxy) ||
+            (c.url.contains("127.0.0.1") && (c.url.contains("dramadizilerim") || c.url.contains("b-cdn")))
+        val ua = mapOf("User-Agent" to KiligBrowser.userAgent())
+        callback.invoke(
+            newExtractorLink(name, "$name - ${c.label}", c.url, c.type) {
+                this.referer = if (proxied) "$mainUrl/" else ""
+                this.headers = if (proxied) ua + ("Origin" to mainUrl) else ua
+                this.quality = c.quality
+            }
+        )
+        return true
+    }
+
+    /**
+     * The episode page embeds the first source in its RSC data:
+     *   \"sourceFirst\":{\"source\":\"ToonScroll\",\"chain\":[{\"enc\":\"...\",\"type\":\"mp4\"}],\"subtitle\":null}
+     * Returns it as plain JSON (same shape as the API descriptor).
+     */
+    private fun pageDescriptor(html: String): String? {
+        val i = html.indexOf("sourceFirst").takeIf { it >= 0 } ?: return null
+        val start = html.indexOf('{', i).takeIf { it >= 0 && it - i < 12 } ?: return null
+        val raw = html.substring(start, minOf(html.length, start + 20_000))
+        val sb = StringBuilder()
+        var depth = 0
+        var k = 0
+        while (k < raw.length) {
+            var ch = raw[k]
+            if (ch == '\\' && k + 1 < raw.length) { // undo the JS-string escaping
+                ch = raw[k + 1]; k++
+                if (ch == 'n') ch = '\n'
+            }
+            sb.append(ch)
+            if (ch == '{') depth++ else if (ch == '}') { depth--; if (depth == 0) return sb.toString() }
+            k++
+        }
+        return null
+    }
+
+    /** Link that the site's own player loaded (sniffed from the episode page). */
+    private fun sniffedCand(u: String): Cand {
+        val isHls = u.substringBefore("?").endsWith(".m3u8", true) || u.contains(".m3u8", true)
+        val type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        val q = qualityOf(null, u)
+        return if (u.contains("/hls-encrypted/")) Cand("Player (ShortTV)", KiligProxy.playlist(u), type, q)
+        else Cand("Player", u, type, q)
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val notes = StringBuilder()
+        val parts = data.split("|", limit = 3)
+        var bookId = parts.getOrNull(0)?.ifBlank { null }
+        var serial = parts.getOrNull(1)?.toIntOrNull()
+        val epUrl = parts.getOrNull(2)?.ifBlank { null }
+            ?: data.takeIf { it.startsWith("http") } ?: "$mainUrl/$locale"
+        KiligProxy.userAgent = KiligBrowser.userAgent()
+        val seen = HashSet<String>()
+        var found = 0
+
+        // 1) the site's API (same request the player makes)
+        try {
+            if (bookId == null || serial == null) {
+                val page = getText(epUrl)
+                bookId = bookId ?: rscString(page, "bookId")
+                serial = serial ?: rscInt(page, "serial") ?: rscInt(page, "serialNumber")
+                    ?: epUrl.substringAfterLast("/episode-").toIntOrNull()
+            }
+            if (bookId != null && serial != null) {
+                val api = "$mainUrl/api/episode-source/$bookId/$serial?lang=$locale"
+                val body = getText(api, epUrl)
+                found += emitFromJson(body, seen, subtitleCallback, callback, notes)
+            } else notes.append("no bookId on page; ")
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            notes.append("api: ").append(e.message?.take(80) ?: e.javaClass.simpleName)
+                .append(" [").append(KiligBrowser.lastTrace.take(160)).append("]; ")
+        }
+
+        // 2) the episode page itself carries the first source (same route as the catalog pages)
+        if (found == 0) {
+            try {
+                val page = getText(epUrl, epUrl.substringBefore("/episode-"))
+                val d = pageDescriptor(page)
+                if (d != null) found += emitFromJson(d, seen, subtitleCallback, callback, notes)
+                else notes.append("no source in episode page; ")
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                notes.append("page: ").append(e.message?.take(80) ?: e.javaClass.simpleName).append("; ")
+            }
+        }
+
+        // 3) open the episode page like a viewer and catch what the player loads
+        if (found == 0 && KiligSettings.sniffFallback) {
+            try {
+                val sn = KiligBrowser.sniff(epUrl)
+                for (b in sn.apiBodies) found += emitFromJson(b, seen, subtitleCallback, callback, notes)
+                if (found == 0) for (u in sn.video) if (emit(sniffedCand(u), seen, callback)) found++
+                // last resort: first media request (the player loads the current episode before preloading the next)
+                if (found == 0) sn.media.firstOrNull()?.let { if (emit(sniffedCand(it), seen, callback)) found++ }
+                if (found == 0) notes.append("player page gave nothing; ")
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                notes.append("sniff: ").append(e.javaClass.simpleName).append("; ")
+            }
+        }
+
+        KiligSettings.lastLinkReport = if (found > 0) "OK: $found link(s) for $epUrl  $notes" else "FAILED for $epUrl: $notes"
+        if (found == 0) KiligSettings.toast("KiligDrama: no links - $notes".take(300))
+        return found > 0
     }
 }

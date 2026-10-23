@@ -66,6 +66,11 @@ object KiligBrowser {
     @Volatile
     private var defaultUa: String? = null
 
+    /** Step-by-step notes of the last get() (shown when links fail / in the test dialog). */
+    @Volatile
+    var lastTrace = ""
+        private set
+
     /** Which way the last successful request went (shown by "Test connection"). */
     @Volatile
     var lastMethod = "-"
@@ -136,63 +141,94 @@ object KiligBrowser {
     /** GET a kiligdrama url as text, going through Cloudflare the way the settings say. */
     suspend fun get(url: String, referer: String): String {
         val mode = KiligSettings.mode
-        direct(url, referer)?.let { lastMethod = "cookie (fast)"; return it }
+        val trace = StringBuilder()
+        fun done(method: String, body: String): String {
+            lastMethod = method
+            trace.append("-> ok via ").append(method)
+            lastTrace = trace.toString()
+            return body
+        }
+        direct(url, referer, trace)?.let { return done("cookie (fast)", it) }
 
         when (mode) {
-            KiligSettings.Mode.COOKIE -> throw ErrorLoadingException(
-                "KiligDrama: the manual cookie was rejected. Paste a fresh cf_clearance + matching user agent in the extension settings."
-            )
-
-            KiligSettings.Mode.CLOUDSTREAM -> viaKiller(url, referer)?.let { lastMethod = "Cloudstream bypass"; return it }
+            KiligSettings.Mode.COOKIE -> {}
+            KiligSettings.Mode.CLOUDSTREAM -> viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
             KiligSettings.Mode.AUTO, KiligSettings.Mode.HIDDEN ->
-                viaHidden(url)?.let { lastMethod = "hidden browser"; return it }
+                viaHidden(url, trace)?.let { return done("hidden browser", it) }
 
             KiligSettings.Mode.SOLVER -> {}
         }
 
         val prompt = mode == KiligSettings.Mode.SOLVER ||
             (KiligSettings.autoPrompt && (mode == KiligSettings.Mode.AUTO || mode == KiligSettings.Mode.CLOUDSTREAM))
-        if (prompt && solveInteractive(null)) {
-            direct(url, referer)?.let { lastMethod = "solver + cookie"; return it }
-            viaHidden(url)?.let { lastMethod = "solver + hidden browser"; return it }
+        if (prompt) {
+            trace.append("solver window; ")
+            if (solveInteractive(null)) {
+                direct(url, referer, trace)?.let { return done("solver + cookie", it) }
+                viaHidden(url, trace)?.let { return done("solver + hidden browser", it) }
+            } else trace.append("not solved; ")
         }
+        lastTrace = trace.toString()
         throw ErrorLoadingException(
-            "KiligDrama: Cloudflare not passed. Open Extensions > KiligDrama > settings and tap \"Solve Cloudflare now\"."
+            if (mode == KiligSettings.Mode.COOKIE)
+                "KiligDrama: the manual cookie was rejected. Paste a fresh cf_clearance + matching user agent in the extension settings."
+            else "KiligDrama: Cloudflare not passed. Open Extensions > KiligDrama > settings and tap \"Solve Cloudflare now\"."
         )
     }
 
-    private suspend fun direct(url: String, referer: String): String? {
+    private suspend fun direct(url: String, referer: String, trace: StringBuilder): String? {
         val cookie = cookies()
         return try {
             val h = HashMap<String, String>()
             h["User-Agent"] = userAgent()
             h["Referer"] = referer
             h["Accept-Language"] = "en-US,en;q=0.9"
+            if (url.contains("/api/")) {
+                // look like the player's own fetch()
+                h["Accept"] = "*/*"
+                h["Sec-Fetch-Site"] = "same-origin"
+                h["Sec-Fetch-Mode"] = "cors"
+                h["Sec-Fetch-Dest"] = "empty"
+            } else {
+                h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
             if (!cookie.isNullOrBlank()) h["Cookie"] = cookie
             val r = app.get(url, headers = h, timeout = 20L)
             val body = r.text
-            if (r.code in 200..299 && !isChallenge(r.code, body)) {
-                if (cookie.isNullOrBlank()) lastMethod = "plain"
-                body
-            } else null
+            if (r.code in 200..299 && !isChallenge(r.code, body)) body
+            else {
+                trace.append("direct HTTP ").append(r.code).append(if (isChallenge(r.code, body)) " (challenge)" else "").append("; ")
+                null
+            }
         } catch (e: Throwable) {
             if (e is CancellationException) throw e
+            trace.append("direct error ").append(e.javaClass.simpleName).append("; ")
             null
         }
     }
 
-    private suspend fun viaKiller(url: String, referer: String): String? = try {
+    private suspend fun viaKiller(url: String, referer: String, trace: StringBuilder): String? = try {
         val r = app.get(url, headers = mapOf("Referer" to referer), interceptor = killer, timeout = 60L)
         val body = r.text
-        if (r.code in 200..299 && !isChallenge(r.code, body)) body else null
+        if (r.code in 200..299 && !isChallenge(r.code, body)) body
+        else {
+            trace.append("cloudstream HTTP ").append(r.code).append("; "); null
+        }
     } catch (e: Throwable) {
         if (e is CancellationException) throw e
+        trace.append("cloudstream error ").append(e.javaClass.simpleName).append("; ")
         null
     }
 
-    private suspend fun viaHidden(url: String): String? {
-        val r = fetch(url) ?: return null
-        return if (r.first in 200..299 && !isChallenge(r.first, r.second)) r.second else null
+    private suspend fun viaHidden(url: String, trace: StringBuilder): String? {
+        val r = fetch(url)
+        if (r == null) {
+            trace.append("hidden browser did not pass in ").append(KiligSettings.timeoutSec).append("s; ")
+            return null
+        }
+        if (r.first in 200..299 && !isChallenge(r.first, r.second)) return r.second
+        trace.append("hidden fetch HTTP ").append(r.first).append("; ")
+        return null
     }
 
     /** For the settings "Test connection" button. */
@@ -375,6 +411,103 @@ object KiligBrowser {
                 else main.postDelayed(this, 30_000L)
             }
         }, 30_000L)
+    }
+
+    // ------------------------------------------------------------------ episode sniffer (last resort)
+
+    /** video = what the <video> element plays (most reliable), media = requests seen (may include next-episode preload). */
+    class Sniffed(val apiBodies: List<String>, val video: List<String>, val media: List<String>)
+
+    private class SniffBridge(val api: MutableList<String>, val media: MutableList<String>) {
+        @JavascriptInterface
+        fun onApi(body: String) {
+            api.add(body)
+        }
+
+        @JavascriptInterface
+        fun onMedia(url: String) {
+            if (url.startsWith("http") && !media.contains(url)) media.add(url)
+        }
+    }
+
+    private const val SNIFF_HOOK = "(function(){if(window.__kdHook)return;window.__kdHook=1;try{var of=window.fetch;" +
+        "window.fetch=function(i,o){var u=(typeof i==='string')?i:(i&&i.url)||'';var p=of.apply(this,arguments);" +
+        "if(String(u).indexOf('/api/episode-source/')>=0){p.then(function(r){r.clone().text().then(function(t){try{kdSniff.onApi(t)}catch(e){}})}).catch(function(){})}" +
+        "return p};}catch(e){}})()"
+
+    private const val SNIFF_POKE = "(function(){try{var v=document.querySelector('video');if(v){var s=v.currentSrc||v.src;" +
+        "if(s&&s.indexOf('http')==0)kdSniff.onMedia(s);try{v.muted=true;v.play()}catch(e){}}" +
+        "var b=document.querySelector('button[aria-label=\"Play\"],button[aria-label*=\"play\" i],[data-play],.play-button');if(b)b.click();}catch(e){}})()"
+
+    private fun isMediaUrl(u: String): Boolean {
+        val p = u.lowercase().substringBefore("?")
+        return p.endsWith(".m3u8") || p.endsWith(".mp4") || p.contains("/hls/") && p.endsWith(".m3u8")
+    }
+
+    /** Opens the episode page like a viewer would and collects what the site's player loads. */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun sniff(episodeUrl: String, timeoutMs: Long = 30_000L): Sniffed {
+        val ctx = appContext ?: return Sniffed(emptyList(), emptyList(), emptyList())
+        val api = java.util.Collections.synchronizedList(ArrayList<String>())
+        val media = java.util.Collections.synchronizedList(ArrayList<String>())
+        val video = java.util.Collections.synchronizedList(ArrayList<String>())
+        var wv: WebView? = null
+        withContext(Dispatchers.Main) {
+            applyManualCookie()
+            val w = WebView(ctx)
+            configure(w, light = false)
+            w.settings.mediaPlaybackRequiresUserGesture = false
+            val dm = ctx.resources.displayMetrics
+            w.layout(0, 0, dm.widthPixels.coerceAtLeast(360), dm.heightPixels.coerceAtLeast(640))
+            w.addJavascriptInterface(SniffBridge(api, video), "kdSniff")
+            w.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    view?.evaluateJavascript(SNIFF_HOOK, null)
+                }
+
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    val u = request?.url?.toString() ?: return null
+                    if (isMediaUrl(u) && !media.contains(u)) media.add(u)
+                    val p = u.lowercase().substringBefore("?")
+                    // never download actual video data in the background
+                    if (p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp4") || p.contains("/api/play")) {
+                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                    }
+                    return null
+                }
+            }
+            w.webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 5..90) view?.evaluateJavascript(SNIFF_HOOK, null)
+                }
+            }
+            val sep = if (episodeUrl.contains("?")) "&" else "?"
+            w.loadUrl(episodeUrl + sep + "autoplay=1", mapOf("X-Requested-With" to ""))
+            wv = w
+        }
+        try {
+            val end = System.currentTimeMillis() + timeoutMs
+            var gotAt = 0L
+            while (System.currentTimeMillis() < end) {
+                delay(700L)
+                eval(wv, SNIFF_HOOK)
+                eval(wv, SNIFF_POKE)
+                if (api.isNotEmpty() || video.isNotEmpty()) break
+                if (media.isNotEmpty()) {
+                    // give the player a few seconds to attach the real source to <video>
+                    if (gotAt == 0L) gotAt = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - gotAt > 6_000L) break
+                }
+            }
+        } finally {
+            withContext(Dispatchers.Main) {
+                try {
+                    wv?.stopLoading(); wv?.loadUrl("about:blank"); wv?.removeJavascriptInterface("kdSniff"); wv?.destroy()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        return Sniffed(api.toList(), video.toList(), media.toList())
     }
 
     // ------------------------------------------------------------------ visible solver window

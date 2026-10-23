@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -462,8 +463,12 @@ class CineLiteProvider : MainAPI() {
     }
 
     /**
-     * Anime link resolution: opens the cinelite anime embed in the hidden WebView (same Turnstile
-     * session as movies/TV) and collects every server response, exactly like movieTvLinks.
+     * Anime link resolution: opens the cinelite anime embed in a hidden WebView so Cloudflare
+     * Turnstile is satisfied automatically, then collects the vault/proxy responses that the embed
+     * fires for each backend (megaplay / vidnest / 4animo) and the HLS playlists it requests.
+     *
+     * The anime embed does NOT call /servers or /provider — it goes directly through vault/proxy,
+     * so the movie/TV WebView path is wrong for anime. We wait for proxy events instead.
      */
     private suspend fun animeViaPlayer(
         aid: Int,
@@ -473,68 +478,57 @@ class CineLiteProvider : MainAPI() {
         out: (ExtractorLink) -> Unit,
         dbg: MutableList<String>
     ) {
-        // cinelite embed url for anime (from the log)
         val embed = "$embedUrl/anime/$aid/$ep?$embedQuery"
-        val defaultQuery = "id=$aid&episode=$ep"
 
         val s = CineLiteBrowser.open(embed, ua, "$mainUrl/") ?: run {
             dbg.add("anime: webview unavailable")
             return
         }
         try {
-            val ready = s.waitFor(30_000L) {
-                s.has("template") ||
-                    s.events.any { (it.kind == "provider" || it.kind == "servers") && it.status in 200..299 }
+            // Wait until at least one vault/proxy call succeeds (the embed fires several in parallel).
+            // The Turnstile verify typically takes 3-8 s; vault/proxy responses follow shortly after.
+            val ready = s.waitFor(35_000L) {
+                s.events.any { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() } ||
+                    s.playlists.isNotEmpty()
             }
-            dbg.add("anime embed ready=$ready events=${s.events.size}")
+            dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size}")
             if (!ready) return
-            delay(1500L)
-
-            val query = s.events.firstOrNull { it.kind == "provider" }
-                ?.url?.substringAfter("?", "")?.takeIf { it.isNotBlank() } ?: defaultQuery
-
-            val names = LinkedHashSet<String>()
-            names.addAll(providers)
-            var serversBody = s.events.firstOrNull { it.kind == "servers" && it.status in 200..299 }?.body
-            if (serversBody == null) {
-                val r = s.get("$apiUrl/servers", true)
-                if (r != null && r.first in 200..299) serversBody = r.second
-            }
-            serversBody?.let { names.addAll(parseServerNames(it)) }
-            s.events.filter { it.kind == "provider" }.forEach { e -> providerName(e.url)?.let { names.add(it) } }
-
-            val bodies = LinkedHashMap<String, Pair<Int, String>>()
-            s.events.filter { it.kind == "provider" && it.status in 200..299 && it.body.isNotBlank() }
-                .forEach { e ->
-                    val n = providerName(e.url)
-                    if (n != null && !bodies.containsKey(n)) bodies[n] = Pair(e.status, e.body)
-                }
-
-            coroutineScope {
-                names.filter { it !in bodies }.take(12).map { n ->
-                    async { n to s.get("$apiUrl/provider/$n?$query", true, 25_000L) }
-                }.awaitAll().forEach { (n, r) ->
-                    if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
-                        bodies[n] = r
-                    } else {
-                        dbg.add("anime $n -> ${r?.first} ${r?.second?.take(60)}")
-                    }
-                }
-            }
-            dbg.add("anime servers=${names.joinToString(",")} ok=${bodies.keys.joinToString(",")}")
+            // Give the embed a moment to fire any remaining parallel requests
+            delay(3_000L)
 
             s.quiet()
-            for ((n, r) in bodies) {
-                val label = prettyServer(n)
-                val cands = parseCandidates(r.second)
-                if (cands.isEmpty()) dbg.add("anime $n: no stream in ${r.second.take(120)}")
+
+            // Collect streams from vault/proxy responses
+            val seenUrls = LinkedHashSet<String>()
+            for (ev in s.events) {
+                if (ev.kind != "proxy" || ev.status !in 200..299 || ev.body.isBlank()) continue
+                // The label is the backend hostname (megaplay / vidnest / 4animo / etc.)
+                val backend = try {
+                    val proxyParam = ev.url.substringAfter("vault/proxy?url=").substringBefore("&")
+                    java.net.URI(java.net.URLDecoder.decode(proxyParam, "UTF-8")).host
+                        ?.removePrefix("www.")?.substringBefore(".")?.replaceFirstChar { it.uppercase() }
+                        ?: "Anime"
+                } catch (_: Exception) { "Anime" }
+
+                val cands = parseCandidates(ev.body)
+                dbg.add("anime proxy $backend status=${ev.status} cands=${cands.size}")
                 for (c in cands) {
+                    if (!seenUrls.add(c.url)) continue
                     val h = embedHeaders + (c.headers ?: emptyMap())
                     emitStream(
-                        listOfNotNull(label, c.label).joinToString(" "),
+                        listOfNotNull(backend, c.label).joinToString(" "),
                         c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
                     )
                 }
+            }
+
+            // Also collect any HLS playlists the embed itself played
+            for (pl in s.playlists) {
+                if (!seenUrls.add(pl)) continue
+                // vault/hls.m3u8?url=... is a proxy playlist; use embedUrl as referer
+                val label = if (pl.contains("vault/hls")) "HLS" else "Stream"
+                dbg.add("anime playlist $label: ${pl.take(80)}")
+                emitStream(label, pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
             }
         } finally {
             s.close()

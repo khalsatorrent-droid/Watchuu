@@ -221,7 +221,7 @@ class MonochromeProvider : MainAPI() {
         val id = t.str("trackId", "id") ?: return null
         val title = t.str("title") ?: "Track $n"
         val artist = artistsOf(t)
-        return newEpisode(id) {
+        return newEpisode("$api/track/$id") {
             this.name = title
             this.episode = t.optInt("trackNumber", n).takeIf { it > 0 } ?: n
             this.season = t.optInt("discNumber", 1).takeIf { it > 0 } ?: 1
@@ -299,11 +299,12 @@ class MonochromeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val id = when {
-            data.startsWith("track|") -> data.split("|").getOrNull(1)
-            data.startsWith("http") -> idFrom(data, "track")
-            else -> data
-        }?.takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return false
+        // Cloudstream may turn the stored id into "https://monochrome.st/<id>" (newEpisode fixUrl),
+        // or hand us an older "track|id|..." value - just take the track id out of whatever arrives.
+        val id = (if (data.startsWith("track|")) data.split("|").getOrNull(1) else null)
+            ?: Regex("/track/(\\d{6,})").find(data)?.groupValues?.get(1)
+            ?: Regex("(\\d{6,})").findAll(data).lastOrNull()?.groupValues?.get(1)
+            ?: return false
 
         // the stream endpoint returns the FLAC file itself
         callback.invoke(

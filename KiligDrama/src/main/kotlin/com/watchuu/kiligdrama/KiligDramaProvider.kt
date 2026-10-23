@@ -440,7 +440,8 @@ class KiligDramaProvider : MainAPI() {
     ): Boolean {
         val notes = StringBuilder()
         val parts = data.split("|", limit = 3)
-        var bookId = parts.getOrNull(0)?.ifBlank { null }
+        // Cloudstream's newEpisode() runs fixUrl on the data -> "https://kiligdrama.com/<bookId>|..."
+        var bookId = parts.getOrNull(0)?.let { Regex("(\\d{6,})").find(it)?.groupValues?.get(1) }
         var serial = parts.getOrNull(1)?.toIntOrNull()
         val epUrl = parts.getOrNull(2)?.ifBlank { null }
             ?: data.takeIf { it.startsWith("http") } ?: "$mainUrl/$locale"

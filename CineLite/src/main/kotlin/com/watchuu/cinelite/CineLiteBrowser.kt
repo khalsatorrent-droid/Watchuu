@@ -140,7 +140,7 @@ object CineLiteBrowser {
         val l = u.lowercase()
         val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
         return host == "api.cinelite.xyz" || host.endsWith("cloudflare.com") ||
-            isPlaylistUrl(l) || l.contains("/vault/proxy?")
+            isPlaylistUrl(l) || l.contains("/vault/proxy?") || l.contains("/vault/hls.m3u8")
     }
 
     private fun isHeavy(u: String): Boolean {
@@ -223,6 +223,7 @@ object CineLiteBrowser {
     if (/api\.cinelite\.xyz\/subtitles/.test(u)) return 'subtitles';
     if (/api\.cinelite\.xyz\/api\/turnstile\/verify/.test(u)) return 'verify';
     if (/\/vault\/proxy\?/.test(u)) return 'proxy';
+    if (/\/vault\/hls\.m3u8/.test(u)) return 'hls';
     return null;
   }
   function hdrObj(h){

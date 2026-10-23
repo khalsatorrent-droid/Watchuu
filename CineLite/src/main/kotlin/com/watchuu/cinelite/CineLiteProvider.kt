@@ -485,13 +485,14 @@ class CineLiteProvider : MainAPI() {
             return
         }
         try {
-            // Wait until at least one vault/proxy call succeeds (the embed fires several in parallel).
-            // The Turnstile verify typically takes 3-8 s; vault/proxy responses follow shortly after.
+            // Wait until at least one vault/proxy call succeeds or we see HLS playlists.
+            // The Turnstile verify typically takes 3-8 s; vault/proxy and vault/hls responses follow.
             val ready = s.waitFor(35_000L) {
                 s.events.any { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() } ||
+                    s.events.any { it.kind == "hls" } ||
                     s.playlists.isNotEmpty()
             }
-            dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size}")
+            dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size} hls=${s.events.count { it.kind == "hls" }}")
             if (!ready) return
             // Give the embed a moment to fire any remaining parallel requests
             delay(3_000L)
@@ -502,14 +503,7 @@ class CineLiteProvider : MainAPI() {
             val seenUrls = LinkedHashSet<String>()
             for (ev in s.events) {
                 if (ev.kind != "proxy" || ev.status !in 200..299 || ev.body.isBlank()) continue
-                // The label is the backend hostname (megaplay / vidnest / 4animo / etc.)
-                val backend = try {
-                    val proxyParam = ev.url.substringAfter("vault/proxy?url=").substringBefore("&")
-                    java.net.URI(java.net.URLDecoder.decode(proxyParam, "UTF-8")).host
-                        ?.removePrefix("www.")?.substringBefore(".")?.replaceFirstChar { it.uppercase() }
-                        ?: "Anime"
-                } catch (_: Exception) { "Anime" }
-
+                val backend = animeServerLabelFromProxyUrl(ev.url)
                 val cands = parseCandidates(ev.body)
                 dbg.add("anime proxy $backend status=${ev.status} cands=${cands.size}")
                 for (c in cands) {
@@ -522,17 +516,60 @@ class CineLiteProvider : MainAPI() {
                 }
             }
 
-            // Also collect any HLS playlists the embed itself played
+            // Collect vault/hls.m3u8 streams captured by the JS hook (kind='hls')
+            for (ev in s.events) {
+                if (ev.kind != "hls") continue
+                if (!seenUrls.add(ev.url)) continue
+                val label = animeServerLabelFromHlsUrl(ev.url)
+                dbg.add("anime hls $label: ${ev.url.take(80)}")
+                emitStream(label, ev.url, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
+            }
+
+            // Fallback: any HLS playlists captured by shouldInterceptRequest that aren't already listed
             for (pl in s.playlists) {
                 if (!seenUrls.add(pl)) continue
-                // vault/hls.m3u8?url=... is a proxy playlist; use embedUrl as referer
-                val label = if (pl.contains("vault/hls")) "HLS" else "Stream"
+                val label = if (pl.contains("/vault/hls")) animeServerLabelFromHlsUrl(pl) else "Stream"
                 dbg.add("anime playlist $label: ${pl.take(80)}")
                 emitStream(label, pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
             }
         } finally {
             s.close()
         }
+    }
+
+    /** Label from vault/proxy?url=https://megaplay.buzz/... → "MegaPlay" */
+    private fun animeServerLabelFromProxyUrl(vaultUrl: String): String {
+        val host = try {
+            val proxyParam = vaultUrl.substringAfter("vault/proxy?url=").substringBefore("&")
+            java.net.URI(URLDecoder.decode(proxyParam, "UTF-8")).host?.lowercase() ?: ""
+        } catch (_: Exception) { "" }
+        return animeHostToLabel(host)
+    }
+
+    /** Label from vault/hls.m3u8?url=...&ref=https://megaplay.buzz/... → "MegaPlay" */
+    private fun animeServerLabelFromHlsUrl(vaultUrl: String): String {
+        val qs = vaultUrl.substringAfter("?", "")
+        fun hostFromParam(param: String): String? {
+            val prefix = "$param="
+            val i = qs.indexOf(prefix).takeIf { it >= 0 } ?: return null
+            val raw = qs.substring(i + prefix.length).substringBefore("&")
+            return try {
+                URLDecoder.decode(raw, "UTF-8")
+                    .substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+                    .removePrefix("www.")
+            } catch (_: Exception) { null }
+        }
+        val host = hostFromParam("ref") ?: hostFromParam("origin") ?: ""
+        return animeHostToLabel(host)
+    }
+
+    private fun animeHostToLabel(host: String): String = when {
+        host.contains("megaplay") -> "MegaPlay"
+        host.contains("vidnest") -> "VidNest"
+        host.contains("4animo") -> "4Animo"
+        host.contains("nexabloom") -> "MegaPlay" // megaplay CDN
+        host.isNotBlank() -> host.substringBefore(".").replaceFirstChar { it.uppercase() }
+        else -> "Anime"
     }
 
     private suspend fun legacyCapture(pageUrl: String, out: (ExtractorLink) -> Unit, dbg: MutableList<String>) {

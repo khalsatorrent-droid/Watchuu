@@ -28,7 +28,7 @@ class MonochromeProvider : MainAPI() {
     override var name = "Monochrome"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Music)
+    override val supportedTypes = setOf(TvType.Others)
 
     private val tracksApi = "https://tracks.monochrome.st"
     private val tidalProxy = "https://tidal-proxy.monochrome.tf"
@@ -84,7 +84,7 @@ class MonochromeProvider : MainAPI() {
             val title = node.get("title")?.asText() ?: return@mapNotNull null
             val artist = node.get("artist")?.get("name")?.asText() ?: ""
             val cover = coverUrl(id)
-            newMovieSearchResponse("$title — $artist", trackPayload(id, id, title, artist), TvType.Music) {
+            newMovieSearchResponse("$title — $artist", trackPayload(id, id, title, artist), TvType.Others) {
                 this.posterUrl = cover
             }
         }
@@ -132,7 +132,7 @@ class MonochromeProvider : MainAPI() {
         return newMovieSearchResponse(
             if (artist.isNotBlank()) "$title — $artist" else title,
             trackPayload(trackId, releaseId, title, artist),
-            TvType.Music
+            TvType.Others
         ) {
             this.posterUrl = cover
         }
@@ -162,7 +162,7 @@ class MonochromeProvider : MainAPI() {
 
         val displayTitle = if (richArtist.isNotBlank()) "$richTitle — $richArtist" else richTitle
 
-        return newMovieLoadResponse(displayTitle, url, TvType.Music, url) {
+        return newMovieLoadResponse(displayTitle, url, TvType.Others, url) {
             this.posterUrl = cover
             this.backgroundPosterUrl = cover
         }

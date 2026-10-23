@@ -9,5 +9,7 @@ class KiligDramaPlugin : Plugin() {
     override fun load(context: Context) {
         KiligBrowser.init(context)
         registerMainAPI(KiligDramaProvider())
+        // gear icon in Extensions -> KiligDrama: Cloudflare bypass settings
+        openSettings = { ctx -> KiligSettings.show(ctx) }
     }
 }

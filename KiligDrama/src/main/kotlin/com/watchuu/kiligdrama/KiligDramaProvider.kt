@@ -36,7 +36,7 @@ import org.jsoup.nodes.Document
  *  - goodshort           : acfs*.goodreels.com -> v2-akm.goodreels.com through the dramadizilerim ?url= proxy
  */
 class KiligDramaProvider : MainAPI() {
-    override var mainUrl = "https://kiligdrama.com"
+    override var mainUrl = KiligSettings.siteUrl
     override var name = "KiligDrama"
     override var lang = "en"
     override val hasMainPage = true
@@ -78,40 +78,8 @@ class KiligDramaProvider : MainAPI() {
 
     // ---------------------------------------------------------------- networking
 
-    private fun isChallenge(body: String): Boolean {
-        val head = body.take(3000)
-        return head.contains("<title>Just a moment", true) ||
-            head.contains("challenge-platform") && head.contains("cf_chl", true)
-    }
-
-    /**
-     * GET a kiligdrama.com url. Uses the WebView's cf_clearance when it has one, otherwise
-     * (or when that is rejected) asks the hidden WebView to fetch it from inside the page.
-     */
-    private suspend fun getText(url: String, referer: String = "$mainUrl/$locale"): String {
-        val headers = mapOf(
-            "User-Agent" to KiligBrowser.userAgent(),
-            "Referer" to referer,
-            "Accept-Language" to "en-US,en;q=0.9",
-        )
-        // 1) plain request (with the WebView's cookies once it has passed the check)
-        try {
-            val cookie = KiligBrowser.cookies()
-            val h = if (!cookie.isNullOrBlank()) headers + ("Cookie" to cookie) else headers
-            val r = app.get(url, headers = h, timeout = 20L)
-            val body = r.text
-            if (r.code in 200..299 && !isChallenge(body)) return body
-        } catch (e: Throwable) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-        }
-        // 2) from inside the hidden page
-        val res = KiligBrowser.fetch(url)
-            ?: throw ErrorLoadingException("KiligDrama: Cloudflare check did not pass, try again (or open kiligdrama.com once in WebView)")
-        if (res.first !in 200..299 || isChallenge(res.second)) {
-            throw ErrorLoadingException("KiligDrama: request failed (HTTP ${res.first})")
-        }
-        return res.second
-    }
+    private suspend fun getText(url: String, referer: String = "$mainUrl/$locale"): String =
+        KiligBrowser.get(url, referer)
 
     private suspend fun getDoc(url: String, referer: String = "$mainUrl/$locale"): Document =
         Jsoup.parse(getText(url, referer), url)

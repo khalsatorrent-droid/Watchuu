@@ -301,7 +301,7 @@ class DashReelsProvider : MainAPI() {
             callback.invoke(
                 newExtractorLink(name, label, u, type) {
                     this.quality = q ?: Qualities.Unknown.value
-                    this.headers = mapOf("User-Agent" to "Reels/1.2.55")
+                    this.headers = mapOf("User-Agent" to DashReelsAuth.userAgent)
                 }
             )
         }

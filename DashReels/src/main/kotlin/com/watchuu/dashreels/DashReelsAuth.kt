@@ -111,11 +111,26 @@ object DashReelsAuth {
         prefs?.edit()?.remove("refresh")?.apply()
     }
 
+    /**
+     * HttpClient.setUserAgent: the entries below as "key:value", joined with ", " (no prefix).
+     * The server reads the Version from it as numbers, so the format must match exactly.
+     */
+    val userAgent: String get() = listOf(
+        "OS" to "android",
+        "Country" to "IN",
+        "sessionId" to sessionId,
+        "Platform" to "android",
+        "Device" to "Pixel 8",
+        "App" to PACKAGE,
+        "Version" to "1.2.55",
+        "Network" to "wifi",
+    ).joinToString(", ") { "${it.first}:${it.second}" }
+
     /** Same headers as the app's HttpClient.getOptions(). */
     fun apiHeaders(token: String): Map<String, String> = mapOf(
         "content-type" to "application/json",
         "authorization" to "Bearer $token",
-        "user-agent" to "Reels/1.2.55 (OS: android, Country: IN, sessionId: $sessionId, Platform: android, Device: Pixel 8, App: com.dashtoon.video.reels, Version: 1.2.55, Network: wifi)",
+        "user-agent" to userAgent,
         "X-Tenant" to "reels",
         "X-Country" to "IN",
         "X-Session-Id" to sessionId,

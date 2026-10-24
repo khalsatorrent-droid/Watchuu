@@ -24,14 +24,14 @@
     {
         "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/DashReels.cs3",
         "status": 1,
-        "version": 5,
+        "version": 6,
         "name": "DashReels",
         "internalName": "DashReels",
         "authors": [
             "khalsatorrent-droid"
         ],
         "description": "Short dramas from the DashReels app (Dashtoon) - all episodes unlocked (no ads/coins required)",
-        "fileSize": 31328,
+        "fileSize": 31116,
         "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
         "language": "en",
         "tvTypes": [
@@ -39,7 +39,7 @@
         ],
         "iconUrl": "https://www.google.com/s2/favicons?domain=dashreels.com&sz=128",
         "apiVersion": 1,
-        "fileHash": "sha256-15b70699a5bd69a8f9bed5e61d74e325191127cb17be29dcc07617a049e3ad8f"
+        "fileHash": "sha256-ed21294fa55d3273a90f3b43c9682ffab252fb453e9e1f1676bfb4d12af2af67"
     },
     {
         "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/KiligDrama.cs3",

@@ -769,20 +769,62 @@ class CineLiteProvider : MainAPI() {
         dbg.add("anime menu names=${names.joinToString(",")}")
         if (names.isEmpty()) return emptyList()
 
+        // wait until the player stops making requests (a slow server's stream must not be
+        // credited to the next one that is tapped)
+        suspend fun settle(quietMs: Long = 2_500L, maxMs: Long = 15_000L) {
+            val start = System.currentTimeMillis()
+            var last = s.events.size + s.playlists.size
+            var since = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < maxMs) {
+                delay(250L)
+                val now = s.events.size + s.playlists.size
+                if (now != last) { last = now; since = System.currentTimeMillis() }
+                else if (System.currentTimeMillis() - since >= quietMs) return
+            }
+        }
+
+        // sub/dub of the backend calls made after a tap ("/sub" or "/dub" in the proxied url or its Referer)
+        fun audioOf(evUrl: String): String? {
+            val t = (proxyTarget(evUrl) ?: "") + " " + (proxyReferer(evUrl) ?: "")
+            return when {
+                Regex("""/dub(\b|/|\?|$)""").containsMatchIn(t) -> "dub"
+                Regex("""/sub(\b|/|\?|$)""").containsMatchIn(t) -> "sub"
+                else -> null
+            }
+        }
+
         val res = LinkedHashMap<String, String>()
-        streams().firstOrNull()?.let { if (current != null) res[current] = it }
+        settle()
+        streams().firstOrNull()?.let { first ->
+            if (current != null) {
+                val want = if (current.endsWith("Dub", true)) "dub" else "sub"
+                val audios = s.events.filter { it.kind == "proxy" }.mapNotNull { audioOf(it.url) }.toSet()
+                if (audios.isEmpty() || want in audios) res[current] = first
+            }
+        }
 
         for (n in names) {
             if (res.containsKey(n)) continue
+            settle()
             if (found().distinct().size < 2) openMenu()
             val before = streams().toSet()
+            val evStart = s.events.size
             if (!tap(n)) {
                 dbg.add("anime menu: $n not found"); continue
             }
-            val got = s.waitFor(12_000L) { streams().any { it !in before } }
+            val got = s.waitFor(15_000L) { streams().any { it !in before } }
+            if (!got) {
+                dbg.add("anime menu: $n gave no stream"); continue
+            }
+            delay(400L)
             val fresh = streams().firstOrNull { it !in before }
-            if (got && fresh != null && fresh !in res.values) res[n] = fresh
-            else dbg.add("anime menu: $n gave no stream")
+            // the calls this tap caused must be for the right audio (when they say which)
+            val want = if (n.endsWith("Dub", true)) "dub" else "sub"
+            val audios = s.events.drop(evStart).filter { it.kind == "proxy" }.mapNotNull { audioOf(it.url) }.toSet()
+            if (audios.isNotEmpty() && want !in audios) {
+                dbg.add("anime menu: $n loaded ${audios.joinToString()} - skipped"); continue
+            }
+            if (fresh != null && fresh !in res.values) res[n] = fresh
         }
         return res.map { it.key to it.value }
     }

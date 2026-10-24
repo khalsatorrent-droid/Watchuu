@@ -375,14 +375,15 @@ class CineLiteProvider : MainAPI() {
         dbg: MutableList<String>
     ) {
         val isMovie = type == "movie"
-        val defaultQuery = if (isMovie) "id=$tmdbId" else "id=$tmdbId&season=$season&episode=$episode"
+        val defaultQuery = if (isMovie) "id=$tmdbId" else "id=$tmdbId&type=tv&season=$season&episode=$episode"
 
         // The movie/anime embed urls are taken from the log. The tv one is inferred, so a second
         // pattern is tried when the first one never reaches the stream api.
         val embeds = if (isMovie) listOf("$embedUrl/$tmdbId?$embedQuery")
         else listOf(
-            "$embedUrl/tv/$tmdbId/$season/$episode?$embedQuery",
+            // the site's own tv player url (log 2026-10-24) first, the older guess as a fallback
             "$embedUrl/$tmdbId/$season/$episode?$embedQuery",
+            "$embedUrl/tv/$tmdbId/$season/$episode?$embedQuery",
         )
 
         coroutineScope {
@@ -630,6 +631,8 @@ class CineLiteProvider : MainAPI() {
                         val html = s.get(vaultProxy(vault, page, null), false, 20_000L)?.second ?: return@async
                         val path = Regex("""(?:https://cdn\.4animo\.xyz)?(/stream/getSources\?t=[A-Za-z0-9._~%-]+)""")
                             .find(html)?.groupValues?.get(1)
+                            ?: Regex("""(?:data-t|["']t["']\s*:)\s*=?\s*["']([A-Za-z0-9._~-]{20,})["']""")
+                                .find(html)?.groupValues?.get(1)?.let { "/stream/getSources?t=$it" }
                             ?: run { dbg.add("anime 4Animo $label: no source token"); return@async }
                         val hdr = """{"Referer":"$page","Accept":"application/json, text/plain, */*"}"""
                         val r = s.get(vaultProxy(vault, "https://cdn.4animo.xyz$path", hdr), false, 20_000L)

@@ -33,6 +33,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **CineLite** | [cinelite.xyz](https://cinelite.xyz) | Movie · TV Series | 🇬🇧 EN | ✅ Beta |
 | **Monochrome** | [monochrome.st](https://monochrome.st) | Music | 🇬🇧 EN | ✅ Beta |
 | **KiligDrama** | [kiligdrama.com](https://kiligdrama.com) | Short Drama | 🇬🇧 EN | ✅ Beta |
+| **RedFlix** | [redflix.one](https://redflix.one) | Movie · TV Series · Anime | 🇬🇧 EN · 🇮🇳 HI | ✅ Beta |
 
 ## 🛠 Build
 

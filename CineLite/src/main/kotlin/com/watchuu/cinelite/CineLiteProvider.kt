@@ -606,7 +606,7 @@ class CineLiteProvider : MainAPI() {
                 for (audio in listOf("sub", "dub")) {
                     val label = if (audio == "dub") "Dub" else "Sub"
                     // MegaPlay: page -> internal id -> getSources
-                    jobs += async {
+                    jobs += async<Unit> {
                         val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
                         val html = s.get(vaultProxy(vault, page, null), false, 20_000L)?.second ?: return@async
                         val id = Regex("""data-id=["']?(\d+)""").find(html)?.groupValues?.get(1)
@@ -618,14 +618,14 @@ class CineLiteProvider : MainAPI() {
                         else dbg.add("anime MegaPlay $label -> ${r?.first}")
                     }
                     // VidNest: one json call
-                    jobs += async {
+                    jobs += async<Unit> {
                         val hdr = """{"Accept":"application/json, text/javascript, */*; q=0.01","Referer":"https://vidnest.fun/"}"""
                         val r = s.get(vaultProxy(vault, "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio", hdr), false, 20_000L)
                         if (r != null && r.first in 200..299) handleSources("VidNest", label, "https://vidnest.fun", r.second)
                         else dbg.add("anime VidNest $label -> ${r?.first}")
                     }
                     // 4Animo: embed page -> getSources?t=...
-                    jobs += async {
+                    jobs += async<Unit> {
                         val page = "https://cdn.4animo.xyz/embed/ani/$aid/$ep/$audio?k=1"
                         val html = s.get(vaultProxy(vault, page, null), false, 20_000L)?.second ?: return@async
                         val path = Regex("""(?:https://cdn\.4animo\.xyz)?(/stream/getSources\?t=[A-Za-z0-9._~%-]+)""")

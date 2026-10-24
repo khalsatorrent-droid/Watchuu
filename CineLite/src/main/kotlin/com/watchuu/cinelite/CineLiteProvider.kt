@@ -515,12 +515,18 @@ class CineLiteProvider : MainAPI() {
     }
 
     /**
-     * Anime link resolution: opens the cinelite anime embed in a hidden WebView so Cloudflare
-     * Turnstile is satisfied automatically, then collects the vault/proxy responses that the embed
-     * fires for each backend (megaplay / vidnest / 4animo) and the HLS playlists it requests.
+     * Anime link resolution.
      *
-     * The anime embed does NOT call /servers or /provider — it goes directly through vault/proxy,
-     * so the movie/TV WebView path is wrong for anime. We wait for proxy events instead.
+     * The cinelite anime player (embed.cinelite.xyz/anime/{anilistId}/{ep}) asks three backends -
+     * MegaPlay, VidNest and 4Animo - through the site's open proxy:
+     *   {vault}/vault/proxy?url={backend url}&headers={json}
+     * and plays every stream through
+     *   {vault}/vault/hls.m3u8?url={stream}&ref={backend}/&origin={backend}&h={json}&proxy_segments=1&all=1
+     * (the proxy adds the Referer/Origin each CDN wants; no token is needed).
+     *
+     * The page is still opened in a hidden WebView (it reveals the current proxy host and the
+     * player's own sub answers), and then sub AND dub are asked from every backend through the same
+     * proxy, from inside the page. Every stream is listed through the vault hls proxy, like the site.
      */
     private suspend fun animeViaPlayer(
         aid: Int,
@@ -537,68 +543,192 @@ class CineLiteProvider : MainAPI() {
             return
         }
         try {
-            // Wait until at least one vault/proxy call succeeds or we see HLS playlists.
-            // The Turnstile verify typically takes 3-8 s; vault/proxy and vault/hls responses follow.
-            val ready = s.waitFor(35_000L) {
-                s.events.any { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() } ||
-                    s.events.any { it.kind == "hls" } ||
-                    s.playlists.isNotEmpty()
+            val ready = s.waitFor(30_000L) {
+                s.events.any { it.kind == "proxy" || it.kind == "hls" } ||
+                    s.playlists.any { it.contains("/vault/") }
             }
-            dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size} hls=${s.events.count { it.kind == "hls" }}")
-            if (!ready) return
-            // the other backends answer shortly after the first: wait until things go quiet
-            // (no new request for 1.2 s), but never more than 3 s
-            run {
-                val start = System.currentTimeMillis()
-                var last = s.events.size + s.playlists.size
-                var lastChange = System.currentTimeMillis()
-                while (System.currentTimeMillis() - start < 3_000L) {
-                    delay(200L)
-                    val now = s.events.size + s.playlists.size
-                    if (now != last) { last = now; lastChange = System.currentTimeMillis() }
-                    else if (System.currentTimeMillis() - lastChange > 1_200L) break
-                }
-            }
-
+            dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size}")
             s.quiet()
 
-            // every stream is prepared in parallel (each one may need its playlist fetched)
-            val seenUrls = LinkedHashSet<String>()
-            val tasks = mutableListOf<suspend () -> Unit>()
-            for (ev in s.events.toList()) {
-                if (ev.kind != "proxy" || ev.status !in 200..299 || ev.body.isBlank()) continue
-                val backend = animeServerLabelFromProxyUrl(ev.url)
-                val cands = parseCandidates(ev.body)
-                dbg.add("anime proxy $backend status=${ev.status} cands=${cands.size}")
-                for (c in cands) {
-                    if (!seenUrls.add(c.url)) continue
-                    val h = embedHeaders + (c.headers ?: emptyMap())
-                    tasks.add {
-                        emitStream(
-                            listOfNotNull(backend, c.label).joinToString(" "),
-                            c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
-                        )
-                    }
+            // the proxy host rotates: take it from what the player used
+            val vault = (s.events.firstOrNull { it.kind == "proxy" || it.kind == "hls" }?.url
+                ?: s.playlists.firstOrNull { it.contains("/vault/") })
+                ?.let { originOf(it) } ?: defaultVault
+
+            val emittedFiles = java.util.Collections.synchronizedSet(HashSet<String>())
+            val subsSeen = java.util.Collections.synchronizedSet(HashSet<String>())
+            val subCb: (SubtitleFile) -> Unit = { f -> if (subsSeen.add(f.url)) subtitleCallback(f) }
+
+            // one backend answer (getSources json / vidnest json) -> listed streams
+            suspend fun handleSources(server: String, audio: String, backendOrigin: String, body: String) {
+                val files = sourceFiles(body)
+                if (files.isEmpty()) dbg.add("anime $server $audio: no stream in ${body.take(100)}")
+                if (audio == "Sub") try {
+                    mapper.readTree(body)?.let { collectSubtitles(it.get("tracks") ?: it.get("subtitles") ?: it, subCb) }
+                } catch (_: Exception) {
+                }
+                coroutineScope {
+                    files.map { f ->
+                        async {
+                            if (!emittedFiles.add(f.first)) return@async
+                            if (f.first.substringBefore("?").endsWith(".mp4", true)) {
+                                val h = mapOf("Referer" to "$backendOrigin/", "Origin" to backendOrigin, "User-Agent" to ua)
+                                emitStream("$server $audio", f.first, f.second, MK.VIDEO, h, "$backendOrigin/", s, out)
+                            } else {
+                                emitStream(
+                                    "$server $audio", vaultHls(vault, f.first, backendOrigin), f.second, MK.HLS,
+                                    embedHeaders, "$embedUrl/", s, out
+                                )
+                            }
+                        }
+                    }.awaitAll()
                 }
             }
-            // vault/hls.m3u8 streams captured by the JS hook (kind='hls')
-            for (ev in s.events.toList()) {
-                if (ev.kind != "hls" || !seenUrls.add(ev.url)) continue
-                val label = animeServerLabelFromHlsUrl(ev.url)
-                dbg.add("anime hls $label: ${ev.url.take(80)}")
-                tasks.add { emitStream(label, ev.url, null, MK.HLS, embedHeaders, "$embedUrl/", s, out) }
+
+            // what the player already received (its sub answers)
+            val playerJobs = s.events.toList().filter { it.kind == "proxy" && it.status in 200..299 && it.body.isNotBlank() }
+                .mapNotNull { ev ->
+                    val target = proxyTarget(ev.url) ?: return@mapNotNull null
+                    val host = target.substringAfter("://").substringBefore("/").lowercase()
+                    // only the answers that carry sources (not the html embed pages)
+                    if (!(target.contains("getSources") || host.contains("vidnest"))) return@mapNotNull null
+                    val server = animeHostToLabel(host)
+                    val audio = if (runCatching { URLDecoder.decode(ev.url, "UTF-8") }.getOrDefault(ev.url).contains("/dub")) "Dub" else "Sub"
+                    Triple(server, audio, ev) to (proxyReferer(ev.url)?.let { originOf(it) } ?: originOf(target) ?: "")
+                }
+
+            coroutineScope {
+                val jobs = playerJobs.map { (t, origin) ->
+                    async { handleSources(t.first, t.second, origin, t.third.body) }
+                }.toMutableList()
+
+                // sub and dub from every backend, asked through the same proxy from inside the page
+                for (audio in listOf("sub", "dub")) {
+                    val label = if (audio == "dub") "Dub" else "Sub"
+                    // MegaPlay: page -> internal id -> getSources
+                    jobs += async {
+                        val page = "https://megaplay.buzz/stream/ani/$aid/$ep/$audio"
+                        val html = s.get(vaultProxy(vault, page, null), false, 20_000L)?.second ?: return@async
+                        val id = Regex("""data-id=["']?(\d+)""").find(html)?.groupValues?.get(1)
+                            ?: Regex("""getSources\?id=(\d+)""").find(html)?.groupValues?.get(1)
+                            ?: run { dbg.add("anime MegaPlay $label: no id"); return@async }
+                        val hdr = """{"Accept":"application/json, text/javascript, */*; q=0.01","Referer":"$page","X-Requested-With":"XMLHttpRequest"}"""
+                        val r = s.get(vaultProxy(vault, "https://megaplay.buzz/stream/getSources?id=$id&id=$id", hdr), false, 20_000L)
+                        if (r != null && r.first in 200..299) handleSources("MegaPlay", label, "https://megaplay.buzz", r.second)
+                        else dbg.add("anime MegaPlay $label -> ${r?.first}")
+                    }
+                    // VidNest: one json call
+                    jobs += async {
+                        val hdr = """{"Accept":"application/json, text/javascript, */*; q=0.01","Referer":"https://vidnest.fun/"}"""
+                        val r = s.get(vaultProxy(vault, "https://new.vidnest.fun/hianime/anime/$aid/$ep/$audio", hdr), false, 20_000L)
+                        if (r != null && r.first in 200..299) handleSources("VidNest", label, "https://vidnest.fun", r.second)
+                        else dbg.add("anime VidNest $label -> ${r?.first}")
+                    }
+                    // 4Animo: embed page -> getSources?t=...
+                    jobs += async {
+                        val page = "https://cdn.4animo.xyz/embed/ani/$aid/$ep/$audio?k=1"
+                        val html = s.get(vaultProxy(vault, page, null), false, 20_000L)?.second ?: return@async
+                        val path = Regex("""(?:https://cdn\.4animo\.xyz)?(/stream/getSources\?t=[A-Za-z0-9._~%-]+)""")
+                            .find(html)?.groupValues?.get(1)
+                            ?: run { dbg.add("anime 4Animo $label: no source token"); return@async }
+                        val hdr = """{"Referer":"$page","Accept":"application/json, text/plain, */*"}"""
+                        val r = s.get(vaultProxy(vault, "https://cdn.4animo.xyz$path", hdr), false, 20_000L)
+                        if (r != null && r.first in 200..299) handleSources("4Animo", label, "https://cdn.4animo.xyz", r.second)
+                        else dbg.add("anime 4Animo $label -> ${r?.first}")
+                    }
+                }
+                jobs.awaitAll()
             }
-            // fallback: HLS playlists captured by shouldInterceptRequest that aren't listed yet
-            for (pl in s.playlists.toList()) {
-                if (!seenUrls.add(pl)) continue
-                val label = if (pl.contains("/vault/hls")) animeServerLabelFromHlsUrl(pl) else "Stream"
-                dbg.add("anime playlist $label: ${pl.take(80)}")
-                tasks.add { emitStream(label, pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out) }
+
+            // anything the player streamed that wasn't listed above
+            val extra = (s.events.filter { it.kind == "hls" }.map { it.url } + s.playlists.filter { it.contains("/vault/hls") })
+                .distinct()
+            coroutineScope {
+                extra.map { u ->
+                    async {
+                        val inner = proxyTarget(u)
+                        if (inner != null && !emittedFiles.add(inner)) return@async
+                        emitStream("${animeServerLabelFromHlsUrl(u)} Sub", u, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
+                    }
+                }.awaitAll()
             }
-            coroutineScope { tasks.map { t -> async { t() } }.awaitAll() }
+            dbg.add("anime: ${emittedFiles.size} streams")
         } finally {
             s.close()
         }
+    }
+
+    private val defaultVault = "https://youcantkillme-bowmanfromcodbo1.world"
+
+    private fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
+
+    private fun vaultProxy(vault: String, url: String, headersJson: String?): String =
+        "$vault/vault/proxy?url=${enc(url)}" + (headersJson?.let { "&headers=${enc(it)}" } ?: "")
+
+    private fun vaultHls(vault: String, file: String, backendOrigin: String): String {
+        val h = """{"Referer":"$backendOrigin/","Origin":"$backendOrigin"}"""
+        return "$vault/vault/hls.m3u8?url=${enc(file)}&ref=${enc("$backendOrigin/")}&origin=${enc(backendOrigin)}" +
+            "&h=${enc(h)}&proxy_segments=1&all=1"
+    }
+
+    private fun originOf(u: String): String? {
+        val scheme = u.substringBefore("://", "")
+        if (scheme.isBlank()) return null
+        val host = u.substringAfter("://").substringBefore("/").substringBefore("?").substringBefore("#")
+        return if (host.isBlank()) null else "$scheme://$host"
+    }
+
+    private fun queryParam(u: String, name: String): String? {
+        val qs = u.substringAfter("?", "")
+        for (part in qs.split("&")) {
+            if (part.startsWith("$name=")) return try {
+                URLDecoder.decode(part.substringAfter("="), "UTF-8")
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    /** The backend url inside a vault/proxy or vault/hls.m3u8 url. */
+    private fun proxyTarget(u: String): String? = queryParam(u, "url")
+
+    /** The Referer the player passed to the proxy (in its `headers` json). */
+    private fun proxyReferer(u: String): String? = try {
+        queryParam(u, "headers")?.let { mapper.readTree(it)?.get("Referer")?.asText() }
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Stream urls in a backend answer: values of file/url/src/source/link keys (or plain strings in
+     * a "sources" array) that are not subtitles/thumbnails. Many have no .m3u8 in the url.
+     */
+    private fun sourceFiles(body: String): List<Pair<String, Int?>> {
+        val root = try { mapper.readTree(body) } catch (_: Exception) { null }
+            ?: return Regex("""https?://[^\s"'\\<>]+\.m3u8[^\s"'\\<>]*""").findAll(body).map { it.value to null }.toList()
+        val res = LinkedHashMap<String, Int?>()
+        val skipKeys = setOf("tracks", "subtitles", "captions", "subs", "thumbnails", "poster", "image", "intro", "outro")
+        val badExt = listOf(".vtt", ".srt", ".ass", ".jpg", ".jpeg", ".png", ".webp", ".gif")
+        fun ok(u: String) = u.startsWith("http") && badExt.none { u.substringBefore("?").endsWith(it, true) }
+        fun walk(n: JsonNode, q: Int?, depth: Int) {
+            if (depth > 8) return
+            when {
+                n.isArray -> n.forEach { if (it.isTextual) it.asText().takeIf(::ok)?.let { u -> res.putIfAbsent(u, q) } else walk(it, q, depth + 1) }
+                n.isObject -> {
+                    var q2 = q
+                    for (k in listOf("quality", "label", "resolution", "res")) {
+                        n.get(k)?.asText()?.let { qualityOf(it) }?.let { q2 = it }
+                    }
+                    for (k in listOf("file", "url", "src", "source", "link", "hls", "m3u8")) {
+                        n.get(k)?.takeIf { it.isTextual }?.asText()?.takeIf(::ok)?.let { res.putIfAbsent(it, q2) }
+                    }
+                    n.fields().forEach { (k, v) -> if (v.isContainerNode && k.lowercase() !in skipKeys) walk(v, q2, depth + 1) }
+                }
+            }
+        }
+        walk(root, null, 0)
+        return res.map { it.key to it.value }
     }
 
     /** Label from vault/proxy?url=https://megaplay.buzz/... → "MegaPlay" */

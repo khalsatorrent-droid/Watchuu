@@ -69,6 +69,18 @@ object CineLiteBrowser {
 
         fun has(kind: String): Boolean = events.any { it.kind == kind }
 
+        /** Runs [js] in the page and returns its result (JSON-encoded by the WebView), or null. */
+        suspend fun eval(js: String, timeoutMs: Long = 5_000L): String? {
+            if (closed) return null
+            val d = CompletableDeferred<String?>()
+            try {
+                withContext(Dispatchers.Main) { webView.evaluateJavascript(js) { r -> d.complete(r) } }
+            } catch (_: Throwable) {
+                return null
+            }
+            return withTimeoutOrNull(timeoutMs) { d.await() }
+        }
+
         suspend fun waitFor(timeoutMs: Long, cond: () -> Boolean): Boolean {
             val end = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < end) {
@@ -158,6 +170,12 @@ object CineLiteBrowser {
         return try {
             withContext(Dispatchers.Main) {
                 val wv = WebView(ctx)
+                // a real size, so the player lays out its menus (they are clicked from Kotlin for anime)
+                wv.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                )
+                wv.layout(0, 0, 1080, 1920)
                 val session = Session(wv)
                 wv.settings.apply {
                     javaScriptEnabled = true

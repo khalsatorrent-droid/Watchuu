@@ -549,6 +549,37 @@ class CineLiteProvider : MainAPI() {
                     s.playlists.any { it.contains("/vault/") }
             }
             dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size}")
+
+            // 1) the site's own server menu (Reyna Sub, Reyna Dub, Chamber Sub, ...): each one is
+            //    selected in the hidden player and the stream it loads is listed under that name
+            val menu = try {
+                driveAnimeMenu(s, dbg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dbg.add("anime menu EXC ${e.message?.take(80)}"); emptyList()
+            }
+            if (menu.isNotEmpty()) {
+                s.quiet()
+                // subtitles: the sub answers the player received carry them
+                s.events.toList().filter { it.kind == "proxy" && it.status in 200..299 && it.body.contains("tracks") }
+                    .filter { !(proxyReferer(it.url) ?: it.url).contains("/dub") }
+                    .forEach { ev ->
+                        try {
+                            mapper.readTree(ev.body)?.get("tracks")?.let { collectSubtitles(it, subtitleCallback) }
+                        } catch (_: Exception) {
+                        }
+                    }
+                coroutineScope {
+                    menu.map { (n, u) ->
+                        async { emitStream(n, u, null, MK.HLS, embedHeaders, "$embedUrl/", s, out) }
+                    }.awaitAll()
+                }
+                dbg.add("anime menu: ${menu.joinToString { it.first }}")
+                return
+            }
+
+            // 2) fallback: ask the backends directly through the site's proxy
             s.quiet()
 
             // the proxy host rotates: take it from what the player used
@@ -662,6 +693,99 @@ class CineLiteProvider : MainAPI() {
     }
 
     private val defaultVault = "https://youcantkillme-bowmanfromcodbo1.world"
+
+    // deepest elements whose whole text is "<Name> Sub" / "<Name> Dub", in document order
+    private val menuFindJs = """
+        function __cineMenu(){
+          var re=/^[A-Za-z][A-Za-z0-9.' ]{0,24} (Sub|Dub)${'$'}/, out=[];
+          var all=document.querySelectorAll('body *');
+          for (var i=0;i<all.length;i++){
+            var el=all[i], t=(el.textContent||'').replace(/\s+/g,' ').trim();
+            if (!re.test(t)) continue;
+            var deeper=false;
+            for (var j=0;j<el.children.length;j++){
+              if ((el.children[j].textContent||'').replace(/\s+/g,' ').trim()===t){deeper=true;break;}
+            }
+            if (!deeper) out.push({t:t, el:el});
+          }
+          return out;
+        }
+        function __cineTap(el){
+          var tg=el.closest('button,[role=button],li,a')||el;
+          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(e){
+            try{ tg.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true,view:window})); }catch(x){}
+          });
+        }
+    """.trimIndent()
+
+    private fun jsString(r: String?): String? = try {
+        r?.let { mapper.readTree(it) }?.takeIf { it.isTextual }?.asText()
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Opens the anime player's server menu and selects every "<Name> Sub/Dub" entry in turn,
+     * recording the vault hls stream each one loads. Returns (site name, stream url) pairs.
+     */
+    private suspend fun driveAnimeMenu(s: CineLiteBrowser.Session, dbg: MutableList<String>): List<Pair<String, String>> {
+        fun streams(): List<String> =
+            (s.events.filter { it.kind == "hls" }.map { it.url } + s.playlists.filter { it.contains("/vault/hls") }).distinct()
+
+        suspend fun found(): List<String> {
+            val r = jsString(s.eval("(function(){$menuFindJs\nreturn JSON.stringify(__cineMenu().map(function(x){return x.t;}));})()"))
+                ?: return emptyList()
+            return try {
+                mapper.readTree(r).map { it.asText() }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        suspend fun openMenu() {
+            // the button in the top bar shows the current server: tapping it opens the list
+            s.eval("(function(){$menuFindJs\nvar m=__cineMenu(); if(m.length){__cineTap(m[0].el);} })()")
+            delay(700L)
+        }
+
+        suspend fun tap(name: String): Boolean {
+            val r = s.eval(
+                "(function(n){$menuFindJs\nvar m=__cineMenu().filter(function(x){return x.t===n;});" +
+                    "if(!m.length) return 'no'; __cineTap(m[m.length-1].el); return 'ok';})(" +
+                    org.json.JSONObject.quote(name) + ")"
+            )
+            return jsString(r) == "ok"
+        }
+
+        // the stream the player starts with belongs to the server shown in its top bar
+        s.waitFor(10_000L) { streams().isNotEmpty() }
+        var seen = found()
+        val current = seen.firstOrNull()
+        if (seen.distinct().size < 2) {
+            openMenu()
+            seen = found()
+        }
+        val names = seen.distinct()
+        dbg.add("anime menu names=${names.joinToString(",")}")
+        if (names.isEmpty()) return emptyList()
+
+        val res = LinkedHashMap<String, String>()
+        streams().firstOrNull()?.let { if (current != null) res[current] = it }
+
+        for (n in names) {
+            if (res.containsKey(n)) continue
+            if (found().distinct().size < 2) openMenu()
+            val before = streams().toSet()
+            if (!tap(n)) {
+                dbg.add("anime menu: $n not found"); continue
+            }
+            val got = s.waitFor(12_000L) { streams().any { it !in before } }
+            val fresh = streams().firstOrNull { it !in before }
+            if (got && fresh != null && fresh !in res.values) res[n] = fresh
+            else dbg.add("anime menu: $n gave no stream")
+        }
+        return res.map { it.key to it.value }
+    }
 
     private fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
 
@@ -1065,7 +1189,7 @@ class CineLiteProvider : MainAPI() {
 
         if (kind == MK.VIDEO) {
             out.invoke(
-                newExtractorLink(name, base + (quality?.let { " ${it}p" } ?: ""), url, ExtractorLinkType.VIDEO) {
+                newExtractorLink(name, base, url, ExtractorLinkType.VIDEO) {
                     this.referer = referer
                     this.headers = headers
                     this.quality = quality ?: Qualities.Unknown.value
@@ -1084,9 +1208,10 @@ class CineLiteProvider : MainAPI() {
         val variants = if (separateAudio) emptyList() else allVariants
         val topQuality = allVariants.mapNotNull { it.quality }.maxOrNull()
         for (v in variants.sortedWith(compareByDescending<Variant> { it.quality ?: 0 }.thenByDescending { it.bandwidth ?: 0L })) {
-            val label = v.quality?.let { "${it}p" } ?: v.bandwidth?.let { "${it / 1000}kbps" } ?: "Stream"
+            // Cloudstream shows the quality next to the name by itself
+            val label = if (v.quality != null) "" else v.bandwidth?.let { " ${it / 1000}kbps" } ?: ""
             out.invoke(
-                newExtractorLink(name, "$base $label", v.url, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, "$base$label", v.url, ExtractorLinkType.M3U8) {
                     this.referer = referer
                     this.headers = headers
                     this.quality = v.quality ?: Qualities.Unknown.value
@@ -1098,8 +1223,8 @@ class CineLiteProvider : MainAPI() {
             newExtractorLink(
                 name,
                 when {
-                    separateAudio && topQuality != null -> "$base ${if (topQuality >= 2160) "4K" else "${topQuality}p"}"
-                    variants.isEmpty() -> base + (quality?.let { " ${it}p" } ?: " (Auto)")
+                    separateAudio && topQuality != null -> base
+                    variants.isEmpty() -> base + (if (quality != null) "" else " (Auto)")
                     else -> "$base (Auto)"
                 },
                 url,

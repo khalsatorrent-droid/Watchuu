@@ -223,13 +223,25 @@ class CineLiteProvider : MainAPI() {
                 }
             } else {
                 val episodes = mutableListOf<Episode>()
-                detail.seasons
-                    ?.filter { it.seasonNumber > 0 && (it.episodeCount ?: 0) > 0 }
-                    ?.forEach { season ->
+                // all seasons are fetched at the same time (shows with many seasons opened slowly)
+                val seasonData = coroutineScope {
+                    detail.seasons
+                        ?.filter { it.seasonNumber > 0 && (it.episodeCount ?: 0) > 0 }
+                        ?.map { season ->
+                            async {
+                                try {
+                                    parseJson<TmdbSeasonDetail>(tmdbGet("/tv/$tmdbId/season/${season.seasonNumber}"))
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        }?.awaitAll() ?: emptyList()
+                }
+                seasonData.filterNotNull()
+                    .forEach { sd ->
                         try {
-                            val sd = parseJson<TmdbSeasonDetail>(
-                                tmdbGet("/tv/$tmdbId/season/${season.seasonNumber}")
-                            )
                             sd.episodes?.forEach { ep ->
                                 val epData = "$mainUrl/$epToken|$tmdbId|${ep.seasonNumber}|${ep.episodeNumber}|$title"
                                 episodes.add(
@@ -301,13 +313,14 @@ class CineLiteProvider : MainAPI() {
         // every link goes through here so the same url is never listed twice
         val emitted = HashSet<String>()
         var found = false
+        // servers now answer in parallel, so the shared state is guarded
         val out: (ExtractorLink) -> Unit = { link ->
-            if (emitted.add(link.url)) {
-                found = true
-                callback.invoke(link)
+            val isNew = synchronized(emitted) {
+                if (emitted.add(link.url)) { found = true; true } else false
             }
+            if (isNew) callback.invoke(link)
         }
-        val dbg = mutableListOf<String>()
+        val dbg: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
         if (type == "atv") {
             // Anime uses the same WebView + all-servers path as movies/TV.
@@ -371,94 +384,122 @@ class CineLiteProvider : MainAPI() {
             "$embedUrl/$tmdbId/$season/$episode?$embedQuery",
         )
 
-        val year = try {
-            val d = parseJson<TmdbDetail>(tmdbGet("/${if (isMovie) "movie" else "tv"}/$tmdbId"))
-            (d.releaseDate ?: d.firstAirDate)?.take(4)
-        } catch (_: Exception) {
-            null
-        }
-        var subUrl = "$apiUrl/subtitles?id=$tmdbId&title=${URLEncoder.encode(title, "UTF-8")}" +
-            (if (year != null) "&year=$year" else "")
-        if (!isMovie) subUrl += "&season=$season&episode=$episode"
-
-        for ((idx, embed) in embeds.withIndex()) {
-            val s = CineLiteBrowser.open(embed, ua, "$mainUrl/")
-            if (s == null) {
-                dbg.add("webview unavailable")
-                return
+        coroutineScope {
+            // the year (only needed for the subtitle query) is looked up while the player loads
+            val yearJob = async {
+                try {
+                    val d = parseJson<TmdbDetail>(tmdbGet("/${if (isMovie) "movie" else "tv"}/$tmdbId"))
+                    (d.releaseDate ?: d.firstAirDate)?.take(4)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
             }
-            try {
-                val ready = s.waitFor(if (idx == 0) 30_000L else 20_000L) {
-                    s.has("template") ||
-                        s.events.any { (it.kind == "provider" || it.kind == "servers") && it.status in 200..299 }
+
+            for ((idx, embed) in embeds.withIndex()) {
+                val s = CineLiteBrowser.open(embed, ua, "$mainUrl/")
+                if (s == null) {
+                    dbg.add("webview unavailable")
+                    yearJob.cancel()
+                    return@coroutineScope
                 }
-                dbg.add("embed#$idx ready=$ready events=${s.events.size} verify=${s.events.firstOrNull { it.kind == "verify" }?.status}")
-                if (!ready) continue
-                delay(1500L) // let /servers land
-
-                // same query the player used (works for tv even though the pattern is inferred)
-                val query = s.events.firstOrNull { it.kind == "provider" }
-                    ?.url?.substringAfter("?", "")?.takeIf { it.isNotBlank() } ?: defaultQuery
-
-                // server list: the api's own list first, our known names as a safety net
-                val names = LinkedHashSet<String>()
-                names.addAll(providers)
-                var serversBody = s.events.firstOrNull { it.kind == "servers" && it.status in 200..299 }?.body
-                if (serversBody == null) {
-                    val r = s.get("$apiUrl/servers", true)
-                    if (r != null && r.first in 200..299) serversBody = r.second
-                }
-                serversBody?.let { names.addAll(parseServerNames(it)) }
-                s.events.filter { it.kind == "provider" }.forEach { e -> providerName(e.url)?.let { names.add(it) } }
-
-                // responses the player already got ...
-                val bodies = LinkedHashMap<String, Pair<Int, String>>()
-                s.events.filter { it.kind == "provider" && it.status in 200..299 && it.body.isNotBlank() }
-                    .forEach { e ->
-                        val n = providerName(e.url)
-                        if (n != null && !bodies.containsKey(n)) bodies[n] = Pair(e.status, e.body)
+                try {
+                    val ready = s.waitFor(if (idx == 0) 30_000L else 20_000L) {
+                        s.has("template") ||
+                            s.events.any { (it.kind == "provider" || it.kind == "servers") && it.status in 200..299 }
                     }
+                    dbg.add("embed#$idx ready=$ready events=${s.events.size} verify=${s.events.firstOrNull { it.kind == "verify" }?.status}")
+                    if (!ready) continue
+                    // /servers usually lands right after the first provider call: wait for it, but only briefly
+                    s.waitFor(1_200L) { s.events.any { it.kind == "servers" } }
+                    // the player itself is not needed any more: stop it so it doesn't eat bandwidth
+                    s.quiet()
 
-                // ... plus every other server, asked from inside the page
-                coroutineScope {
-                    names.filter { it !in bodies }.take(12).map { n ->
-                        async { n to s.get("$apiUrl/provider/$n?$query", true, 25_000L) }
-                    }.awaitAll().forEach { (n, r) ->
-                        if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
-                            bodies[n] = r
-                        } else {
-                            dbg.add("$n -> ${r?.first} ${r?.second?.take(60)}")
+                    val query = s.events.firstOrNull { it.kind == "provider" }
+                        ?.url?.substringAfter("?", "")?.takeIf { it.isNotBlank() } ?: defaultQuery
+
+                    // subtitles in the background, alongside the servers
+                    val subJob = async {
+                        try {
+                            val year = yearJob.await()
+                            var subUrl = "$apiUrl/subtitles?id=$tmdbId&title=${URLEncoder.encode(title, "UTF-8")}" +
+                                (if (year != null) "&year=$year" else "")
+                            if (!isMovie) subUrl += "&season=$season&episode=$episode"
+                            val sr = s.get(subUrl, true, 15_000L)
+                            if (sr != null && sr.first in 200..299) {
+                                mapper.readTree(sr.second)?.let { collectSubtitles(it, subtitleCallback) }
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
                         }
                     }
-                }
-                dbg.add("servers=${names.joinToString(",")} ok=${bodies.keys.joinToString(",")}")
 
-                // subtitles
-                try {
-                    val sr = s.get(subUrl, true)
-                    if (sr != null && sr.first in 200..299) {
-                        mapper.readTree(sr.second)?.let { collectSubtitles(it, subtitleCallback) }
+                    // server list: the api's own list first, our known names as a safety net
+                    val names = LinkedHashSet<String>()
+                    names.addAll(providers)
+                    var serversBody = s.events.firstOrNull { it.kind == "servers" && it.status in 200..299 }?.body
+                    if (serversBody == null) {
+                        val r = s.get("$apiUrl/servers", true, 8_000L)
+                        if (r != null && r.first in 200..299) serversBody = r.second
                     }
-                } catch (_: Exception) {
-                }
+                    serversBody?.let { names.addAll(parseServerNames(it)) }
+                    s.events.filter { it.kind == "provider" }.forEach { e -> providerName(e.url)?.let { names.add(it) } }
 
-                s.quiet() // everything is collected: silence the player, block its other traffic
-                for ((n, r) in bodies) {
-                    val label = prettyServer(n)
-                    val cands = parseCandidates(r.second)
-                    if (cands.isEmpty()) dbg.add("$n: no stream in ${r.second.take(120)}")
-                    for (c in cands) {
-                        val h = embedHeaders + (c.headers ?: emptyMap())
-                        emitStream(
-                            listOfNotNull(label, c.label).joinToString(" "),
-                            c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
-                        )
-                    }
+                    // responses the player already got
+                    val have = LinkedHashMap<String, String>()
+                    s.events.filter { it.kind == "provider" && it.status in 200..299 && it.body.isNotBlank() }
+                        .forEach { e ->
+                            val n = providerName(e.url)
+                            if (n != null && !have.containsKey(n)) have[n] = e.body
+                        }
+
+                    // every server is handled on its own: links are listed as soon as that server
+                    // answers, instead of waiting for the slowest one
+                    val jobs = have.map { (n, body) -> async { emitServer(n, body, s, out, dbg) } } +
+                        names.filter { it !in have }.take(12).map { n ->
+                            async {
+                                val r = s.get("$apiUrl/provider/$n?$query", true, 15_000L)
+                                if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
+                                    emitServer(n, r.second, s, out, dbg)
+                                } else {
+                                    dbg.add("$n -> ${r?.first} ${r?.second?.take(60)}")
+                                }
+                            }
+                        }
+                    jobs.awaitAll()
+                    subJob.await()
+                    return@coroutineScope
+                } finally {
+                    s.close()
                 }
-                return
-            } finally {
-                s.close()
             }
+            yearJob.cancel()
+        }
+    }
+
+    /** Parses one server's answer and lists all its streams (playlists fetched in parallel). */
+    private suspend fun emitServer(
+        n: String,
+        body: String,
+        s: CineLiteBrowser.Session,
+        out: (ExtractorLink) -> Unit,
+        dbg: MutableList<String>
+    ) {
+        val label = prettyServer(n)
+        val cands = parseCandidates(body)
+        if (cands.isEmpty()) dbg.add("$n: no stream in ${body.take(120)}")
+        coroutineScope {
+            cands.map { c ->
+                async {
+                    val h = embedHeaders + (c.headers ?: emptyMap())
+                    emitStream(
+                        listOfNotNull(label, c.label).joinToString(" "),
+                        c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
+                    )
+                }
+            }.awaitAll()
         }
     }
 
@@ -494,14 +535,26 @@ class CineLiteProvider : MainAPI() {
             }
             dbg.add("anime embed ready=$ready events=${s.events.size} playlists=${s.playlists.size} hls=${s.events.count { it.kind == "hls" }}")
             if (!ready) return
-            // Give the embed a moment to fire any remaining parallel requests
-            delay(3_000L)
+            // the other backends answer shortly after the first: wait until things go quiet
+            // (no new request for 1.2 s), but never more than 3 s
+            run {
+                val start = System.currentTimeMillis()
+                var last = s.events.size + s.playlists.size
+                var lastChange = System.currentTimeMillis()
+                while (System.currentTimeMillis() - start < 3_000L) {
+                    delay(200L)
+                    val now = s.events.size + s.playlists.size
+                    if (now != last) { last = now; lastChange = System.currentTimeMillis() }
+                    else if (System.currentTimeMillis() - lastChange > 1_200L) break
+                }
+            }
 
             s.quiet()
 
-            // Collect streams from vault/proxy responses
+            // every stream is prepared in parallel (each one may need its playlist fetched)
             val seenUrls = LinkedHashSet<String>()
-            for (ev in s.events) {
+            val tasks = mutableListOf<suspend () -> Unit>()
+            for (ev in s.events.toList()) {
                 if (ev.kind != "proxy" || ev.status !in 200..299 || ev.body.isBlank()) continue
                 val backend = animeServerLabelFromProxyUrl(ev.url)
                 val cands = parseCandidates(ev.body)
@@ -509,29 +562,29 @@ class CineLiteProvider : MainAPI() {
                 for (c in cands) {
                     if (!seenUrls.add(c.url)) continue
                     val h = embedHeaders + (c.headers ?: emptyMap())
-                    emitStream(
-                        listOfNotNull(backend, c.label).joinToString(" "),
-                        c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
-                    )
+                    tasks.add {
+                        emitStream(
+                            listOfNotNull(backend, c.label).joinToString(" "),
+                            c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
+                        )
+                    }
                 }
             }
-
-            // Collect vault/hls.m3u8 streams captured by the JS hook (kind='hls')
-            for (ev in s.events) {
-                if (ev.kind != "hls") continue
-                if (!seenUrls.add(ev.url)) continue
+            // vault/hls.m3u8 streams captured by the JS hook (kind='hls')
+            for (ev in s.events.toList()) {
+                if (ev.kind != "hls" || !seenUrls.add(ev.url)) continue
                 val label = animeServerLabelFromHlsUrl(ev.url)
                 dbg.add("anime hls $label: ${ev.url.take(80)}")
-                emitStream(label, ev.url, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
+                tasks.add { emitStream(label, ev.url, null, MK.HLS, embedHeaders, "$embedUrl/", s, out) }
             }
-
-            // Fallback: any HLS playlists captured by shouldInterceptRequest that aren't already listed
-            for (pl in s.playlists) {
+            // fallback: HLS playlists captured by shouldInterceptRequest that aren't listed yet
+            for (pl in s.playlists.toList()) {
                 if (!seenUrls.add(pl)) continue
                 val label = if (pl.contains("/vault/hls")) animeServerLabelFromHlsUrl(pl) else "Stream"
                 dbg.add("anime playlist $label: ${pl.take(80)}")
-                emitStream(label, pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out)
+                tasks.add { emitStream(label, pl, null, MK.HLS, embedHeaders, "$embedUrl/", s, out) }
             }
+            coroutineScope { tasks.map { t -> async { t() } }.awaitAll() }
         } finally {
             s.close()
         }
@@ -799,9 +852,9 @@ class CineLiteProvider : MainAPI() {
     ): String? {
         try {
             val h = if (sniff) headers + ("Range" to "bytes=0-1023") else headers
-            val head = app.get(url, headers = h, timeout = 20_000L).text
+            val head = app.get(url, headers = h, timeout = 10_000L).text
             if (head.trimStart().startsWith("#EXTM3U")) {
-                return if (sniff) app.get(url, headers = headers, timeout = 20_000L).text else head
+                return if (sniff) app.get(url, headers = headers, timeout = 10_000L).text else head
             }
             if (sniff) return null
         } catch (e: CancellationException) {
@@ -809,7 +862,7 @@ class CineLiteProvider : MainAPI() {
         } catch (_: Exception) {
         }
         if (session != null && !session.closed) {
-            val r = session.get(url, false, 20_000L)
+            val r = session.get(url, false, 10_000L)
             if (r != null && r.first in 200..299 && r.second.trimStart().startsWith("#EXTM3U")) return r.second
         }
         return null

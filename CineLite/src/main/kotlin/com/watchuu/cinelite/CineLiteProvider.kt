@@ -357,7 +357,8 @@ class CineLiteProvider : MainAPI() {
             }
         }
 
-        // diagnostics are kept in dbg for debugging but never shown as fake links
+        // diagnostics go to logcat (visible in a Cloudstream log), never shown as fake links
+        try { synchronized(dbg) { dbg.forEach { android.util.Log.d("CineLite", it) } } } catch (_: Throwable) {}
         return found
     }
 
@@ -444,7 +445,11 @@ class CineLiteProvider : MainAPI() {
                         val r = s.get("$apiUrl/servers", true, 8_000L)
                         if (r != null && r.first in 200..299) serversBody = r.second
                     }
-                    serversBody?.let { names.addAll(parseServerNames(it)) }
+                    val display = HashMap<String, String>()
+                    serversBody?.let {
+                        names.addAll(parseServerNames(it))
+                        display.putAll(parseServerDisplayNames(it))
+                    }
                     s.events.filter { it.kind == "provider" }.forEach { e -> providerName(e.url)?.let { names.add(it) } }
 
                     // responses the player already got
@@ -457,12 +462,12 @@ class CineLiteProvider : MainAPI() {
 
                     // every server is handled on its own: links are listed as soon as that server
                     // answers, instead of waiting for the slowest one
-                    val jobs = have.map { (n, body) -> async { emitServer(n, body, s, out, dbg) } } +
+                    val jobs = have.map { (n, body) -> async { emitServer(n, display[n], body, s, out, dbg) } } +
                         names.filter { it !in have }.take(12).map { n ->
                             async {
-                                val r = s.get("$apiUrl/provider/$n?$query", true, 15_000L)
+                                val r = s.get("$apiUrl/provider/$n?$query", true, 30_000L)
                                 if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
-                                    emitServer(n, r.second, s, out, dbg)
+                                    emitServer(n, display[n], r.second, s, out, dbg)
                                 } else {
                                     dbg.add("$n -> ${r?.first} ${r?.second?.take(60)}")
                                 }
@@ -482,20 +487,26 @@ class CineLiteProvider : MainAPI() {
     /** Parses one server's answer and lists all its streams (playlists fetched in parallel). */
     private suspend fun emitServer(
         n: String,
+        displayName: String?,
         body: String,
         s: CineLiteBrowser.Session,
         out: (ExtractorLink) -> Unit,
         dbg: MutableList<String>
     ) {
-        val label = prettyServer(n)
+        val label = displayName?.takeIf { it.isNotBlank() } ?: prettyServer(n)
         val cands = parseCandidates(body)
         if (cands.isEmpty()) dbg.add("$n: no stream in ${body.take(120)}")
+        // the api's own labels repeat the server id and the quality ("cinecat 1080p"): keep the rest only
+        val qRe = Regex("""(?i)^(\d{3,4}p|4k|uhd|fhd|hd|sd|auto)$""")
+        fun clean(l: String?): String? = l?.split(Regex("""[\s_|-]+"""))
+            ?.filter { w -> w.isNotBlank() && !w.equals(n, true) && !w.equals(label, true) && !qRe.matches(w) }
+            ?.joinToString(" ")?.takeIf { it.isNotBlank() }
         coroutineScope {
             cands.map { c ->
                 async {
                     val h = embedHeaders + (c.headers ?: emptyMap())
                     emitStream(
-                        listOfNotNull(label, c.label).joinToString(" "),
+                        listOfNotNull(label, clean(c.label)).joinToString(" "),
                         c.url, c.quality, c.kind, h, h["Referer"] ?: "$embedUrl/", s, out
                     )
                 }
@@ -652,6 +663,28 @@ class CineLiteProvider : MainAPI() {
         n.split("-", "_").filter { it.isNotBlank() }.joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
 
     /** Pulls server ids out of whatever shape /servers has (array of strings, or objects with id/name/slug). */
+    /** id -> the name the site shows for it (Viper, Neon, Sova, ...), from /servers. */
+    private fun parseServerDisplayNames(body: String): Map<String, String> {
+        val root = try { mapper.readTree(body) } catch (_: Exception) { null } ?: return emptyMap()
+        val out = HashMap<String, String>()
+        fun walk(n: JsonNode, depth: Int) {
+            if (depth > 3) return
+            if (n.isArray) n.forEach { walk(it, depth + 1) }
+            else if (n.isObject) {
+                val id = listOf("id", "slug", "provider", "key").firstNotNullOfOrNull { k ->
+                    n.get(k)?.takeIf { it.isTextual }?.asText()
+                }
+                val nm = listOf("name", "displayName", "display_name", "label", "title", "agent").firstNotNullOfOrNull { k ->
+                    n.get(k)?.takeIf { it.isTextual }?.asText()?.takeIf { it.isNotBlank() && !it.startsWith("http") }
+                }
+                if (id != null && nm != null && !nm.equals(id, true)) out[id] = nm
+                else n.fields().forEach { if (it.value.isContainerNode) walk(it.value, depth + 1) }
+            }
+        }
+        walk(root, 0)
+        return out
+    }
+
     private fun parseServerNames(body: String): List<String> {
         val root = try {
             mapper.readTree(body)
@@ -911,7 +944,12 @@ class CineLiteProvider : MainAPI() {
         val text = fetchPlaylist(url, headers, session, sniff = kind == MK.UNKNOWN)
         if (kind == MK.UNKNOWN && text == null) return // not a playlist, not something we can play
 
-        val variants = if (text != null) parseMaster(text, url) else emptyList()
+        val allVariants = if (text != null) parseMaster(text, url) else emptyList()
+        // when the audio is a separate track (#EXT-X-MEDIA TYPE=AUDIO), a single-quality playlist
+        // has video only: such masters are listed as one link (quality is picked in the player)
+        val separateAudio = text != null && Regex("""#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=""").containsMatchIn(text)
+        val variants = if (separateAudio) emptyList() else allVariants
+        val topQuality = allVariants.mapNotNull { it.quality }.maxOrNull()
         for (v in variants.sortedWith(compareByDescending<Variant> { it.quality ?: 0 }.thenByDescending { it.bandwidth ?: 0L })) {
             val label = v.quality?.let { "${it}p" } ?: v.bandwidth?.let { "${it / 1000}kbps" } ?: "Stream"
             out.invoke(
@@ -926,13 +964,21 @@ class CineLiteProvider : MainAPI() {
         out.invoke(
             newExtractorLink(
                 name,
-                if (variants.isEmpty()) base + (quality?.let { " ${it}p" } ?: " (Auto)") else "$base (Auto)",
+                when {
+                    separateAudio && topQuality != null -> "$base ${if (topQuality >= 2160) "4K" else "${topQuality}p"}"
+                    variants.isEmpty() -> base + (quality?.let { " ${it}p" } ?: " (Auto)")
+                    else -> "$base (Auto)"
+                },
                 url,
                 ExtractorLinkType.M3U8
             ) {
                 this.referer = referer
                 this.headers = headers
-                this.quality = if (variants.isEmpty()) (quality ?: Qualities.Unknown.value) else Qualities.Unknown.value
+                this.quality = when {
+                    separateAudio -> topQuality ?: quality ?: Qualities.Unknown.value
+                    variants.isEmpty() -> quality ?: Qualities.Unknown.value
+                    else -> Qualities.Unknown.value
+                }
             }
         )
     }

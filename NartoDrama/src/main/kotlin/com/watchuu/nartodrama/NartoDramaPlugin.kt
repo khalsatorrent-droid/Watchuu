@@ -9,5 +9,7 @@ class NartoDramaPlugin : Plugin() {
     override fun load(context: Context) {
         NartoBrowser.init(context)
         registerMainAPI(NartoDramaProvider())
+        // gear icon in Extensions -> NartoDrama: Cloudflare bypass settings
+        openSettings = { ctx -> NartoSettings.show(ctx) }
     }
 }

@@ -3,7 +3,6 @@ package com.watchuu.nartodrama
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -33,68 +32,28 @@ import org.jsoup.Jsoup
  * hidden WebView that loads the page like a browser.
  */
 class NartoDramaProvider : MainAPI() {
-    override var mainUrl = "https://narto-drama.com"
+    override var mainUrl = NartoSettings.siteUrl
     override var name = "NartoDrama"
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.AsianDrama, TvType.TvSeries, TvType.Movie, TvType.Anime)
 
-    private val edgeUrl = "https://edge.narto-drama.com"
+    private val edgeUrl get() = mainUrl.replace("://", "://edge.")
     private val langQ = "lang=en-US"
 
-    // one user agent for plain requests and the WebView, so a Cloudflare pass is valid for both
-    private val ua =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-
     private val mapper = ObjectMapper()
-    private val killer by lazy { CloudflareKiller() }
-
-    // the site's own JS cookie gate: any random value is accepted
-    private val ndCk: String = (1..18).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("")
 
     // ---------------------------------------------------------------- requests
 
-    private fun cookieMap(): Map<String, String> {
-        val m = LinkedHashMap<String, String>()
-        m["nd_ck"] = ndCk
-        NartoBrowser.cookies(mainUrl)?.split(";")?.forEach { p ->
-            val k = p.substringBefore("=").trim()
-            val v = p.substringAfter("=", "").trim()
-            if (k.isNotEmpty()) m[k] = v
-        }
-        return m
-    }
-
-    private fun headers(referer: String = "$mainUrl/", json: Boolean = false) = mapOf(
-        "User-Agent" to ua,
-        "Referer" to referer,
-        "Accept" to if (json) "application/json, text/plain, */*"
-        else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9",
-    ) + (if (json) mapOf("X-Requested-With" to "XMLHttpRequest") else emptyMap())
-
-    /** Body and final url of a page, past the cookie gate and Cloudflare. */
-    private suspend fun fetch(url: String, json: Boolean = false): Pair<String, String>? {
-        try {
-            val r = app.get(url, headers = headers(json = json), cookies = cookieMap(), timeout = 20_000L)
-            if (r.code in 200..299 && !NartoBrowser.isChallenge(r.text)) return r.text to r.url
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-        }
-        try {
-            val r = app.get(url, headers = headers(json = json), cookies = cookieMap(), interceptor = killer, timeout = 40_000L)
-            if (r.code in 200..299 && !NartoBrowser.isChallenge(r.text)) return r.text to r.url
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-        }
-        // a real browser: passes the gate (and Cloudflare, when it doesn't need a tap)
-        val h = NartoBrowser.html(url, ua) ?: return null
-        val body = if (json) Jsoup.parse(h).body().text() else h
-        val finalUrl = Jsoup.parse(h).selectFirst("link[rel=canonical]")?.attr("href")?.takeIf { it.startsWith("http") } ?: url
-        return body to finalUrl
+    /**
+     * Body of a page / json, past the site's cookie gate and Cloudflare (see NartoBrowser.get:
+     * saved cookie -> hidden browser or Cloudstream bypass -> solver window, per the settings).
+     * Throws a readable error when Cloudflare is not passed.
+     */
+    private suspend fun fetch(url: String, json: Boolean = false): Pair<String, String> {
+        val body = NartoBrowser.get(url, "$mainUrl/")
+        return body to url
     }
 
     // ---------------------------------------------------------------- list helpers
@@ -185,10 +144,12 @@ class NartoDramaProvider : MainAPI() {
                 newHomePageResponse(request.name, items, false)
             } else {
                 val url = if (page > 1) request.data + "&page=$page" else request.data
-                val items = fetch(url)?.first?.let { ldItems(it) }?.map { it.toSearch() } ?: emptyList()
+                val items = ldItems(fetch(url).first).map { it.toSearch() }
                 newHomePageResponse(request.name, items, items.size >= 10)
             }
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: ErrorLoadingException) {
             throw e
         } catch (_: Exception) {
             newHomePageResponse(request.name, emptyList())
@@ -198,7 +159,7 @@ class NartoDramaProvider : MainAPI() {
     private suspend fun providerItems(key: String, page: Int): List<SearchResponse> {
         val url = "$mainUrl/home/providers/sections?provider=$key&$langQ&target_lang=en-US" +
             (if (page > 1) "&page=$page" else "")
-        val body = fetch(url, json = true)?.first ?: return emptyList()
+        val body = fetch(url, json = true).first
         val root = try { mapper.readTree(body) } catch (_: Exception) { null } ?: return emptyList()
         val seen = HashSet<String>()
         val out = ArrayList<SearchResponse>()
@@ -226,9 +187,11 @@ class NartoDramaProvider : MainAPI() {
                     async {
                         val url = "$mainUrl/search?$langQ&q=$q" + (if (p > 1) "&page=$p" else "")
                         try {
-                            fetch(url)?.first?.let { ldItems(it) } ?: emptyList()
+                            ldItems(fetch(url).first)
                         } catch (e: CancellationException) {
                             throw e
+                        } catch (e: ErrorLoadingException) {
+                            if (p == 1) throw e else emptyList()
                         } catch (_: Exception) {
                             emptyList()
                         }
@@ -236,6 +199,8 @@ class NartoDramaProvider : MainAPI() {
                 }.awaitAll().flatten().distinctBy { it.url }.map { it.toSearch() }
             }
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: ErrorLoadingException) {
             throw e
         } catch (_: Exception) {
             emptyList()
@@ -246,7 +211,7 @@ class NartoDramaProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         // provider rows link to /search/import?... which redirects to the drama's page
-        val (html, finalUrl) = fetch(url) ?: return null
+        val (html, finalUrl) = fetch(url)
         val doc = Jsoup.parse(html, finalUrl)
         val base = detailBase(finalUrl)
             ?: doc.selectFirst("link[rel=canonical]")?.attr("href")?.let { detailBase(it) }
@@ -294,11 +259,8 @@ class NartoDramaProvider : MainAPI() {
         }
         if (eps.isEmpty()) {
             try {
-                val r = app.get(
-                    "$edgeUrl/e/rs/detail/watch/$slug/check-new-episodes?_t=${System.currentTimeMillis()}",
-                    headers = headers(base, json = true), cookies = cookieMap(), timeout = 15_000L
-                )
-                val c = mapper.readTree(r.text)?.get("current_count")?.asInt() ?: 0
+                val r = NartoBrowser.get("$edgeUrl/e/rs/detail/watch/$slug/check-new-episodes?_t=${System.currentTimeMillis()}", base)
+                val c = mapper.readTree(r)?.get("current_count")?.asInt() ?: 0
                 for (i in 1..c) eps[i] = "$base/$i?$langQ"
             } catch (e: CancellationException) {
                 throw e
@@ -307,7 +269,7 @@ class NartoDramaProvider : MainAPI() {
         }
 
         val recs = try {
-            fetch("$base/extras?$langQ", json = true)?.first?.let { body ->
+            fetch("$base/extras?$langQ", json = true).first.let { body ->
                 val h = mapper.readTree(body)?.get("html")?.asText() ?: return@let null
                 Jsoup.parse(h, mainUrl).select("a.watch-history-card, a[href*=/detail/watch/]").mapNotNull { a ->
                     val b = detailBase(a.attr("href")) ?: return@mapNotNull null
@@ -365,19 +327,31 @@ class NartoDramaProvider : MainAPI() {
             data.startsWith("/") -> mainUrl + data
             else -> "$mainUrl/$data"
         }
-        val hits = NartoBrowser.sniff(url, ua)
-        if (hits.isEmpty()) return false
+        val sn = NartoBrowser.sniff(url)
+        // what <video> plays first, then urls in the player's own api answers, then requests seen
+        val fromApi = sn.apiBodies.flatMap { b ->
+            Regex("""https?:\\?/\\?/[^\s"'<>]+?\.(?:m3u8|mp4|mpd)[^\s"'<>]*""").findAll(b).map { it.value.replace("\\/", "/") }.toList()
+        }
+        val all = (sn.video + fromApi + sn.media).filter { it.startsWith("http") }.distinct()
+        NartoSettings.lastLinkReport = "Episode $url\nvideo=${sn.video.size} api=${fromApi.size} requests=${sn.media.size}\n" +
+            all.take(5).joinToString("\n") { it.take(140) }
+        if (all.isEmpty()) {
+            NartoSettings.toast("NartoDrama: no video found - the episode may be locked, or open settings > Solve Cloudflare")
+            return false
+        }
 
         // a master playlist first, then other playlists, then plain files
-        val ordered = hits.sortedBy { h ->
-            val l = h.url.lowercase()
+        val ordered = all.sortedBy { u ->
+            val l = u.lowercase()
             when {
+                sn.video.contains(u) && !l.startsWith("blob:") -> -1
                 l.contains(".m3u8") && (l.contains("master") || l.contains("index")) -> 0
                 l.contains(".m3u8") -> 1
                 l.contains(".mpd") -> 2
                 else -> 3
             }
-        }.distinctBy { it.url.substringBefore("?") }.take(3)
+        }.distinctBy { it.substringBefore("?") }.take(3).map { NartoBrowser.Hit(it) }
+        val ua = NartoBrowser.userAgent()
 
         ordered.forEachIndexed { i, h ->
             val l = h.url.lowercase()

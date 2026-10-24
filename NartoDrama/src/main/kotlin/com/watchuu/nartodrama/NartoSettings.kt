@@ -1,0 +1,295 @@
+package com.watchuu.nartodrama
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
+import android.content.SharedPreferences
+import android.graphics.Color
+import android.graphics.Typeface
+import android.text.InputType
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import com.lagradost.cloudstream3.CommonActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** Cloudflare bypass settings, shown from Extensions -> NartoDrama -> settings (gear). */
+object NartoSettings {
+    enum class Mode(val label: String, val help: String) {
+        AUTO("Auto (recommended)", "Hidden browser first; if Cloudflare wants a click, the solver window opens for you."),
+        SOLVER("Always use solver window", "Skip the hidden browser and open the visible solver window whenever blocked."),
+        CLOUDSTREAM("Cloudstream built-in bypass", "Use Cloudstream's own CloudflareKiller (works for non-interactive checks)."),
+        HIDDEN("Hidden browser only", "Never open a window; only the hidden browser is tried."),
+        COOKIE("Manual cookie only", "Only use the cf_clearance cookie + user agent you paste below."),
+    }
+
+    private var prefs: SharedPreferences? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    const val DEFAULT_URL = "https://narto-drama.com"
+
+    fun init(context: Context) {
+        if (prefs == null) prefs = context.applicationContext.getSharedPreferences("nartodrama_settings", Context.MODE_PRIVATE)
+    }
+
+    private fun str(k: String, d: String = "") = prefs?.getString(k, d) ?: d
+    private fun bool(k: String, d: Boolean) = prefs?.getBoolean(k, d) ?: d
+    private fun put(block: SharedPreferences.Editor.() -> Unit) {
+        prefs?.edit()?.apply { block(); apply() }
+    }
+
+    var mode: Mode
+        get() = try { Mode.valueOf(str("mode", Mode.AUTO.name)) } catch (_: Throwable) { Mode.AUTO }
+        set(v) = put { putString("mode", v.name) }
+
+    /** Open the solver window automatically when the hidden browser can't pass (AUTO mode). */
+    var autoPrompt: Boolean
+        get() = bool("auto_prompt", true)
+        set(v) = put { putBoolean("auto_prompt", v) }
+
+    /** Remove the "; wv" WebView marker from the user agent (Cloudflare is stricter with it). */
+    var stripWv: Boolean
+        get() = bool("strip_wv", true)
+        set(v) = put { putBoolean("strip_wv", v) }
+
+    /** Don't load images in the hidden browser (lighter, but can upset some challenges). */
+    var lightweight: Boolean
+        get() = bool("lightweight", false)
+        set(v) = put { putBoolean("lightweight", v) }
+
+    var customUa: String
+        get() = str("custom_ua").trim()
+        set(v) = put { putString("custom_ua", v.trim()) }
+
+    /** UA that was active when cf_clearance was obtained - requests must reuse it. */
+    var solvedUa: String
+        get() = str("solved_ua").trim()
+        set(v) = put { putString("solved_ua", v.trim()) }
+
+    var manualCookie: String
+        get() = str("manual_cookie").trim()
+        set(v) = put { putString("manual_cookie", v.trim()) }
+
+    var timeoutSec: Int
+        get() = str("timeout", "35").toIntOrNull()?.coerceIn(5, 180) ?: 35
+        set(v) = put { putString("timeout", v.toString()) }
+
+    var siteUrl: String
+        get() = str("site_url", DEFAULT_URL).trim().trimEnd('/').ifBlank { DEFAULT_URL }
+        set(v) = put { putString("site_url", v.trim().trimEnd('/')) }
+
+    /** If the API gives nothing, open the episode page in a hidden browser and catch the player's video. */
+    var sniffFallback: Boolean
+        get() = bool("sniff_fallback", true)
+        set(v) = put { putBoolean("sniff_fallback", v) }
+
+    /** Result of the last loadLinks (for "Show last link report"). */
+    @Volatile
+    var lastLinkReport: String = "No episode played yet."
+
+    fun currentActivity(ctx: Context? = null): Activity? =
+        (ctx as? Activity) ?: try { CommonActivity.activity } catch (_: Throwable) { null }
+
+    fun toast(msg: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                CommonActivity.showToast(msg, Toast.LENGTH_LONG)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ dialog
+
+    private fun dp(ctx: Context, v: Int) = (v * ctx.resources.displayMetrics.density).toInt()
+
+    fun show(context: Context) {
+        val act = currentActivity(context) ?: return
+        init(act)
+        val pad = dp(act, 16)
+        val root = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+
+        fun header(t: String) = TextView(act).apply {
+            text = t
+            setTypeface(typeface, Typeface.BOLD)
+            textSize = 15f
+            setPadding(0, dp(act, 14), 0, dp(act, 4))
+        }
+
+        fun note(t: String) = TextView(act).apply {
+            text = t
+            textSize = 12f
+            alpha = 0.75f
+        }
+
+        fun field(hint: String, value: String, multi: Boolean = false) = EditText(act).apply {
+            this.hint = hint
+            setText(value)
+            textSize = 13f
+            inputType = if (multi) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            if (multi) { minLines = 2; maxLines = 5 } else isSingleLine = true
+        }
+
+        fun button(t: String, onClick: () -> Unit) = Button(act).apply {
+            text = t
+            isAllCaps = false
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val status = TextView(act).apply {
+            textSize = 13f
+            setPadding(0, dp(act, 4), 0, dp(act, 4))
+        }
+        fun refreshStatus() {
+            val has = NartoBrowser.hasClearance()
+            status.text = if (has) "Status: cf_clearance cookie saved" else "Status: no Cloudflare cookie yet - tap \"Solve Cloudflare now\""
+            status.setTextColor(if (has) Color.rgb(76, 175, 80) else Color.rgb(239, 154, 0))
+        }
+        refreshStatus()
+
+        root.addView(TextView(act).apply {
+            text = "NartoDrama - Cloudflare bypass"
+            textSize = 18f
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        root.addView(status)
+
+        // actions
+        root.addView(button("Solve Cloudflare now (opens the site, tick the box)") {
+            scope.launch {
+                val ok = NartoBrowser.solveInteractive(act)
+                withContext(Dispatchers.Main) {
+                    refreshStatus()
+                    Toast.makeText(act, if (ok) "Cloudflare passed" else "Not solved", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+        root.addView(button("Test connection") {
+            Toast.makeText(act, "Testing...", Toast.LENGTH_SHORT).show()
+            scope.launch {
+                val msg = NartoBrowser.test()
+                withContext(Dispatchers.Main) {
+                    refreshStatus()
+                    AlertDialog.Builder(act).setTitle("NartoDrama test").setMessage(msg).setPositiveButton("OK", null).show()
+                }
+            }
+        })
+        root.addView(button("Test streaming links (Tangled in desire ep 1)") {
+            Toast.makeText(act, "Loading episode 1 - can take up to a minute...", Toast.LENGTH_LONG).show()
+            scope.launch {
+                val msg = try {
+                    val p = NartoDramaProvider()
+                    val lr = p.load("$siteUrl/detail/watch/tangled-in-desire-4?lang=en-US") as? com.lagradost.cloudstream3.TvSeriesLoadResponse
+                    val ep = lr?.episodes?.firstOrNull()
+                    if (ep == null) "Series page loaded but no episodes found." else {
+                        val links = ArrayList<String>()
+                        var subs = 0
+                        p.loadLinks(ep.data, false, { subs++ }, { links.add(it.name + "\n" + it.url.take(110)) })
+                        "Episode data: ${ep.data}\n\nLinks: ${links.size}, subtitles: $subs\n\n" +
+                            links.joinToString("\n\n") + "\n\nReport: " + lastLinkReport
+                    }
+                } catch (e: Throwable) {
+                    "Error: ${e.message ?: e.javaClass.simpleName}\n\nTrace: ${NartoBrowser.lastTrace}\n\nReport: $lastLinkReport"
+                }
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(act).setTitle("NartoDrama link test").setMessage(msg).setPositiveButton("OK", null).show()
+                }
+            }
+        })
+        root.addView(button("Show last link report") {
+            AlertDialog.Builder(act).setTitle("Last link report").setMessage(lastLinkReport).setPositiveButton("OK", null).show()
+        })
+        root.addView(button("Clear Cloudflare cookies") {
+            scope.launch {
+                NartoBrowser.reset(clearCookies = true)
+                withContext(Dispatchers.Main) {
+                    refreshStatus()
+                    Toast.makeText(act, "Cookies cleared", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        // mode
+        root.addView(header("Bypass mode"))
+        val modeHelp = note(mode.help)
+        val group = RadioGroup(act)
+        Mode.values().forEach { m ->
+            group.addView(RadioButton(act).apply {
+                id = View.generateViewId()
+                text = m.label
+                tag = m
+                isChecked = m == mode
+            })
+        }
+        group.setOnCheckedChangeListener { g, id ->
+            (g.findViewById<RadioButton>(id)?.tag as? Mode)?.let { modeHelp.text = it.help }
+        }
+        root.addView(group)
+        root.addView(modeHelp)
+
+        // options
+        root.addView(header("Options"))
+        val cbPrompt = CheckBox(act).apply { text = "Open solver window automatically when needed"; isChecked = autoPrompt }
+        val cbWv = CheckBox(act).apply { text = "Hide WebView marker in user agent (\"; wv\")"; isChecked = stripWv }
+        val cbLight = CheckBox(act).apply { text = "Lightweight hidden browser (no images)"; isChecked = lightweight }
+        val cbSniff = CheckBox(act).apply { text = "If no links: play the episode page in a hidden browser and catch the video"; isChecked = sniffFallback }
+        root.addView(cbPrompt); root.addView(cbWv); root.addView(cbLight); root.addView(cbSniff)
+
+        root.addView(header("Hidden browser timeout (seconds)"))
+        val etTimeout = field("35", timeoutSec.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }
+        root.addView(etTimeout)
+
+        root.addView(header("Custom user agent"))
+        root.addView(note("Leave empty to use this device's browser user agent. If you paste a cookie from another browser, paste that browser's exact user agent here."))
+        val etUa = field("Mozilla/5.0 ...", customUa, multi = true)
+        root.addView(etUa)
+
+        root.addView(header("Manual cookie"))
+        root.addView(note("Optional. e.g. cf_clearance=xxxx  (from a browser on the SAME network, with the same user agent as above)."))
+        val etCookie = field("cf_clearance=...", manualCookie, multi = true)
+        root.addView(etCookie)
+
+        root.addView(header("Site URL (mirror)"))
+        val etUrl = field(DEFAULT_URL, siteUrl)
+        root.addView(etUrl)
+
+        root.addView(note("Current user agent:\n" + NartoBrowser.userAgent()).apply { setPadding(0, dp(act, 12), 0, 0) })
+
+        val scroll = ScrollView(act).apply { addView(root) }
+        AlertDialog.Builder(act)
+            .setView(scroll)
+            .setPositiveButton("Save") { _, _ ->
+                (group.findViewById<RadioButton>(group.checkedRadioButtonId)?.tag as? Mode)?.let { mode = it }
+                autoPrompt = cbPrompt.isChecked
+                val uaChanged = stripWv != cbWv.isChecked || customUa != etUa.text.toString().trim()
+                stripWv = cbWv.isChecked
+                lightweight = cbLight.isChecked
+                sniffFallback = cbSniff.isChecked
+                timeoutSec = etTimeout.text.toString().toIntOrNull() ?: 35
+                customUa = etUa.text.toString()
+                manualCookie = etCookie.text.toString()
+                siteUrl = etUrl.text.toString()
+                scope.launch { NartoBrowser.reset(clearCookies = false, uaChanged = uaChanged) }
+                Toast.makeText(act, "Saved - restart the app if the site URL changed", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+}

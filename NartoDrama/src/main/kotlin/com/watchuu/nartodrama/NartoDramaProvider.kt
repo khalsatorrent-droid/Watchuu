@@ -346,7 +346,11 @@ class NartoDramaProvider : MainAPI() {
                 } catch (_: Exception) {
                 }
             }
-            report.append("page: ${videos.size} video; ")
+            // any stream-host address in the page (scripts, data attributes), escaped or not
+            Regex("""https?:(?:\\?/){2}[a-z0-9-]*stream[a-z0-9.-]*\.narto-drama\.com(?:\\?/)[A-Za-z0-9_-]{40,}""")
+                .findAll(html).forEach { videos.putIfAbsent(it.value.replace("\\/", "/"), name) }
+            report.append("page: ${html.length} chars, ${videos.size} video, ld=${html.contains("VideoObject")}, " +
+                "challenge=${NartoBrowser.isChallenge(200, html)}; ")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -413,7 +417,7 @@ class NartoDramaProvider : MainAPI() {
 
         NartoSettings.lastLinkReport = report.toString() + "\n" + videos.keys.joinToString("\n") { it.take(140) }
         if (videos.isEmpty()) {
-            NartoSettings.toast("NartoDrama: no video found - open settings > Solve Cloudflare, then try again")
+            NartoSettings.toast("NartoDrama: no video. ${report.toString().substringAfter("\n").take(220)}")
             return false
         }
 

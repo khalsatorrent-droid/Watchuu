@@ -351,9 +351,9 @@ class RedFlixProvider : MainAPI() {
         var found = false
         val lock = Any()
 
-        // WebViews are heavy: at most 3 servers are loaded at the same time.
+        // 6 servers load at the same time (12 servers = 2 rounds of at most 15 s each).
         // Links are handed to Cloudstream as soon as each server answers.
-        val gate = Semaphore(3)
+        val gate = Semaphore(6)
         coroutineScope {
             servers.map { srv ->
                 async {
@@ -363,7 +363,7 @@ class RedFlixProvider : MainAPI() {
                             .replace("{s}", s?.toString() ?: "")
                             .replace("{e}", e?.toString() ?: "")
                         val hits = try {
-                            RedFlixBrowser.sniff(embed, "$mainUrl/", ua, 22_000L)
+                            RedFlixBrowser.sniff(embed, "$mainUrl/", ua, 15_000L)
                         } catch (ex: CancellationException) {
                             throw ex
                         } catch (_: Exception) {

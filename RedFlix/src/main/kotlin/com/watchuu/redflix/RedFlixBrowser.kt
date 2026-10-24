@@ -51,6 +51,21 @@ object RedFlixBrowser {
         return l.contains("dash-hls-bridge") || l.contains("/manifest?") || l.contains("/playlist?")
     }
 
+    // ads, trackers and analytics seen in the log: never needed, they only slow the players down
+    private val blockedHosts = listOf(
+        "google-analytics.com", "googletagmanager.com", "googlesyndication.com", "doubleclick.net",
+        "cloudflareinsights.com", "umami.", "histats.com", "disqus.com", "facebook.net", "hotjar.com",
+        "adsterra", "popads", "propellerads", "onclick", "juicyads", "exoclick", "flagsapi.com",
+        "butchestusker.com", "firebaseapp.com", "apis.google.com", "fonts.googleapis.com", "fonts.gstatic.com"
+    )
+    // throw-away ad domains in the log all used these TLDs (stream hosts did not)
+    private val blockedTlds = listOf(".cfd", ".rest", ".cyou", ".click", ".monster", ".sbs")
+
+    private fun isBlocked(u: String): Boolean {
+        val host = u.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+        return blockedHosts.any { host.contains(it) } || blockedTlds.any { host.endsWith(it) }
+    }
+
     private fun isSegment(u: String): Boolean {
         val l = u.lowercase()
         if (isManifest(l)) return false
@@ -144,7 +159,7 @@ object RedFlixBrowser {
                             if (hits.none { it.url == u }) hits.add(Hit(u, ref, org))
                             return null
                         }
-                        if (isSegment(u)) {
+                        if (isSegment(u) || isBlocked(u)) {
                             return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                         }
                         return null
@@ -176,8 +191,8 @@ object RedFlixBrowser {
                 if (hits.isNotEmpty()) {
                     if (firstHitAt == 0L) firstHitAt = System.currentTimeMillis()
                     // grace period: the master playlist and other qualities usually follow quickly
-                    if (System.currentTimeMillis() - firstHitAt > 2500L) break
-                } else if ((tapped == 0 && elapsed > 5_000L) || (tapped == 1 && elapsed > 10_000L)) {
+                    if (System.currentTimeMillis() - firstHitAt > 1_000L) break
+                } else if ((tapped == 0 && elapsed > 3_000L) || (tapped == 1 && elapsed > 7_000L)) {
                     tapped++
                     try {
                         withContext(Dispatchers.Main) { wv.evaluateJavascript(TAP_JS, null) }

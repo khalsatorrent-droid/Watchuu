@@ -52,8 +52,8 @@ class CineLiteProvider : MainAPI() {
     private val tmdbImg = "https://image.tmdb.org/t/p/w500"
     private val tmdbBack = "https://image.tmdb.org/t/p/original"
 
-    // provider ids seen in the log (vault is requested first by the player)
-    private val providers = listOf("vault", "movy-miami", "movy-boise", "movy-phoenix", "movy-portland")
+    // the servers the site's player offers (log of 2026-10-24; vault is requested first by the player)
+    private val providers = listOf("vault", "cinecat", "hyper", "vidup", "xdownloader")
 
     private val ua =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -660,19 +660,32 @@ class CineLiteProvider : MainAPI() {
         } ?: return emptyList()
         val ok = Regex("""^[a-z][a-z0-9_-]{1,40}\z""")
         val names = LinkedHashSet<String>()
-        fun add(s: String?) {
-            if (s != null && ok.matches(s)) names.add(s)
+
+        // entries the site marks as switched off are not shown by its player, so skip them too
+        fun isOff(n: JsonNode): Boolean {
+            fun f(k: String) = n.get(k)
+            if (f("enabled")?.isBoolean == true && !f("enabled").asBoolean()) return true
+            if (f("active")?.isBoolean == true && !f("active").asBoolean()) return true
+            if (f("disabled")?.asBoolean() == true || f("hidden")?.asBoolean() == true) return true
+            val st = f("status")?.asText()?.lowercase()
+            return st != null && st in setOf("off", "offline", "down", "disabled", "inactive", "maintenance")
         }
 
         fun walk(n: JsonNode, depth: Int) {
-            if (depth > 4) return
+            if (depth > 3) return
             if (n.isArray) {
-                n.forEach { if (it.isTextual) add(it.asText()) else walk(it, depth + 1) }
+                n.forEach { if (it.isTextual) it.asText().takeIf { t -> ok.matches(t) }?.let { t -> names.add(t) } else walk(it, depth + 1) }
             } else if (n.isObject) {
-                for (k in listOf("id", "name", "slug", "provider", "key")) {
-                    n.get(k)?.takeIf { it.isTextual }?.let { add(it.asText()) }
+                if (isOff(n)) return
+                // the server's id only (not display names / nested urls)
+                val id = listOf("id", "slug", "provider", "key").firstNotNullOfOrNull { k ->
+                    n.get(k)?.takeIf { it.isTextual }?.asText()?.takeIf { ok.matches(it) }
                 }
-                n.fields().forEach { if (it.value.isContainerNode) walk(it.value, depth + 1) }
+                if (id != null) {
+                    names.add(id)
+                } else {
+                    n.fields().forEach { if (it.value.isContainerNode) walk(it.value, depth + 1) }
+                }
             }
         }
         walk(root, 0)

@@ -327,48 +327,128 @@ class NartoDramaProvider : MainAPI() {
             data.startsWith("/") -> mainUrl + data
             else -> "$mainUrl/$data"
         }
-        val sn = NartoBrowser.sniff(url)
-        // what <video> plays first, then urls in the player's own api answers, then requests seen
-        val fromApi = sn.apiBodies.flatMap { b ->
-            Regex("""https?:\\?/\\?/[^\s"'<>]+?\.(?:m3u8|mp4|mpd)[^\s"'<>]*""").findAll(b).map { it.value.replace("\\/", "/") }.toList()
+        val ua = NartoBrowser.userAgent()
+        val report = StringBuilder("Episode $url\n")
+        val videos = LinkedHashMap<String, String>() // url -> label
+        val subs = LinkedHashMap<String, String>()   // url -> language
+        val epNum = Regex("""/detail/watch/[^/]+/(\d+)""").find(url)?.groupValues?.get(1)
+
+        // 1) the episode page itself: JSON-LD VideoObject.contentUrl is the video
+        var html: String? = null
+        try {
+            html = NartoBrowser.get(url, "$mainUrl/")
+            Jsoup.parse(html).select("script[type=application/ld+json]").forEach { sc ->
+                try {
+                    val n = mapper.readTree(sc.data()) ?: return@forEach
+                    if (n.get("@type")?.asText() == "VideoObject") {
+                        n.get("contentUrl")?.asText()?.takeIf { it.startsWith("http") }?.let { videos.putIfAbsent(it, name) }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            report.append("page: ${videos.size} video; ")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            report.append("page failed: ${e.message?.take(120)}; ")
         }
-        val all = (sn.video + fromApi + sn.media).filter { it.startsWith("http") }.distinct()
-        NartoSettings.lastLinkReport = "Episode $url\nvideo=${sn.video.size} api=${fromApi.size} requests=${sn.media.size}\n" +
-            all.take(5).joinToString("\n") { it.take(140) }
-        if (all.isEmpty()) {
-            NartoSettings.toast("NartoDrama: no video found - the episode may be locked, or open settings > Solve Cloudflare")
+
+        // 2) the player's own api (fresh address + every subtitle), when the page carries its token
+        val h = html
+        if (h != null && epNum != null) {
+            val ctx = Regex("""eyJtb3ZpZV9pZCI6[A-Za-z0-9_=-]+\.[A-Za-z0-9_-]{20,}""").find(h)?.value
+            val slug = Regex("""/detail/watch/([^/?#]+)""").find(url)?.groupValues?.get(1)
+            if (ctx != null && slug != null) {
+                try {
+                    val sid = (1..8).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("")
+                    val api = "$edgeUrl/e/rs/detail/watch/$slug/$epNum/refresh-source?$langQ&rs_ctx=$ctx" +
+                        "&rs_reason=prefetch_empty&rs_src=prefetch&rs_attempt=0&rs_flag=0&rs_local=0&rs_sid=$sid&force=1"
+                    val j = mapper.readTree(NartoBrowser.get(api, url))
+                    listOf("play_url", "direct_play_url").forEach { k ->
+                        j?.get(k)?.asText()?.takeIf { it.startsWith("http") }?.let { videos.putIfAbsent(it, "$name (refreshed)") }
+                    }
+                    j?.get("multi_resolutions")?.forEach { r ->
+                        val u = (r.get("url") ?: r.get("play_url"))?.asText() ?: return@forEach
+                        val lbl = (r.get("label") ?: r.get("resolution"))?.asText() ?: ""
+                        if (u.startsWith("http")) videos.putIfAbsent(u, "$name $lbl".trim())
+                    }
+                    j?.get("multi_subtitles")?.forEach { sb ->
+                        val su = sb.get("subtitle_url")?.asText() ?: return@forEach
+                        subs.putIfAbsent(fixUrl2(su) ?: return@forEach, sb.get("label")?.asText() ?: sb.get("language_code")?.asText() ?: "Subtitle")
+                    }
+                    j?.get("subtitle_url")?.asText()?.let { fixUrl2(it) }?.let { subs.putIfAbsent(it, "English") }
+                    report.append("api ok; ")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    report.append("api failed: ${e.message?.take(80)}; ")
+                }
+            } else report.append("no api token in page; ")
+
+            // subtitles the page links to (/e/s/{token}: the token names the original file, e.g. en.srt)
+            if (subs.isEmpty()) {
+                Regex("""/e/s/([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)""").findAll(h).forEach { m ->
+                    val lang = try {
+                        val json = String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING))
+                        val file = Regex(""""src"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)?.substringAfterLast("/") ?: ""
+                        subLang(file.substringBefore("."))
+                    } catch (_: Exception) {
+                        "Subtitle"
+                    }
+                    subs.putIfAbsent("$mainUrl${m.value}", lang)
+                }
+            }
+        }
+
+        // 3) last resort: play the page in a hidden browser and catch the video it loads
+        if (videos.isEmpty()) {
+            val sn = NartoBrowser.sniff(url)
+            val fromApi = sn.apiBodies.flatMap { b ->
+                Regex(""""(?:direct_)?play_url"\s*:\s*"([^"]+)"""").findAll(b).map { it.groupValues[1].replace("\\/", "/") }.toList()
+            }
+            (sn.video + fromApi + sn.media).filter { it.startsWith("http") }.distinct().take(3)
+                .forEach { videos.putIfAbsent(it, name) }
+            report.append("sniffer: video=${sn.video.size} api=${fromApi.size} requests=${sn.media.size}; ")
+        }
+
+        NartoSettings.lastLinkReport = report.toString() + "\n" + videos.keys.joinToString("\n") { it.take(140) }
+        if (videos.isEmpty()) {
+            NartoSettings.toast("NartoDrama: no video found - open settings > Solve Cloudflare, then try again")
             return false
         }
 
-        // a master playlist first, then other playlists, then plain files
-        val ordered = all.sortedBy { u ->
+        // the stream host sits behind the same Cloudflare: send the cleared cookie with the UA it belongs to
+        val cookie = NartoBrowser.cookies()
+        val hdr = buildMap {
+            put("Referer", url)
+            put("Origin", mainUrl)
+            put("User-Agent", ua)
+            if (!cookie.isNullOrBlank()) put("Cookie", cookie)
+        }
+        subs.forEach { (u, l) -> subtitleCallback.invoke(newSubtitleFile(l, u)) }
+        videos.entries.forEachIndexed { i, (u, label) ->
             val l = u.lowercase()
-            when {
-                sn.video.contains(u) && !l.startsWith("blob:") -> -1
-                l.contains(".m3u8") && (l.contains("master") || l.contains("index")) -> 0
-                l.contains(".m3u8") -> 1
-                l.contains(".mpd") -> 2
-                else -> 3
-            }
-        }.distinctBy { it.substringBefore("?") }.take(3).map { NartoBrowser.Hit(it) }
-        val ua = NartoBrowser.userAgent()
-
-        ordered.forEachIndexed { i, h ->
-            val l = h.url.lowercase()
             val type = when {
                 l.contains(".m3u8") -> ExtractorLinkType.M3U8
                 l.substringBefore("?").endsWith(".mpd") -> ExtractorLinkType.DASH
                 else -> ExtractorLinkType.VIDEO
             }
-            val q = Regex("""(?i)(2160|1440|1080|720|540|480|360)p?""").find(h.url)?.groupValues?.get(1)?.toIntOrNull()
             callback.invoke(
-                newExtractorLink(name, if (i == 0) name else "$name ${i + 1}", h.url, type) {
-                    this.referer = "$mainUrl/"
-                    this.quality = q ?: Qualities.Unknown.value
-                    this.headers = mapOf("Referer" to "$mainUrl/", "Origin" to mainUrl, "User-Agent" to ua)
+                newExtractorLink(name, if (i == 0) label else "$label ${i + 1}", u, type) {
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                    this.headers = hdr
                 }
             )
         }
         return true
+    }
+
+    private fun subLang(code: String): String = when (code.lowercase()) {
+        "en" -> "English"; "pt" -> "Portuguese"; "in", "id" -> "Indonesian"; "es" -> "Spanish"
+        "fr" -> "French"; "de" -> "German"; "it" -> "Italian"; "ja" -> "Japanese"; "ko" -> "Korean"
+        "th" -> "Thai"; "ar" -> "Arabic"; "tr" -> "Turkish"; "vi" -> "Vietnamese"; "hi" -> "Hindi"
+        "zh", "zhhans", "zh-hans" -> "Chinese (Simplified)"; "zhhant", "zh-hant", "tw" -> "Chinese (Traditional)"
+        else -> code.ifBlank { "Subtitle" }
     }
 }

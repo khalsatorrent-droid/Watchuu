@@ -460,7 +460,15 @@ object NartoBrowser {
 
     private fun isMediaUrl(u: String): Boolean {
         val p = u.lowercase().substringBefore("?")
-        return u.lowercase().contains(".m3u8") || p.endsWith(".mp4") || p.endsWith(".mpd") || p.endsWith(".m4v") || p.endsWith(".webm")
+        if (u.lowercase().contains(".m3u8") || p.endsWith(".mp4") || p.endsWith(".mpd") || p.endsWith(".m4v") || p.endsWith(".webm")) return true
+        return isStreamHost(u)
+    }
+
+    /** The site's own video hosts have no file extension: dramabox-stream.narto-drama.com/{token}. */
+    fun isStreamHost(u: String): Boolean {
+        val host = u.lowercase().substringAfter("://").substringBefore("/").substringBefore(":")
+        val path = u.substringAfter("://").substringAfter("/", "")
+        return host.contains("stream") && path.length > 30
     }
 
     /** Opens the episode page like a viewer would and collects what the site's player loads. */
@@ -489,7 +497,7 @@ object NartoBrowser {
                     if (isMediaUrl(u) && !media.contains(u)) media.add(u)
                     val p = u.lowercase().substringBefore("?")
                     // never download actual video data in the background
-                    if (p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp4") || p.endsWith(".m4v") ||
+                    if (p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp4") || p.endsWith(".m4v") || isStreamHost(u) ||
                         p.contains("/presence/") || p.contains("/wrapper-guard/")) {
                         return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                     }

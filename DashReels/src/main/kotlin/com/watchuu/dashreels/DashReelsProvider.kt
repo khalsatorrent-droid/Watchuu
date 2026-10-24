@@ -40,19 +40,33 @@ class DashReelsProvider : MainAPI() {
 
     // ---------------------------------------------------------------- requests
 
+    /**
+     * Same as the app's HttpClient.get/post: when the reply carries a "location" header (any status,
+     * the load balancer answers this way), the request is sent again - same method, headers and
+     * body - to baseUrl + location. Redirects are not followed automatically.
+     */
     private suspend fun call(path: String, body: String? = null): JsonNode? {
         repeat(2) { attempt ->
             val token = DashReelsAuth.token()
                 ?: throw ErrorLoadingException("DashReels: could not sign in as guest (${DashReelsAuth.lastError})")
             val h = DashReelsAuth.apiHeaders(token)
-            val r = if (body == null) app.get("$api$path", headers = h, timeout = 30L)
-            else app.post("$api$path", headers = h, requestBody = body.toRequestBody(json), timeout = 30L)
+            var url = "$api$path"
+            var r = request(url, h, body)
+            var hops = 0
+            while (hops < 4) {
+                val loc = r.headers["location"]?.trim()?.ifBlank { null } ?: break
+                url = if (loc.startsWith("http")) loc else api + (if (loc.startsWith("/")) loc else "/$loc")
+                r = request(url, h, body)
+                hops++
+            }
             if (r.code == 401 || r.code == 403) {
                 // token no longer accepted: start over with a new guest
                 if (attempt == 0) { DashReelsAuth.reset(); return@repeat }
-                throw ErrorLoadingException("DashReels: server refused the guest account (HTTP ${r.code})")
+                throw ErrorLoadingException("DashReels: server refused the guest account (HTTP ${r.code}) ${r.text.take(150)}")
             }
-            if (r.code !in 200..299) throw ErrorLoadingException("DashReels: HTTP ${r.code} for $path")
+            if (r.code !in 200..299) {
+                throw ErrorLoadingException("DashReels: HTTP ${r.code} for ${url.removePrefix(api)} ${r.text.take(200)}")
+            }
             val n = mapper.readTree(r.text) ?: return null
             // some services wrap the payload: {data: ...}
             val d = n.get("data")
@@ -60,6 +74,10 @@ class DashReelsProvider : MainAPI() {
         }
         return null
     }
+
+    private suspend fun request(url: String, h: Map<String, String>, body: String?) =
+        if (body == null) app.get(url, headers = h, timeout = 30L, allowRedirects = false)
+        else app.post(url, headers = h, requestBody = body.toRequestBody(json), timeout = 30L, allowRedirects = false)
 
     // ---------------------------------------------------------------- shows
 
@@ -90,8 +108,12 @@ class DashReelsProvider : MainAPI() {
         }
     }
 
+    // show info seen in home / search lists, by id
+    private val known = java.util.concurrent.ConcurrentHashMap<String, JsonNode>()
+
     private fun JsonNode.toSearch(): SearchResponse {
         val id = get("id").asText()
+        known[id] = this
         val title = get("name").asText()
         val thumb = get("thumbnailUrl")?.asText()?.takeIf { it.startsWith("http") }
         return newTvSeriesSearchResponse(title, "$mainUrl/reel/$id", TvType.AsianDrama) {
@@ -165,16 +187,23 @@ class DashReelsProvider : MainAPI() {
     // ---------------------------------------------------------------- load
 
     private suspend fun showWithReels(showId: String): Pair<JsonNode?, List<JsonNode>> {
+        var showErr: Exception? = null
         val show = try {
             call("/reels/api/v1/shows/", """{"showId":${mapper.writeValueAsString(showId)}}""")
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            showErr = e
             null
         }
         var reels = show?.get("reels")?.filter { it.isObject } ?: emptyList()
         if (reels.isEmpty()) {
-            val r = call("/reels/api/v1/reels/show/$showId")
+            val r = try {
+                call("/reels/api/v1/reels/show/$showId")
+            } catch (e: ErrorLoadingException) {
+                // report both failures
+                throw ErrorLoadingException(listOfNotNull(showErr?.message, e.message).joinToString(" | "))
+            }
             reels = when {
                 r == null -> emptyList()
                 r.isArray -> r.filter { it.isObject }
@@ -188,7 +217,17 @@ class DashReelsProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val showId = showIdOf(url)
-        val (show, reels) = showWithReels(showId)
+        var err: String? = null
+        val (fetched, reels) = try {
+            showWithReels(showId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            err = e.message
+            null to emptyList()
+        }
+        val show = fetched ?: known[showId]
+        if (show == null && err != null) throw ErrorLoadingException(err)
         val title = show?.get("name")?.asText() ?: "DashReels $showId"
         val poster = show?.get("thumbnailUrl")?.asText()?.takeIf { it.startsWith("http") }
         val tags = listOf("genres", "tropes", "tags").flatMap { k -> show?.get(k)?.map { it.asText() } ?: emptyList() }
@@ -207,7 +246,7 @@ class DashReelsProvider : MainAPI() {
         }
         return newTvSeriesLoadResponse(title, "$mainUrl/reel/$showId", TvType.AsianDrama, episodes) {
             this.posterUrl = poster
-            this.plot = show?.get("description")?.asText()
+            this.plot = (show?.get("description")?.asText() ?: "") + (if (err != null) "\n\n[episodes could not be loaded: $err]" else "")
             this.tags = tags
             show?.get("rating")?.asText()?.let { r -> this.score = Score.from10(r) }
         }

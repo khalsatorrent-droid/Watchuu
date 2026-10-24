@@ -53,6 +53,7 @@ class RedFlixProvider : MainAPI() {
 
     // Order = the order RedFlix lists them / how reliable they were in the log.
     private val servers = listOf(
+        Server("Videasy", "https://player.videasy.to/movie/{id}", "https://player.videasy.to/tv/{id}/{s}/{e}?nextEpisode=true"),
         Server("VidFast", "https://vidfast.vc/movie/{id}?autoPlay=true", "https://vidfast.vc/tv/{id}/{s}/{e}?autoPlay=true"),
         Server("VidLink", "https://vidlink.pro/movie/{id}?autoplay=true", "https://vidlink.pro/tv/{id}/{s}/{e}?autoplay=true"),
         Server("VidUp", "https://vidup.to/movie/{id}", "https://vidup.to/tv/{id}/{s}/{e}"),
@@ -226,8 +227,26 @@ class RedFlixProvider : MainAPI() {
         if (query.isBlank()) return emptyList()
         return try {
             val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-            val resp = parseJson<TmdbResp>(tmdbGet("/search/multi?query=$q&page=1&include_adult=false"))
-            resp.results?.mapNotNull { it.toSearch(null) } ?: emptyList()
+            // the site loads more pages as you scroll; one page is only 20 mixed results (incl.
+            // people), so the first 3 pages are fetched at once
+            val first = parseJson<TmdbResp>(tmdbGet("/search/multi?query=$q&page=1&include_adult=false"))
+            val pages = (first.totalPages ?: 1).coerceAtMost(3)
+            val rest = coroutineScope {
+                (2..pages).map { p ->
+                    async {
+                        try {
+                            parseJson<TmdbResp>(tmdbGet("/search/multi?query=$q&page=$p&include_adult=false")).results
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                }.awaitAll()
+            }
+            ((first.results ?: emptyList()) + rest.filterNotNull().flatten())
+                .mapNotNull { it.toSearch(null) }
+                .distinctBy { it.url }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -351,9 +370,9 @@ class RedFlixProvider : MainAPI() {
         var found = false
         val lock = Any()
 
-        // 6 servers load at the same time (12 servers = 2 rounds of at most 15 s each).
+        // 7 servers load at the same time (13 servers = 2 rounds of at most 15 s each).
         // Links are handed to Cloudstream as soon as each server answers.
-        val gate = Semaphore(6)
+        val gate = Semaphore(7)
         coroutineScope {
             servers.map { srv ->
                 async {

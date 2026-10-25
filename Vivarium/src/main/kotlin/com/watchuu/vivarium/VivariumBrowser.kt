@@ -277,12 +277,24 @@ object VivariumBrowser {
         }
     }
 
-    // installed at document start so the site's own /api/es fetch is teed as it streams in
+    // installed at document start so the site's own /api/es request is teed as it streams in,
+    // whether the site uses fetch() or XMLHttpRequest for the event stream.
     private const val ES_HOOK = "(function(){if(window.__vvHook)return;window.__vvHook=1;try{var of=window.fetch;" +
         "window.fetch=function(i,o){var u=(typeof i==='string')?i:(i&&i.url)||'';var p=of.apply(this,arguments);" +
         "try{if(/\\/api\\/es\\b/.test(String(u))){p.then(function(r){try{var rc=r.clone();var rd=rc.body.getReader();" +
         "var dec=new TextDecoder();(function go(){rd.read().then(function(x){try{if(x.value)vvSniff.onEs(dec.decode(x.value,{stream:true}));}catch(e){}if(!x.done)go();}).catch(function(){});})();}catch(e){}}).catch(function(){});}}catch(e){}" +
-        "return p};}catch(e){}})()"
+        "return p};}catch(e){}" +
+        "try{var oo=XMLHttpRequest.prototype.open,os=XMLHttpRequest.prototype.send;" +
+        "XMLHttpRequest.prototype.open=function(m,u){this.__vvu=String(u||'');return oo.apply(this,arguments)};" +
+        "XMLHttpRequest.prototype.send=function(){try{if(/\\/api\\/es\\b/.test(this.__vvu||'')){var x=this,last=0;" +
+        "x.addEventListener('progress',function(){try{var t=x.responseText;if(t&&t.length>last){vvSniff.onEs(t.slice(last));last=t.length;}}catch(e){}});" +
+        "x.addEventListener('loadend',function(){try{var t=x.responseText;if(t&&t.length>last){vvSniff.onEs(t.slice(last));last=t.length;}}catch(e){}});}}catch(e){}return os.apply(this,arguments)};}catch(e){}})()"
+
+    /** Active fallback: ask the page to fetch the SSE itself (its fetch wrapper signs it) and tee it. */
+    private fun esFetchJs(esPath: String): String =
+        "(function(){try{fetch(" + JSONObject.quote(esPath) + ",{credentials:'include',headers:{'accept':'text/event-stream'}})" +
+            ".then(function(r){try{var rd=r.body.getReader();var dec=new TextDecoder();" +
+            "(function go(){rd.read().then(function(x){try{if(x.value)vvSniff.onEs(dec.decode(x.value,{stream:true}));}catch(e){}if(!x.done)go();}).catch(function(){});})();}catch(e){}}).catch(function(){});}catch(e){}})()"
 
     private const val POKE =
         "(function(){try{var v=document.querySelector('video');if(v){try{v.muted=true;v.play()}catch(e){}}" +
@@ -341,7 +353,7 @@ object VivariumBrowser {
 
     /** Opens the player page (after passing Cloudflare) and harvests the /api/es stream list. */
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun sniffPlayer(playerUrl: String, timeoutMs: Long = VivariumSettings.timeoutSec * 1000L): Sniffed {
+    suspend fun sniffPlayer(playerUrl: String, esPath: String, timeoutMs: Long = VivariumSettings.timeoutSec * 1000L): Sniffed {
         val ctx = appContext ?: return Sniffed(emptyList(), emptyList())
         val trace = StringBuilder()
         prepare(trace)
@@ -379,15 +391,22 @@ object VivariumBrowser {
             wv = w
         }
         try {
-            val end = System.currentTimeMillis() + timeoutMs
+            val start = System.currentTimeMillis()
+            val end = start + timeoutMs
             var sawAt = 0L
             var lastLen = 0
+            var fallbackFired = false
             while (System.currentTimeMillis() < end) {
                 delay(700L)
                 eval(wv, ES_HOOK)
                 eval(wv, POKE)
                 val len = synchronized(es) { es.length }
                 val hasSource = len > 0 && synchronized(es) { es.indexOf("\"streams\"") >= 0 }
+                // if the page's own es call wasn't teed within ~6s, ask the page to fetch it itself
+                if (!hasSource && !fallbackFired && System.currentTimeMillis() - start > 6_000L) {
+                    fallbackFired = true
+                    eval(wv, esFetchJs(esPath))
+                }
                 if (hasSource) {
                     if (sawAt == 0L) sawAt = System.currentTimeMillis()
                     // stop once the stream list stops growing for ~2.5s (providers all delivered)

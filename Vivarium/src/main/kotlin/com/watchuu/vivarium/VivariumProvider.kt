@@ -317,10 +317,15 @@ class VivariumProvider : MainAPI() {
             .trim('-')
             .ifBlank { "title" }
 
-    private fun playerUrl(tmdbId: String, title: String, s: Int?, e: Int?): String {
-        val base = "${site()}/s/${slug(title)}-$tmdbId?w=1"
-        return if (s != null && e != null) "$base&s=$s&e=$e" else base
-    }
+    /** movies live at /m/{slug}-{id}, series at /s/{slug}-{id}?w=1&s=&e= */
+    private fun playerUrl(tmdbId: String, title: String, s: Int?, e: Int?): String =
+        if (s != null && e != null) "${site()}/s/${slug(title)}-$tmdbId?w=1&s=$s&e=$e"
+        else "${site()}/m/${slug(title)}-$tmdbId?w=1"
+
+    /** the SSE the page opens for this title: /api/es?id=&type=&s=&e= */
+    private fun esPath(tmdbId: String, s: Int?, e: Int?): String =
+        if (s != null && e != null) "/api/es?id=$tmdbId&type=tv&s=$s&e=$e"
+        else "/api/es?id=$tmdbId&type=movie"
 
     override suspend fun loadLinks(
         data: String,
@@ -338,7 +343,7 @@ class VivariumProvider : MainAPI() {
 
         val url = playerUrl(tmdbId, title, s, e)
         val sniffed = try {
-            VivariumBrowser.sniffPlayer(url)
+            VivariumBrowser.sniffPlayer(url, esPath(tmdbId, s, e))
         } catch (ex: CancellationException) {
             throw ex
         } catch (ex: Exception) {

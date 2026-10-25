@@ -346,42 +346,43 @@ class VivariumProvider : MainAPI() {
             return false
         }
 
-        // subtitles the player loaded (webvtt / srt)
+        val referer = "${site()}/"
+        val headers = mapOf("Referer" to referer, "Origin" to site(), "User-Agent" to VivariumBrowser.userAgent())
+
         var subs = 0
         sniffed.subs.forEach { sub ->
             subtitleCallback.invoke(newSubtitleFile(sub.lang, sub.url))
             subs++
         }
 
-        val best = pickBest(sniffed.media)
+        // one link per provider/quality the /api/es stream listed, best quality first
+        val ordered = sniffed.streams.sortedByDescending { it.quality ?: 0 }
+        ordered.forEach { st ->
+            val label = buildString {
+                append(name)
+                if (st.provider.isNotBlank() && !st.provider.equals(name, true)) append(" ").append(st.provider)
+                st.quality?.let { append(" ${it}p") }
+            }
+            callback.invoke(
+                newExtractorLink(name, label, st.url, ExtractorLinkType.M3U8) {
+                    this.referer = referer
+                    this.quality = st.quality ?: Qualities.Unknown.value
+                    this.headers = headers
+                }
+            )
+        }
+
         VivariumSettings.lastLinkReport = buildString {
             append("Player: ").append(url).append('\n')
-            append("Media hits: ").append(sniffed.media.size)
-            append(", subtitles: ").append(subs).append('\n')
+            append("Streams: ").append(ordered.size).append(", subtitles: ").append(subs).append('\n')
             append("Via: ").append(VivariumBrowser.lastMethod).append('\n')
-            if (best != null) append("Picked: ").append(best.take(140)) else append("No stream captured.")
+            if (ordered.isNotEmpty()) {
+                append("Providers: ").append(ordered.joinToString(", ") { "${it.provider}${it.quality?.let { q -> " ${q}p" } ?: ""}" }.take(200))
+            } else {
+                append("No streams captured.")
+            }
             append("\nTrace: ").append(VivariumBrowser.lastTrace)
         }
-        if (best == null) return false
-
-        val referer = "${site()}/"
-        val q = Regex("""(?i)(2160|1440|1080|720|540|480|360)p?""").find(best)?.groupValues?.get(1)?.toIntOrNull()
-        callback.invoke(
-            newExtractorLink(name, name, best, ExtractorLinkType.M3U8) {
-                this.referer = referer
-                this.quality = q ?: Qualities.Unknown.value
-                this.headers = mapOf("Referer" to referer, "Origin" to site(), "User-Agent" to VivariumBrowser.userAgent())
-            }
-        )
-        return true
-    }
-
-    /** Prefer the master playlist, then any .m3u8, then whatever was seen. */
-    private fun pickBest(media: List<String>): String? {
-        if (media.isEmpty()) return null
-        return media.firstOrNull { it.contains("master", true) && it.contains(".m3u8", true) }
-            ?: media.firstOrNull { it.contains(".m3u8", true) }
-            ?: media.firstOrNull { it.contains(".mpd", true) }
-            ?: media.first()
+        return ordered.isNotEmpty()
     }
 }

@@ -79,7 +79,7 @@ object VivariumSettings {
         set(v) = put { putString("manual_cookie", v.trim()) }
 
     var timeoutSec: Int
-        get() = str("timeout", "40").toIntOrNull()?.coerceIn(5, 180) ?: 40
+        get() = str("timeout", "60").toIntOrNull()?.coerceIn(5, 180) ?: 60
         set(v) = put { putString("timeout", v.toString()) }
 
     var siteUrl: String
@@ -236,7 +236,7 @@ object VivariumSettings {
         root.addView(cbPrompt); root.addView(cbWv); root.addView(cbLight)
 
         root.addView(header("Hidden browser timeout (seconds)"))
-        val etTimeout = field("40", timeoutSec.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }
+        val etTimeout = field("60", timeoutSec.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }
         root.addView(etTimeout)
 
         root.addView(header("Custom user agent"))
@@ -264,7 +264,7 @@ object VivariumSettings {
                 val uaChanged = stripWv != cbWv.isChecked || customUa != etUa.text.toString().trim()
                 stripWv = cbWv.isChecked
                 lightweight = cbLight.isChecked
-                timeoutSec = etTimeout.text.toString().toIntOrNull() ?: 40
+                timeoutSec = etTimeout.text.toString().toIntOrNull() ?: 60
                 customUa = etUa.text.toString()
                 manualCookie = etCookie.text.toString()
                 siteUrl = etUrl.text.toString()

@@ -7,7 +7,6 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.view.ViewGroup
 import android.view.Window
 import android.webkit.CookieManager
@@ -251,21 +250,42 @@ object VivariumBrowser {
         return hasClearance()
     }
 
-    // ------------------------------------------------------------------ player sniffer
+    // ------------------------------------------------------------------ player harvester
 
     class Sub(val url: String, val lang: String)
-    class Sniffed(val media: List<String>, val subs: List<Sub>)
+    class Stream(val url: String, val quality: Int?, val provider: String)
+    class Sniffed(val streams: List<Stream>, val subs: List<Sub>)
 
-    private class SniffBridge(val media: MutableList<String>) {
+    /**
+     * The player opens GET /api/es?id=&type=&s=&e= as a fetch() SSE stream and reads
+     *   event: source
+     *   data: {"provider":"Hermes","streams":[{"url":".../c?t=...","quality":"2160p","type":"hls","subs":[...]}]}
+     * events. Those data lines carry every provider's stream + subtitle URLs. We never need to
+     * sign anything: a fetch() wrapper installed before the page runs tees the /api/es body (the
+     * request itself is still made, and signed, by the site). hls manifests seen on the network
+     * are kept as a fallback.
+     */
+    private class HarvestBridge(val es: StringBuilder, val media: MutableList<String>) {
+        @JavascriptInterface
+        fun onEs(chunk: String) {
+            synchronized(es) { es.append(chunk) }
+        }
+
         @JavascriptInterface
         fun onMedia(url: String) {
             if (url.startsWith("http") && !media.contains(url)) media.add(url)
         }
     }
 
-    private const val SNIFF_POKE =
-        "(function(){try{var v=document.querySelector('video');if(v){var s=v.currentSrc||v.src;" +
-            "if(s&&s.indexOf('http')==0)vvSniff.onMedia(s);try{v.muted=true;v.play()}catch(e){}}" +
+    // installed at document start so the site's own /api/es fetch is teed as it streams in
+    private const val ES_HOOK = "(function(){if(window.__vvHook)return;window.__vvHook=1;try{var of=window.fetch;" +
+        "window.fetch=function(i,o){var u=(typeof i==='string')?i:(i&&i.url)||'';var p=of.apply(this,arguments);" +
+        "try{if(/\\/api\\/es\\b/.test(String(u))){p.then(function(r){try{var rc=r.clone();var rd=rc.body.getReader();" +
+        "var dec=new TextDecoder();(function go(){rd.read().then(function(x){try{if(x.value)vvSniff.onEs(dec.decode(x.value,{stream:true}));}catch(e){}if(!x.done)go();}).catch(function(){});})();}catch(e){}}).catch(function(){});}}catch(e){}" +
+        "return p};}catch(e){}})()"
+
+    private const val POKE =
+        "(function(){try{var v=document.querySelector('video');if(v){try{v.muted=true;v.play()}catch(e){}}" +
             "var b=document.querySelector('button[aria-label*=\"play\" i],[data-play],.play-button,.vjs-big-play-button');if(b)b.click();}catch(e){}})()"
 
     private fun isStreamHost(u: String): Boolean {
@@ -273,35 +293,53 @@ object VivariumBrowser {
         return host.endsWith("itsmeowenthankyouforyourservice.online")
     }
 
-    private fun isMediaUrl(u: String): Boolean {
-        val p = u.lowercase().substringBefore("?")
-        if (u.lowercase().contains(".m3u8") || p.endsWith(".mpd")) return true
-        return isStreamHost(u) && (u.contains("/api/cs/") || p.endsWith(".m3u8"))
+    private fun isManifest(u: String): Boolean {
+        val l = u.lowercase()
+        if (l.contains(".m3u8") || l.substringBefore("?").endsWith(".mpd")) return true
+        // tokenized manifest on the stream host: /c?t=...  (segments carry &p=, subs/thumbs don't start playback)
+        return isStreamHost(u) && u.contains("/api/cs/") && l.contains("master")
     }
 
     private fun isSegment(u: String): Boolean {
         val p = u.lowercase().substringBefore("?")
-        return p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp4") || p.endsWith(".m4v") ||
-            (isStreamHost(u) && p.contains("/seg"))
+        if (p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp4") || p.endsWith(".m4v")) return true
+        // tokenized segments look like /c?t=...&p=1
+        return isStreamHost(u) && u.contains("/c?") && Regex("[?&]p=").containsMatchIn(u)
     }
 
-    private fun subLang(u: String): String {
-        // /api/os?dl=<base64 of {"s":"o","l":"en","i":"..."}>
-        val dl = Regex("""[?&]dl=([^&]+)""").find(u)?.groupValues?.get(1) ?: return "Subtitle"
-        return try {
-            val json = String(Base64.decode(dl, Base64.URL_SAFE or Base64.NO_PADDING))
-            Regex(""""l"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)?.uppercase() ?: "Subtitle"
-        } catch (_: Throwable) {
-            "Subtitle"
+    private fun qualityOf(s: String): Int? =
+        Regex("""(?i)(2160|1440|1080|720|540|480|360)""").find(s)?.groupValues?.get(1)?.toIntOrNull()
+
+    /** Parse the accumulated SSE text into streams + subtitles. */
+    private fun parseEs(text: String): Sniffed {
+        val streams = LinkedHashMap<String, Stream>()
+        val subs = LinkedHashMap<String, Sub>()
+        // each "data: {...}" line is a JSON object; the ones with "streams" carry the players
+        Regex("""data:\s*(\{.*\})""").findAll(text).forEach { m ->
+            val obj = try { JSONObject(m.groupValues[1]) } catch (_: Throwable) { return@forEach }
+            val provider = obj.optString("provider", "Vivarium").ifBlank { "Vivarium" }
+            val arr = obj.optJSONArray("streams") ?: return@forEach
+            for (i in 0 until arr.length()) {
+                val st = arr.optJSONObject(i) ?: continue
+                val url = st.optString("url").takeIf { it.startsWith("http") } ?: continue
+                val prov = st.optString("provider", provider).ifBlank { provider }
+                val q = st.optString("quality").takeIf { it.isNotBlank() }?.let { qualityOf(it) }
+                streams.putIfAbsent(url, Stream(url, q, prov))
+                st.optJSONArray("subs")?.let { subsArr ->
+                    for (j in 0 until subsArr.length()) {
+                        val sub = subsArr.optJSONObject(j) ?: continue
+                        val su = sub.optString("url").takeIf { it.startsWith("http") } ?: continue
+                        val lang = sub.optString("label").ifBlank { sub.optString("lang") }.ifBlank { "Subtitle" }
+                            .trim().trimEnd('(').trim()
+                        subs.putIfAbsent(su, Sub(su, lang))
+                    }
+                }
+            }
         }
+        return Sniffed(streams.values.toList(), subs.values.toList())
     }
 
-    private fun isSubUrl(u: String): Boolean {
-        val p = u.lowercase().substringBefore("?")
-        return p.endsWith(".vtt") || p.endsWith(".srt") || u.contains("/api/os?dl=")
-    }
-
-    /** Opens the player page like a viewer would (after passing Cloudflare) and collects the HLS it loads. */
+    /** Opens the player page (after passing Cloudflare) and harvests the /api/es stream list. */
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun sniffPlayer(playerUrl: String, timeoutMs: Long = VivariumSettings.timeoutSec * 1000L): Sniffed {
         val ctx = appContext ?: return Sniffed(emptyList(), emptyList())
@@ -309,8 +347,8 @@ object VivariumBrowser {
         prepare(trace)
         lastMethod = if (hasClearance()) "browser + cookie" else "browser"
 
+        val es = StringBuilder()
         val media = java.util.Collections.synchronizedList(ArrayList<String>())
-        val subs = java.util.Collections.synchronizedList(ArrayList<Sub>())
         var wv: WebView? = null
         withContext(Dispatchers.Main) {
             applyManualCookie()
@@ -319,34 +357,43 @@ object VivariumBrowser {
             w.settings.mediaPlaybackRequiresUserGesture = false
             val dm = ctx.resources.displayMetrics
             w.layout(0, 0, dm.widthPixels.coerceAtLeast(360), dm.heightPixels.coerceAtLeast(640))
-            w.addJavascriptInterface(SniffBridge(media), "vvSniff")
+            w.addJavascriptInterface(HarvestBridge(es, media), "vvSniff")
             w.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    view?.evaluateJavascript(ES_HOOK, null)
+                }
+
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                     val u = request?.url?.toString() ?: return null
-                    if (isMediaUrl(u) && !media.contains(u)) media.add(u)
-                    if (isSubUrl(u) && subs.none { it.url == u }) subs.add(Sub(u, subLang(u)))
-                    // never pull actual video bytes in the background
-                    if (isSegment(u)) {
-                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
-                    }
+                    if (isManifest(u) && !media.contains(u)) media.add(u)
+                    if (isSegment(u)) return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                     return null
                 }
             }
-            w.webChromeClient = WebChromeClient()
+            w.webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress in 3..95) view?.evaluateJavascript(ES_HOOK, null)
+                }
+            }
             w.loadUrl(playerUrl, mapOf("X-Requested-With" to ""))
             wv = w
         }
         try {
             val end = System.currentTimeMillis() + timeoutMs
-            var gotAt = 0L
+            var sawAt = 0L
+            var lastLen = 0
             while (System.currentTimeMillis() < end) {
-                delay(800L)
-                eval(wv, SNIFF_POKE)
-                if (media.isNotEmpty()) {
-                    // give the player a moment to expose a master playlist over a single-quality one
-                    if (gotAt == 0L) gotAt = System.currentTimeMillis()
-                    if (media.any { it.contains("master", true) } || System.currentTimeMillis() - gotAt > 5_000L) break
+                delay(700L)
+                eval(wv, ES_HOOK)
+                eval(wv, POKE)
+                val len = synchronized(es) { es.length }
+                val hasSource = len > 0 && synchronized(es) { es.indexOf("\"streams\"") >= 0 }
+                if (hasSource) {
+                    if (sawAt == 0L) sawAt = System.currentTimeMillis()
+                    // stop once the stream list stops growing for ~2.5s (providers all delivered)
+                    if (len == lastLen && System.currentTimeMillis() - sawAt > 2_500L) break
                 }
+                lastLen = len
             }
         } finally {
             withContext(Dispatchers.Main) {
@@ -356,9 +403,14 @@ object VivariumBrowser {
                 }
             }
         }
-        trace.append("media=").append(media.size).append(", subs=").append(subs.size)
+        val parsed = parseEs(synchronized(es) { es.toString() })
+        // fall back to any manifest caught on the wire if the SSE gave nothing
+        val streams = if (parsed.streams.isNotEmpty()) parsed.streams
+        else media.map { Stream(it, qualityOf(it), "Vivarium") }
+        trace.append("es=").append(synchronized(es) { es.length }).append("B, streams=")
+            .append(streams.size).append(", subs=").append(parsed.subs.size).append(", media=").append(media.size)
         lastTrace = trace.toString()
-        return Sniffed(media.toList(), subs.toList())
+        return Sniffed(streams, parsed.subs)
     }
 
     /** For the settings "Test connection" button: can we reach the site past Cloudflare? */

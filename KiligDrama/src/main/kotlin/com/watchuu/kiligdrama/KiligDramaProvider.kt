@@ -276,8 +276,15 @@ class KiligDramaProvider : MainAPI() {
         val tag = if (qKey != null) " $qKey" else ""
         val isHls = url.contains(".m3u8", true)
         return when (type) {
-            "mp4", "dramapops-mp4" ->
-                listOf(Cand("$source$tag", url, if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, q))
+            "mp4", "dramapops-mp4" -> {
+                val lt = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                // hotlink-protected CDNs (e.g. ToonScroll -> play.webnovel.com) also get a
+                // proxy-wrapped variant, in case the direct file rejects the player
+                if (directNeedsSiteReferer(url)) listOf(
+                    Cand("$source$tag", url, lt, q),
+                    Cand("$source$tag (proxy)", mediaWrap(url), lt, q),
+                ) else listOf(Cand("$source$tag", url, lt, q))
+            }
 
             "hls" -> {
                 val h = host(url)
@@ -397,12 +404,20 @@ class KiligDramaProvider : MainAPI() {
         // are fetched with no referrer, but some (webnovel/goodbos/...) require the site referer.
         val proxied = c.url.startsWith(mediaProxy) || c.url.startsWith(bcdnProxy) ||
             (c.url.contains("127.0.0.1") && (c.url.contains("dramadizilerim") || c.url.contains("b-cdn")))
-        val siteReferer = proxied || directNeedsSiteReferer(c.url)
+        val hotlink = !proxied && directNeedsSiteReferer(c.url)
+        val siteReferer = proxied || hotlink
         val ua = mapOf("User-Agent" to KiligBrowser.userAgent())
+        // ExoPlayer only reliably sends a Referer on a progressive file when it is in the header
+        // map, so hotlink CDNs (webnovel/goodbos/...) get it there explicitly, like the browser does.
+        val headers = when {
+            proxied -> ua + ("Origin" to mainUrl)
+            hotlink -> ua + ("Referer" to "$mainUrl/") + ("Accept" to "*/*")
+            else -> ua
+        }
         callback.invoke(
             newExtractorLink(name, "$name - ${c.label}", c.url, c.type) {
                 this.referer = if (siteReferer) "$mainUrl/" else ""
-                this.headers = if (proxied) ua + ("Origin" to mainUrl) else ua
+                this.headers = headers
                 this.quality = c.quality
             }
         )

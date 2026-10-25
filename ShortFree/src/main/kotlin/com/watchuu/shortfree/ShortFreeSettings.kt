@@ -79,7 +79,7 @@ object ShortFreeSettings {
         val sb = StringBuilder()
         sb.append("[").append(ts()).append("] ").append(method).append(" ").append(code).append("\n").append(url)
         if (!locationHeader.isNullOrBlank()) sb.append("\n-> location: ").append(locationHeader)
-        if (!bodySnippet.isNullOrBlank()) sb.append("\nbody: ").append(bodySnippet.replace("\n", " ").take(600))
+        if (!bodySnippet.isNullOrBlank()) sb.append("\nbody: ").append(bodySnippet.replace("\n", " ").take(2500))
         log(sb.toString())
     }
 

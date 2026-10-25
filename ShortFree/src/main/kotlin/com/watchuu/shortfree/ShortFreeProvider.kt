@@ -72,7 +72,7 @@ class ShortFreeProvider : MainAPI() {
             .also { r ->
                 try {
                     val loc = r.headers["location"]
-                    val snippet = if (loc.isNullOrBlank()) r.text.take(600) else null
+                    val snippet = if (loc.isNullOrBlank()) r.text.take(2500) else null
                     val label = if (body == null) "GET" else "POST ${body.take(80)}"
                     ShortFreeSettings.logRequest(label, url, r.code, loc, snippet)
                 } catch (_: Throwable) {
@@ -142,17 +142,19 @@ class ShortFreeProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        // the app calls it with searchTerm; other names/pageNumber kept as fallbacks
-        val tries = listOf(
-            "/reels/api/v1/shows/search?searchTerm=$q&pageSize=30&pageNumber=1",
-            "/reels/api/v1/shows/search?searchTerm=$q&pageSize=30",
-            "/reels/api/v1/shows/search?query=$q&pageSize=30",
-            "/reels/api/v1/shows/search?q=$q&pageSize=30",
+        val term = query.trim()
+        val q = URLEncoder.encode(term, "UTF-8").replace("+", "%20")
+        val jTerm = mapper.writeValueAsString(term)
+        // the app builds a searchShowsReq (searchTerm + limit/offset); the endpoint is a POST
+        val attempts = listOf(
+            "/reels/api/v1/shows/search" to """{"searchTerm":$jTerm,"limit":30,"offset":0}""",
+            "/reels/api/v1/shows/search" to """{"query":$jTerm,"limit":30,"offset":0}""",
+            "/reels/api/v1/shows/search?searchTerm=$q&limit=30&offset=0" to null,
+            "/reels/api/v1/shows/search?searchTerm=$q" to null,
         )
-        for (path in tries) {
+        for ((path, body) in attempts) {
             try {
-                val items = shows(call(path)).map { it.toSearch() }
+                val items = shows(call(path, body)).map { it.toSearch() }
                 if (items.isNotEmpty()) return items
             } catch (e: CancellationException) {
                 throw e

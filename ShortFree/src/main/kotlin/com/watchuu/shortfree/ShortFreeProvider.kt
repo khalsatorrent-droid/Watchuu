@@ -67,8 +67,17 @@ class ShortFreeProvider : MainAPI() {
     }
 
     private suspend fun request(url: String, h: Map<String, String>, body: String?) =
-        if (body == null) app.get(url, headers = h, timeout = 30L, allowRedirects = false)
-        else app.post(url, headers = h, requestBody = body.toRequestBody(json), timeout = 30L, allowRedirects = false)
+        (if (body == null) app.get(url, headers = h, timeout = 30L, allowRedirects = false)
+        else app.post(url, headers = h, requestBody = body.toRequestBody(json), timeout = 30L, allowRedirects = false))
+            .also { r ->
+                try {
+                    val loc = r.headers["location"]
+                    val snippet = if (loc.isNullOrBlank()) r.text.take(600) else null
+                    val label = if (body == null) "GET" else "POST ${body.take(80)}"
+                    ShortFreeSettings.logRequest(label, url, r.code, loc, snippet)
+                } catch (_: Throwable) {
+                }
+            }
 
     // ---------------------------------------------------------------- shows
 

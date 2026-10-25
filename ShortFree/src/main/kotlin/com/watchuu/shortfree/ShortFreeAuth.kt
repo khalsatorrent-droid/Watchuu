@@ -59,6 +59,7 @@ object ShortFreeAuth {
                 )
                 val n = mapper.readTree(r.text)
                 val t = n?.get("id_token")?.asText()
+                ShortFreeSettings.logRequest("POST (firebase refresh)", "securetoken.googleapis.com/v1/token", r.code, null, if (t.isNullOrBlank()) r.text.take(200) else "ok")
                 if (r.code in 200..299 && !t.isNullOrBlank()) {
                     save(t, n.get("refresh_token")?.asText() ?: refresh, n.get("expires_in")?.asLong() ?: 3600L)
                     return@withLock t
@@ -73,6 +74,7 @@ object ShortFreeAuth {
             )
             val n = mapper.readTree(r.text)
             val t = n?.get("idToken")?.asText()
+            ShortFreeSettings.logRequest("POST (firebase signUp)", "identitytoolkit.googleapis.com/v1/accounts:signUp", r.code, null, if (t.isNullOrBlank()) r.text.take(200) else "ok (new guest)")
             if (r.code !in 200..299 || t.isNullOrBlank()) {
                 lastError = "guest sign-in HTTP ${r.code}: ${r.text.take(200)}"
                 return@withLock null

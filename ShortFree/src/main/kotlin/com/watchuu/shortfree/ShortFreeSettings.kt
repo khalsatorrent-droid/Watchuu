@@ -54,6 +54,35 @@ object ShortFreeSettings {
     @Volatile
     var lastReport: String = "Nothing played yet."
 
+    // -------------------------------------------------------- request log (copyable)
+    private const val LOG_CAP = 200
+    private val logBuf = ArrayDeque<String>()
+
+    fun log(line: String) {
+        synchronized(logBuf) {
+            logBuf.addLast(line)
+            while (logBuf.size > LOG_CAP) logBuf.removeFirst()
+        }
+    }
+
+    fun logText(): String = synchronized(logBuf) {
+        if (logBuf.isEmpty()) "No requests yet. Browse a show / play an episode, then reopen this." else logBuf.joinToString("\n\n")
+    }
+
+    fun clearLog() = synchronized(logBuf) { logBuf.clear() }
+
+    private fun ts(): String = try {
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+    } catch (_: Throwable) { "" }
+
+    fun logRequest(method: String, url: String, code: Int, locationHeader: String?, bodySnippet: String?) {
+        val sb = StringBuilder()
+        sb.append("[").append(ts()).append("] ").append(method).append(" ").append(code).append("\n").append(url)
+        if (!locationHeader.isNullOrBlank()) sb.append("\n-> location: ").append(locationHeader)
+        if (!bodySnippet.isNullOrBlank()) sb.append("\nbody: ").append(bodySnippet.replace("\n", " ").take(600))
+        log(sb.toString())
+    }
+
     fun toast(msg: String) {
         scope.launch(Dispatchers.Main) {
             try {
@@ -64,6 +93,34 @@ object ShortFreeSettings {
     }
 
     private fun dp(ctx: Context, v: Int) = (v * ctx.resources.displayMetrics.density).toInt()
+
+    /** A scrollable, selectable dump of every request the extension made, with Copy / Clear. */
+    private fun showLog(act: android.app.Activity) {
+        val pad = dp(act, 14)
+        val tv = TextView(act).apply {
+            text = logText()
+            textSize = 11f
+            setTextIsSelectable(true)
+            setPadding(pad, pad, pad, pad)
+            typeface = android.graphics.Typeface.MONOSPACE
+        }
+        val scroll = ScrollView(act).apply { addView(tv) }
+        AlertDialog.Builder(act)
+            .setTitle("ShortFree request log")
+            .setView(scroll)
+            .setPositiveButton("Copy all") { _, _ ->
+                try {
+                    val cm = act.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("ShortFree log", logText()))
+                    Toast.makeText(act, "Copied", Toast.LENGTH_SHORT).show()
+                } catch (_: Throwable) {
+                    Toast.makeText(act, "Couldn't copy - long-press to select instead", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNeutralButton("Clear") { _, _ -> clearLog(); Toast.makeText(act, "Cleared", Toast.LENGTH_SHORT).show() }
+            .setNegativeButton("Close", null)
+            .show()
+    }
 
     fun show(context: Context) {
         val act = (context as? android.app.Activity)
@@ -115,6 +172,12 @@ object ShortFreeSettings {
             setOnClickListener {
                 AlertDialog.Builder(act).setTitle("Last link report").setMessage(lastReport).setPositiveButton("OK", null).show()
             }
+        })
+        root.addView(Button(act).apply {
+            text = "Request log (copy & send to me)"
+            isAllCaps = false
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setOnClickListener { showLog(act) }
         })
 
         AlertDialog.Builder(act)

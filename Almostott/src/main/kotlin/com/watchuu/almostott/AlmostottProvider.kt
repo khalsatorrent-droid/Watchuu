@@ -384,7 +384,7 @@ class AlmostottProvider : MainAPI() {
             ?: hits.first()
     }
 
-    private fun toLink(server: String, hit: AlmostottBrowser.Hit, embed: String): ExtractorLink {
+    private suspend fun toLink(server: String, hit: AlmostottBrowser.Hit, embed: String): ExtractorLink {
         val origin = hit.origin?.takeIf { it.startsWith("http") }
             ?: hit.referer?.let { originOf(it) }
             ?: originOf(embed)

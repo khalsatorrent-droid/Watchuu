@@ -381,16 +381,27 @@ class KiligDramaProvider : MainAPI() {
         return n
     }
 
+    // CDNs that hotlink-protect on the document referrer: the site loads them with
+    // Referer: https://kiligdrama.com/ and they 403 without it (e.g. ToonScroll -> play.webnovel.com).
+    private fun directNeedsSiteReferer(url: String): Boolean {
+        val h = host(url)
+        return listOf(
+            "webnovel.com", "goodbos.online", "shortwave.com", "shortswave.com",
+            "goodreels.com", "reelshort.com", "dramabox", "shortmax",
+        ).any { h == it || h.endsWith(".$it") || h.contains(it) }
+    }
+
     private suspend fun emit(c: Cand, seen: HashSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         if (!seen.add(c.url)) return false
-        // the site's proxies only answer requests coming from kiligdrama.com,
-        // the original CDNs are fetched with no referrer (referrerPolicy: no-referrer)
+        // the site's own proxies only answer requests coming from kiligdrama.com; most original CDNs
+        // are fetched with no referrer, but some (webnovel/goodbos/...) require the site referer.
         val proxied = c.url.startsWith(mediaProxy) || c.url.startsWith(bcdnProxy) ||
             (c.url.contains("127.0.0.1") && (c.url.contains("dramadizilerim") || c.url.contains("b-cdn")))
+        val siteReferer = proxied || directNeedsSiteReferer(c.url)
         val ua = mapOf("User-Agent" to KiligBrowser.userAgent())
         callback.invoke(
             newExtractorLink(name, "$name - ${c.label}", c.url, c.type) {
-                this.referer = if (proxied) "$mainUrl/" else ""
+                this.referer = if (siteReferer) "$mainUrl/" else ""
                 this.headers = if (proxied) ua + ("Origin" to mainUrl) else ua
                 this.quality = c.quality
             }

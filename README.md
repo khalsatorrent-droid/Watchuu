@@ -37,7 +37,6 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN | ✅ Beta |
 | **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
 | **Almostott** | [almostott.aethoflix.world](https://almostott.aethoflix.world) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
-| **ClipBox** | many sites (StreamFlix Reborn) | Anime · Movie · TV Series | 🌐 multi | 🧪 Batches |
 
 ## 🛠 Build
 

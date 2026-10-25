@@ -72,7 +72,20 @@ class ShortFreeProvider : MainAPI() {
 
     // ---------------------------------------------------------------- shows
 
-    private fun isShow(n: JsonNode) = n.isObject && n.has("id") && n.has("name") && (n.has("thumbnailUrl") || n.has("reels"))
+    private fun isShow(n: JsonNode) = n.isObject && n.has("id") && n.has("name") &&
+        (n.has("thumbnailUrl") || n.has("portraitThumbnail") || n.has("reels"))
+
+    /** Shows carry several image fields; the vertical grid uses portraitThumbnail. Pick the first real one. */
+    private fun imageOf(n: JsonNode?): String? {
+        if (n == null) return null
+        for (k in listOf("portraitThumbnail", "thumbnailUrl", "verticalThumbnailUrl", "coverImageUrl",
+            "coverUrl", "posterUrl", "imageUrl", "bannerThumbnail")) {
+            val v = n.get(k)?.asText()?.trim()?.ifBlank { null } ?: continue
+            if (v.startsWith("http")) return v
+            if (v.startsWith("/")) return "https://content.dashtoon.ai$v"
+        }
+        return null
+    }
 
     private fun shows(n: JsonNode?): List<JsonNode> {
         val out = LinkedHashMap<String, JsonNode>()
@@ -92,9 +105,8 @@ class ShortFreeProvider : MainAPI() {
         val id = get("id").asText()
         known[id] = this
         val title = get("name").asText()
-        val thumb = get("thumbnailUrl")?.asText()?.takeIf { it.startsWith("http") }
         return newTvSeriesSearchResponse(title, "$mainUrl/reel/$id", TvType.AsianDrama) {
-            this.posterUrl = thumb
+            this.posterUrl = imageOf(this@toSearch)
         }
     }
 
@@ -181,7 +193,7 @@ class ShortFreeProvider : MainAPI() {
         val show = fetched ?: known[showId]
         if (show == null && err != null) throw ErrorLoadingException(err)
         val title = show?.get("name")?.asText() ?: "ShortFree $showId"
-        val poster = show?.get("thumbnailUrl")?.asText()?.takeIf { it.startsWith("http") }
+        val poster = imageOf(show)
         val tags = listOf("genres", "tropes", "tags").flatMap { k -> show?.get(k)?.map { it.asText() } ?: emptyList() }
             .filter { it.isNotBlank() }.distinct()
 
@@ -193,7 +205,7 @@ class ShortFreeProvider : MainAPI() {
                 this.name = (r.get("name")?.asText()?.ifBlank { null } ?: "Episode $seq") + if (locked) " (Locked)" else ""
                 this.episode = seq
                 this.season = r.get("season")?.asInt()?.takeIf { it > 0 } ?: 1
-                this.posterUrl = r.get("thumbnailUrl")?.asText()?.takeIf { it.startsWith("http") }
+                this.posterUrl = imageOf(r) ?: poster
             }
         }
         return newTvSeriesLoadResponse(title, "$mainUrl/reel/$showId", TvType.AsianDrama, episodes) {

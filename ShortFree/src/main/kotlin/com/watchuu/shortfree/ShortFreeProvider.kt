@@ -134,10 +134,16 @@ class ShortFreeProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        for (param in listOf("query", "searchTerm", "q")) {
+        // the app calls it with searchTerm; other names/pageNumber kept as fallbacks
+        val tries = listOf(
+            "/reels/api/v1/shows/search?searchTerm=$q&pageSize=30&pageNumber=1",
+            "/reels/api/v1/shows/search?searchTerm=$q&pageSize=30",
+            "/reels/api/v1/shows/search?query=$q&pageSize=30",
+            "/reels/api/v1/shows/search?q=$q&pageSize=30",
+        )
+        for (path in tries) {
             try {
-                val resp = call("/reels/api/v1/shows/search?$param=$q&pageSize=30")
-                val items = shows(resp).map { it.toSearch() }
+                val items = shows(call(path)).map { it.toSearch() }
                 if (items.isNotEmpty()) return items
             } catch (e: CancellationException) {
                 throw e
@@ -174,11 +180,16 @@ class ShortFreeProvider : MainAPI() {
         return show to reels.sortedWith(compareBy({ it.get("season")?.asInt() ?: 1 }, { it.get("sequence")?.asInt() ?: 0 }))
     }
 
-    private fun reelLocked(r: JsonNode) =
-        r.get("lockData")?.get("locked")?.asBoolean() == true ||
-            r.get("locked")?.asBoolean() == true ||
-            (r.get("lockStatus")?.asText()?.contains("LOCK", true) == true &&
-                r.get("lockStatus")?.asText()?.contains("UNLOCK", true) != true)
+    /** A reel is playable when the server actually handed us a video address for it. */
+    private fun videoUrlsOf(r: JsonNode): LinkedHashMap<String, String> {
+        val urls = LinkedHashMap<String, String>()
+        r.get("videoUrl")?.asText()?.takeIf { it.startsWith("http") }?.let { urls[it] = name }
+        r.get("videoLinksMap")?.fields()?.forEach { (k, v) ->
+            val u = if (v.isTextual) v.asText() else (v.get("url") ?: v.get("videoUrl"))?.asText()
+            if (u != null && u.startsWith("http")) urls.putIfAbsent(u, "$name $k")
+        }
+        return urls
+    }
 
     override suspend fun load(url: String): LoadResponse? {
         val showId = showIdOf(url)
@@ -199,10 +210,11 @@ class ShortFreeProvider : MainAPI() {
 
         val episodes = reels.mapIndexed { i, r ->
             val seq = r.get("sequence")?.asInt() ?: (i + 1)
-            val locked = reelLocked(r)
+            // only flag episodes the server gives no stream for; free-for-all shows have urls on every one
+            val noVideo = videoUrlsOf(r).isEmpty()
             val epId = (r.get("reelId") ?: r.get("id"))?.asText() ?: seq.toString()
             newEpisode("$showId|$epId|$seq") {
-                this.name = (r.get("name")?.asText()?.ifBlank { null } ?: "Episode $seq") + if (locked) " (Locked)" else ""
+                this.name = (r.get("name")?.asText()?.ifBlank { null } ?: "Episode $seq") + if (noVideo) " (Locked)" else ""
                 this.episode = seq
                 this.season = r.get("season")?.asInt()?.takeIf { it > 0 } ?: 1
                 this.posterUrl = imageOf(r) ?: poster
@@ -232,19 +244,11 @@ class ShortFreeProvider : MainAPI() {
             ?: reels.firstOrNull { it.get("sequence")?.asText() == seq }
             ?: throw ErrorLoadingException("ShortFree: episode not found")
 
-        if (reelLocked(reel)) {
-            ShortFreeSettings.lastReport = "Episode $seq is locked (VIP / coins). Only free episodes play."
-            throw ErrorLoadingException("ShortFree: this episode is locked in the app (VIP / coins) - only free episodes play here")
-        }
-
-        val urls = LinkedHashMap<String, String>()
-        reel.get("videoUrl")?.asText()?.takeIf { it.startsWith("http") }?.let { urls[it] = name }
-        reel.get("videoLinksMap")?.fields()?.forEach { (k, v) ->
-            val u = if (v.isTextual) v.asText() else (v.get("url") ?: v.get("videoUrl"))?.asText()
-            if (u != null && u.startsWith("http")) urls.putIfAbsent(u, "$name $k")
-        }
+        // play whatever stream the server returned for this episode; if it returns none
+        // (genuinely gated), it simply can't play - nothing is forged here
+        val urls = videoUrlsOf(reel)
         ShortFreeSettings.lastReport = "Episode $seq: ${urls.size} stream(s)\n" + urls.keys.joinToString("\n") { it.take(120) }
-        if (urls.isEmpty()) throw ErrorLoadingException("ShortFree: no video address for this episode")
+        if (urls.isEmpty()) throw ErrorLoadingException("ShortFree: the server returned no video for this episode")
 
         reel.get("subtitleUrl")?.asText()?.takeIf { it.startsWith("http") }?.let {
             subtitleCallback.invoke(newSubtitleFile("English", it))

@@ -194,12 +194,24 @@ class ShortFreeProvider : MainAPI() {
     /** A reel is playable when the server actually handed us a video address for it. */
     private fun videoUrlsOf(r: JsonNode): LinkedHashMap<String, String> {
         val urls = LinkedHashMap<String, String>()
-        r.get("videoUrl")?.asText()?.takeIf { it.startsWith("http") }?.let { urls[it] = name }
+        // prefer the per-quality map (360p/480p/720p), then the single videoUrl
         r.get("videoLinksMap")?.fields()?.forEach { (k, v) ->
             val u = if (v.isTextual) v.asText() else (v.get("url") ?: v.get("videoUrl"))?.asText()
             if (u != null && u.startsWith("http")) urls.putIfAbsent(u, "$name $k")
         }
-        return urls
+        r.get("videoUrl")?.asText()?.takeIf { it.startsWith("http") }?.let { urls.putIfAbsent(it, name) }
+
+        // the app streams from vod.dashreels.com while the api hands back ingcdn.dashreels.com;
+        // the auth_key signs the path, so the same url usually works on either edge. Offer both.
+        val withEdges = LinkedHashMap<String, String>()
+        urls.forEach { (u, label) ->
+            withEdges.putIfAbsent(u, label)
+            if (u.contains("ingcdn.dashreels.com")) {
+                val vod = u.replace("https://ingcdn.dashreels.com", "https://vod.dashreels.com")
+                withEdges.putIfAbsent(vod, "$label (vod)")
+            }
+        }
+        return withEdges
     }
 
     override suspend fun load(url: String): LoadResponse? {

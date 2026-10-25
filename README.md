@@ -36,6 +36,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **RedFlix** | [redflix.one](https://redflix.one) | Movie · TV Series · Anime | 🇬🇧 EN · 🇮🇳 HI | ✅ Beta |
 | **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN | ✅ Beta |
 | **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
+| **Almostott** | [almostott.aethoflix.world](https://almostott.aethoflix.world) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

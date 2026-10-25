@@ -484,7 +484,9 @@ class KiligDramaProvider : MainAPI() {
                     ?: epUrl.substringAfterLast("/episode-").toIntOrNull()
             }
             if (bookId != null && serial != null) {
-                val api = "$mainUrl/api/episode-source/$bookId/$serial?lang=$locale"
+                // refresh=1 forces a freshly-signed source url; without it the api can return a
+                // cached one whose signature (the ?t= expiry) has already lapsed -> the CDN 403s
+                val api = "$mainUrl/api/episode-source/$bookId/$serial?lang=$locale&refresh=1"
                 val body = getText(api, epUrl)
                 found += emitFromJson(body, seen, subtitleCallback, callback, notes)
             } else notes.append("no bookId on page; ")

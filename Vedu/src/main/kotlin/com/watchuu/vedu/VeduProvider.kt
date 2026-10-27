@@ -480,11 +480,17 @@ class VeduProvider : MainAPI() {
                             "mp4" -> ExtractorLinkType.VIDEO
                             else -> ExtractorLinkType.M3U8
                         }
-                        // a label that is itself a quality claim ("4K", "1080p") is dropped: the verified mark is shown instead
-                        val extra = src.label.takeIf { it.isNotBlank() && VeduQuality.strictQuality(it) == null }?.let { " ($it)" } ?: ""
+                        // audio language: what the manifest declares, else what the source says
+                        val audio = checked.audio.ifEmpty { listOfNotNull(VeduQuality.languageName(src.audio)) }
+                        // a label that is itself a quality claim ("4K", "1080p") or just the language is dropped
+                        val extra = src.label.takeIf {
+                            it.isNotBlank() && VeduQuality.strictQuality(it) == null &&
+                                VeduQuality.languageName(it)?.let { l -> l in audio } != true
+                        }?.let { " ($it)" } ?: ""
+                        val audioTag = if (audio.isNotEmpty()) " [${audio.joinToString(", ")}]" else ""
                         val referer = headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value ?: ""
                         callback.invoke(
-                            newExtractorLink(name, "$group · $server$extra", checked.url, type) {
+                            newExtractorLink(name, "$group · $server$extra$audioTag", checked.url, type) {
                                 this.referer = referer
                                 this.quality = checked.quality ?: Qualities.Unknown.value
                                 this.headers = headers
@@ -549,8 +555,10 @@ class VeduProvider : MainAPI() {
                             val streams = VeduMovieBox.play(subj.id, se, ep)
                             val variant = Regex("""\[([^\]]+)]|\(([^)]+)\)""").find(subj.title)?.let { m -> m.groupValues[1].ifBlank { m.groupValues[2] } }
                             val subs = streams.firstOrNull()?.let { VeduMovieBox.captions(subj.id, it.streamId) } ?: emptyList()
+                            // a "[Hindi]"-style variant is that dub; the plain subject carries the original audio
+                            val audio = VeduQuality.languageName(variant) ?: if (variant == null) d.lang else ""
                             emit("MovieBox", variant ?: "Original", VeduSources.Result(
-                                streams.map { VeduSources.Src(it.url, it.type, it.quality, it.headers) }, subs))
+                                streams.map { VeduSources.Src(it.url, it.type, it.quality, it.headers, audio = audio) }, subs))
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Exception) {
@@ -574,7 +582,7 @@ class VeduProvider : MainAPI() {
                 emit("Dramika", "", VeduSites.dramika(d.originalTitle, isMovie, episode) { url, referer ->
                     loadExtractor(url, referer, subtitleCallback) { link -> found = true; callback.invoke(link) }
                 })
-            } else emit("Dramika", "", r)
+            } else emit("Dramika", "", VeduSources.Result(r.sources.map { it.copy(audio = it.audio.ifBlank { d.lang }) }, r.subs))
         }
 
         // ---- Anime: Nova adapters, 9Anime (Anikoto), AnimePahe --------------------------------

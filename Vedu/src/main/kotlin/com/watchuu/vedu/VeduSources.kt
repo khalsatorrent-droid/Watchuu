@@ -27,6 +27,7 @@ object VeduSources {
         val quality: String = "",
         val headers: Map<String, String> = emptyMap(),
         val label: String = "",
+        val audio: String = "",   // audio language as the source states it (normalised by VeduQuality.languageName)
     )
 
     data class Sub(val url: String, val lang: String)
@@ -148,7 +149,8 @@ object VeduSources {
             type = s.str("type", "label"),
             quality = s.str("quality", "label", "name").ifBlank { fallbackQuality },
             headers = extra + sanitizedHeaders(s.optJSONObject("headers")),
-            label = s.str("label", "name", "language"),
+            label = s.str("label", "name"),
+            audio = s.str("language", "lang", "audioLang", "audio_language", "audio"),
         )
     }
 
@@ -239,11 +241,12 @@ object VeduSources {
         fun direct(s: JSONObject, type: String): List<Src> {
             val url = validUrl(s.opt("url")) ?: return emptyList()
             if (url.substringBefore("?").endsWith(".mkv", true) || isPreview(s, url) || isPlaceholder(url)) return emptyList()
-            return listOf(Src(url, type, s.str("quality", "resolution", "language"), sanitizedHeaders(s.optJSONObject("headers"))))
+            return listOf(Src(url, type, s.str("quality", "resolution"), sanitizedHeaders(s.optJSONObject("headers")),
+                audio = s.str("language", "lang", "audio")))
         }
         fun proxy(s: JSONObject, origin: String): List<Src> = direct(s, "hls").map {
             val hdr = JSONObject(it.headers as Map<*, *>).toString()
-            Src("$origin/proxy?url=${enc(it.url)}&headers=${enc(hdr)}", "hls", it.quality)
+            Src("$origin/proxy?url=${enc(it.url)}&headers=${enc(hdr)}", "hls", it.quality, audio = it.audio)
         }
         fun randomProxy() = vidnestProxies.random()
         return when (provider) {
@@ -252,7 +255,7 @@ object VeduSources {
                 val c = if (isMovie) sources.filter { it.optString("type") == "mp4" } + sources.filter { it.optString("type") == "hls" } else sources
                 c.flatMap { s ->
                     direct(s, if (s.optString("type") == "mp4") "mp4" else "hls")
-                        .map { it.copy(quality = s.str("resolution", "language").ifBlank { "Auto" }) }
+                        .map { it.copy(quality = s.str("resolution").ifBlank { "Auto" }) }
                 }.sortedByDescending { it.quality.filter { ch -> ch.isDigit() }.take(4).toIntOrNull() ?: 0 }
             }
             "gama" -> streams.flatMap { direct(it, it.optString("type").ifBlank { "mp4" }) }
@@ -403,7 +406,8 @@ object VeduSources {
             if (type !in setOf("hls", "mp4", "dash")) return emptyList()
             val abs = try { java.net.URL(java.net.URL("$player/pl/"), raw).toString() } catch (_: Exception) { return emptyList() }
             val u = validUrl(abs) ?: return emptyList()
-            return listOf(Src(u, type, "", mediaHeaders(embed), servers.firstOrNull { it.optString("ref") == c.optString("ref") }?.optString("name") ?: ""))
+            val srv = servers.firstOrNull { it.optString("ref") == c.optString("ref") }
+            return listOf(Src(u, type, "", mediaHeaders(embed), srv?.optString("name") ?: "", audio = srv?.optString("lang") ?: ""))
         }
         try {
             val race = api("a=race&refs=${enc(refs.joinToString(","))}")
@@ -535,7 +539,8 @@ object VeduSources {
                 if ("referer" !in names) headers["Referer"] = "$BINGR_SITE/"
                 if ("origin" !in names) headers["Origin"] = BINGR_SITE
             }
-            Src(url, s.str("type"), s.str("quality", "label", "name"), headers, s.str("label", "name", "language"))
+            Src(url, s.str("type"), s.str("quality", "label", "name"), headers, s.str("label", "name"),
+                audio = s.str("language", "lang", "audio"))
         }
         return Result(out, subsFrom(p))
     }
@@ -623,7 +628,8 @@ object VeduSources {
                         headers.forEach { (k, v) -> h.put(k, v) }
                         "$ANIME_PROXY/proxy/file?url=${enc(addr)}&headers=${enc(h.toString())}"
                     }
-                    out.add(Src(proxied, if (hls) "hls" else "mp4", s.str("quality").ifBlank { "HD" }, emptyMap(), "${type.uppercase()} $pid"))
+                    out.add(Src(proxied, if (hls) "hls" else "mp4", s.str("quality").ifBlank { "HD" }, emptyMap(), "${type.uppercase()} $pid",
+                        audio = if (dub) "English" else "Japanese"))
                 }
             } catch (e: CancellationException) {
                 throw e

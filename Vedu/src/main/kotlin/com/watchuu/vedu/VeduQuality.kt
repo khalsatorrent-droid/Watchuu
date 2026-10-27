@@ -17,7 +17,57 @@ import kotlinx.coroutines.CancellationException
  */
 object VeduQuality {
 
-    class Checked(val url: String, val kind: String, val quality: Int?)
+    /** [audio]: languages of the audio renditions the manifest itself declares (empty when it declares none). */
+    class Checked(val url: String, val kind: String, val quality: Int?, val audio: List<String> = emptyList())
+
+    private val languages = mapOf(
+        "en" to "English", "eng" to "English", "hi" to "Hindi", "hin" to "Hindi", "ta" to "Tamil", "tam" to "Tamil",
+        "te" to "Telugu", "tel" to "Telugu", "ml" to "Malayalam", "mal" to "Malayalam", "kn" to "Kannada", "kan" to "Kannada",
+        "bn" to "Bengali", "ben" to "Bengali", "mr" to "Marathi", "mar" to "Marathi", "gu" to "Gujarati", "guj" to "Gujarati",
+        "pa" to "Punjabi", "pan" to "Punjabi", "ur" to "Urdu", "urd" to "Urdu", "or" to "Odia", "ori" to "Odia",
+        "ja" to "Japanese", "jpn" to "Japanese", "ko" to "Korean", "kor" to "Korean", "zh" to "Chinese", "zho" to "Chinese",
+        "chi" to "Chinese", "cmn" to "Mandarin", "yue" to "Cantonese", "es" to "Spanish", "spa" to "Spanish",
+        "fr" to "French", "fre" to "French", "fra" to "French", "de" to "German", "ger" to "German", "deu" to "German",
+        "it" to "Italian", "ita" to "Italian", "pt" to "Portuguese", "por" to "Portuguese", "ru" to "Russian", "rus" to "Russian",
+        "ar" to "Arabic", "ara" to "Arabic", "tr" to "Turkish", "tur" to "Turkish", "id" to "Indonesian", "ind" to "Indonesian",
+        "th" to "Thai", "tha" to "Thai", "vi" to "Vietnamese", "vie" to "Vietnamese", "tl" to "Filipino", "fil" to "Filipino",
+        "ms" to "Malay", "may" to "Malay", "msa" to "Malay", "pl" to "Polish", "pol" to "Polish", "nl" to "Dutch", "dut" to "Dutch",
+        "nld" to "Dutch", "uk" to "Ukrainian", "ukr" to "Ukrainian", "fa" to "Persian", "per" to "Persian", "fas" to "Persian",
+        "he" to "Hebrew", "heb" to "Hebrew", "el" to "Greek", "gre" to "Greek", "ell" to "Greek", "sv" to "Swedish", "swe" to "Swedish",
+        "no" to "Norwegian", "nor" to "Norwegian", "da" to "Danish", "dan" to "Danish", "fi" to "Finnish", "fin" to "Finnish",
+        "cs" to "Czech", "cze" to "Czech", "ces" to "Czech", "hu" to "Hungarian", "hun" to "Hungarian", "ro" to "Romanian",
+        "rum" to "Romanian", "ron" to "Romanian", "ne" to "Nepali", "nep" to "Nepali", "si" to "Sinhala", "sin" to "Sinhala",
+    )
+    private val notLanguages = setOf("und", "mis", "mul", "zxx", "default", "audio", "main", "original", "auto", "unknown", "stereo", "aac", "track")
+
+    /**
+     * A display name for an audio language: ISO codes ("hin", "en-US") and plain names ("hindi") map to
+     * "Hindi"; anything that isn't a language (codec names, ids like "GS-25", "und") gives null.
+     */
+    fun languageName(raw: String?): String? {
+        val t = raw?.trim()?.trim('"')?.takeIf { it.isNotEmpty() && it.length <= 24 } ?: return null
+        val low = t.lowercase()
+        if (low in notLanguages) return null
+        languages[low.substringBefore('-').substringBefore('_')]?.let { return it }
+        languages.values.firstOrNull { it.equals(low, true) }?.let { return it }
+        // a word name the site wrote out (e.g. "Bhojpuri"); never a number, quality or id
+        if (Regex("^[A-Za-z][A-Za-z ]{2,19}$").matches(t) && strictQuality(t) == null) {
+            return t.split(" ").joinToString(" ") { w -> w.lowercase().replaceFirstChar { it.uppercase() } }
+        }
+        return null
+    }
+
+    private fun hlsAudio(text: String): List<String> =
+        Regex("""#EXT-X-MEDIA:[^\n]*""").findAll(text).map { it.value }
+            .filter { Regex("""TYPE=AUDIO""").containsMatchIn(it) }
+            .mapNotNull { languageName(attr(it, "LANGUAGE")) ?: languageName(attr(it, "NAME")) }
+            .distinct().toList()
+
+    private fun dashAudio(mpd: String): List<String> =
+        Regex("""<AdaptationSet\b[^>]*>""").findAll(mpd).map { it.value }
+            .filter { Regex("""(?:mimeType|contentType)="audio""").containsMatchIn(it) }
+            .mapNotNull { Regex("""\blang="([^"]+)"""").find(it)?.groupValues?.get(1)?.let { l -> languageName(l) } }
+            .distinct().toList()
 
     private class Variant(val url: String, val width: Int?, val height: Int?, val bandwidth: Long?)
 
@@ -118,7 +168,7 @@ object VeduQuality {
             when {
                 r.code !in 200..299 -> Checked(url, kind, null)
                 kind == "dash" || text.trimStart().startsWith("<?xml") || text.contains("<MPD") ->
-                    Checked(url, "dash", dashQuality(text))
+                    Checked(url, "dash", dashQuality(text), dashAudio(text))
                 !text.trimStart().startsWith("#EXTM3U") -> Checked(url, kind, null) // not a playlist we can read
                 else -> {
                     val variants = parseMaster(text, base)
@@ -126,10 +176,13 @@ object VeduQuality {
                         // a media playlist declares no resolution: leave it Unknown
                         Checked(url, "hls", null)
                     } else {
+                        val audio = hlsAudio(text)
                         val separateAudio = Regex("""#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=""").containsMatchIn(text)
                         val best = variants.maxWithOrNull(compareBy<Variant>({ standardQuality(it.width, it.height) ?: 0 }, { it.bandwidth ?: 0L }))!!
                         val q = standardQuality(best.width, best.height)
-                        if (separateAudio) Checked(url, "hls", q) else Checked(best.url, "hls", q)
+                        // without separate renditions the best variant carries its own (muxed) audio; the
+                        // master's declared languages still describe it
+                        if (separateAudio) Checked(url, "hls", q, audio) else Checked(best.url, "hls", q, audio)
                     }
                 }
             }

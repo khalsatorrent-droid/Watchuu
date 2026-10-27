@@ -207,7 +207,8 @@ object VeduSites {
                     val page = app.get(embed, headers = mapOf("Referer" to "$MEGAPLAY/", "User-Agent" to DESKTOP_UA, "X-Requested-With" to "XMLHttpRequest"), timeout = 15L).text
                     val dataId = megaplayDataId(page) ?: return@safe
                     val r = megaplaySources(dataId, "$MEGAPLAY/", false)
-                    r.sources.forEach { out.add(it.copy(label = "${type.uppercase()}${if (sv.isNotBlank()) " $sv" else ""}")) }
+                    r.sources.forEach { out.add(it.copy(label = "${type.uppercase()}${if (sv.isNotBlank()) " $sv" else ""}",
+                        audio = if (type == "dub") "English" else "Japanese")) }
                     subs += r.subs
                 }
             }
@@ -257,7 +258,7 @@ object VeduSites {
             for (p in pahePlayers(html)) {
                 safe {
                     val list = paheResolve(p.first, p.second, p.third, epUrl)
-                    list.forEach { out.add(it.copy(label = "$kind ${it.label}".trim())) }
+                    list.forEach { out.add(it.copy(label = "$kind ${it.label}".trim(), audio = if (kind == "Dub") "English" else "Japanese")) }
                 }
             }
         }
@@ -655,7 +656,7 @@ object VeduSites {
                     val q2 = Regex("[?&]q=(\\d{3,4}p)").find(u)?.groupValues?.get(1) ?: "auto"
                     if (!seen.add(q2)) continue
                     val label = mapOf("nf" to "Netflix", "pv" to "Prime", "hs" to "Hotstar")[platform]
-                    out.add(Src(u, "hls", q2, mapOf("Referer" to (netEntry ?: "$origin/"), "User-Agent" to NET_UA), label ?: platform))
+                    out.add(Src(u, "hls", q2, mapOf("Referer" to (netEntry ?: "$origin/"), "User-Agent" to NET_UA), label ?: platform, audio = lang))
                 }
             }
             if (out.isNotEmpty()) break

@@ -1256,41 +1256,45 @@ class CineLiteProvider : MainAPI() {
         if (kind == MK.UNKNOWN && text == null) return // not a playlist, not something we can play
 
         val allVariants = if (text != null) parseMaster(text, url) else emptyList()
-        // when the audio is a separate track (#EXT-X-MEDIA TYPE=AUDIO), a single-quality playlist
-        // has video only: such masters are listed as one link (quality is picked in the player)
+        // when the audio is a separate track (#EXT-X-MEDIA TYPE=AUDIO), each variant playlist has
+        // video only, so the master must be played for the audio to mux in. Can't pick one variant.
         val separateAudio = text != null && Regex("""#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=""").containsMatchIn(text)
-        val variants = if (separateAudio) emptyList() else allVariants
-        val topQuality = allVariants.mapNotNull { it.quality }.maxOrNull()
-        for (v in variants.sortedWith(compareByDescending<Variant> { it.quality ?: 0 }.thenByDescending { it.bandwidth ?: 0L })) {
-            // Cloudstream shows the quality next to the name by itself
-            val label = if (v.quality != null) "" else v.bandwidth?.let { " ${it / 1000}kbps" } ?: ""
+
+        if (separateAudio) {
+            val topQuality = allVariants.mapNotNull { it.quality }.maxOrNull()
             out.invoke(
-                newExtractorLink(name, "$base$label", v.url, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, base, url, ExtractorLinkType.M3U8) {
                     this.referer = referer
                     this.headers = headers
-                    this.quality = v.quality ?: Qualities.Unknown.value
+                    this.quality = topQuality ?: quality ?: Qualities.Unknown.value
                 }
             )
+            return
         }
-        // the master itself (adaptive); when it is a plain media playlist this is the only link
+
+        if (allVariants.isNotEmpty()) {
+            // adaptive master: collapse to the single best variant and mark it with that quality,
+            // instead of listing every rung plus an unmarked "Auto" master
+            val best = allVariants.maxWithOrNull(
+                compareBy<Variant>({ it.quality ?: 0 }, { it.bandwidth ?: 0L })
+            )!!
+            val label = if (best.quality != null) "" else best.bandwidth?.let { " ${it / 1000}kbps" } ?: ""
+            out.invoke(
+                newExtractorLink(name, "$base$label", best.url, ExtractorLinkType.M3U8) {
+                    this.referer = referer
+                    this.headers = headers
+                    this.quality = best.quality ?: Qualities.Unknown.value
+                }
+            )
+            return
+        }
+
+        // plain media playlist (single quality, no variants): one link with whatever quality we know
         out.invoke(
-            newExtractorLink(
-                name,
-                when {
-                    separateAudio && topQuality != null -> base
-                    variants.isEmpty() -> base + (if (quality != null) "" else " (Auto)")
-                    else -> "$base (Auto)"
-                },
-                url,
-                ExtractorLinkType.M3U8
-            ) {
+            newExtractorLink(name, base, url, ExtractorLinkType.M3U8) {
                 this.referer = referer
                 this.headers = headers
-                this.quality = when {
-                    separateAudio -> topQuality ?: quality ?: Qualities.Unknown.value
-                    variants.isEmpty() -> quality ?: Qualities.Unknown.value
-                    else -> Qualities.Unknown.value
-                }
+                this.quality = quality ?: Qualities.Unknown.value
             }
         )
     }

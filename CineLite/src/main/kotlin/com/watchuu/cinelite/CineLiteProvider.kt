@@ -1066,12 +1066,32 @@ class CineLiteProvider : MainAPI() {
         ) MK.UNKNOWN else null
     }
 
+    /**
+     * A resolution ONLY when the text carries a real, delimited resolution marker. Never guesses
+     * from a bare substring (a server named "Vault 4K", a token "mp4", "1080" glued inside an id):
+     * a wrong mark is worse than Unknown, so anything ambiguous returns null.
+     */
     private fun qualityOf(text: String?): Int? {
         if (text.isNullOrBlank()) return null
         val t = text.lowercase()
-        if (t.contains("4k") || t.contains("uhd")) return 2160
-        Regex("""(\d{3,4})\s*p""").find(t)?.let { return it.groupValues[1].toInt() }
-        Regex("""^\s*(\d{3,4})\s*\z""").find(t)?.let {
+        // an explicit WxH pair, e.g. "1920x1080"
+        Regex("""(?<![0-9])(\d{3,4})x(\d{3,4})(?![0-9])""").find(t)?.let {
+            return standardQuality(it.groupValues[1].toIntOrNull(), it.groupValues[2].toIntOrNull())
+        }
+        // a named/numbered resolution token bounded by non-alphanumerics on both sides, so it can't
+        // be part of a larger word, id or hostname
+        Regex("""(?<![a-z0-9])(4320p?|2160p?|1440p?|1080p?|720p?|480p?|360p?|240p?|144p?|8k|4k|2k|uhd|qhd|fhd)(?![a-z0-9])""")
+            .find(t)?.let {
+                return when (val tok = it.groupValues[1]) {
+                    "8k" -> 4320
+                    "4k", "uhd" -> 2160
+                    "2k", "qhd" -> 1440
+                    "fhd" -> 1080
+                    else -> tok.removeSuffix("p").toIntOrNull()?.takeIf { v -> v in 144..4320 }
+                }
+            }
+        // a value that is nothing but a number (e.g. a height field whose value is "1080")
+        Regex("""^\s*(\d{3,4})\s*$""").find(t)?.let {
             val v = it.groupValues[1].toInt()
             if (v in 144..4320) return v
         }
@@ -1112,9 +1132,16 @@ class CineLiteProvider : MainAPI() {
                     var q2 = q
                     var l2 = label
                     var h2 = hdr
-                    for (k in listOf("quality", "resolution", "res", "height", "label", "name", "size")) {
+                    // quality ONLY from genuine resolution fields — never label/name/title/size,
+                    // which carry marketing text ("4K Remastered") unrelated to the real stream
+                    for (k in listOf("quality", "resolution", "res")) {
                         val f = n.get(k) ?: continue
                         if (f.isTextual || f.isNumber) qualityOf(f.asText())?.let { q2 = it }
+                    }
+                    run {
+                        val hh = n.get("height")?.takeIf { it.isNumber || it.isTextual }?.asText()?.toIntOrNull()
+                        val ww = n.get("width")?.takeIf { it.isNumber || it.isTextual }?.asText()?.toIntOrNull()
+                        if (hh != null || ww != null) standardQuality(ww, hh)?.let { q2 = it }
                     }
                     listOf("label", "server", "name", "title", "provider", "lang", "language")
                         .firstNotNullOfOrNull { k ->

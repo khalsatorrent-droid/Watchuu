@@ -45,15 +45,22 @@ class CineLiteProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     private val embedUrl = "https://embed.cinelite.xyz"
-    private val apiUrl = "https://api.cinelite.xyz"
+    // the site moves its backend domain often (api.cinelite.xyz -> api.mycinebackendfuckoff.site,
+    // log 2026-10-26). This is only the fallback: the real origin is taken from the player's own
+    // /provider and /servers calls at run time (see backendOrigin()).
+    private val apiUrl = "https://api.mycinebackendfuckoff.site"
 
     private val tmdbApi = "https://api.themoviedb.org/3"
     private val tmdbApiKey = "4e44d9029b1270a757cddc766a1bcb63" // public key used by cinelite.xyz itself
     private val tmdbImg = "https://image.tmdb.org/t/p/w500"
     private val tmdbBack = "https://image.tmdb.org/t/p/original"
 
-    // the servers the site's player offers (log of 2026-10-24; vault is requested first by the player)
-    private val providers = listOf("vault", "cinecat", "hyper", "vidup", "xdownloader")
+    // the servers the site's player offers (log 2026-10-26). The live list still comes from the
+    // player's /servers call; this is the fallback / safety net when that is missing.
+    private val providers = listOf(
+        "vault", "vixsrc", "vidfast", "vidcore", "vidapi", "rivestream", "cinecat", "movy",
+        "movenerds", "flaxmovies", "frost", "cno", "thugtv", "lookmovie", "eyedraven",
+    )
 
     private val ua =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -421,11 +428,16 @@ class CineLiteProvider : MainAPI() {
                     val query = s.events.firstOrNull { it.kind == "provider" }
                         ?.url?.substringAfter("?", "")?.takeIf { it.isNotBlank() } ?: defaultQuery
 
+                    // the backend domain changes often, so take it from the player's own api calls
+                    val backend = s.events.firstOrNull { it.kind == "provider" || it.kind == "servers" }
+                        ?.url?.let { originOf(it) } ?: apiUrl
+                    dbg.add("backend=$backend")
+
                     // subtitles in the background, alongside the servers
                     val subJob = async {
                         try {
                             val year = yearJob.await()
-                            var subUrl = "$apiUrl/subtitles?id=$tmdbId&title=${URLEncoder.encode(title, "UTF-8")}" +
+                            var subUrl = "$backend/subtitles?id=$tmdbId&title=${URLEncoder.encode(title, "UTF-8")}" +
                                 (if (year != null) "&year=$year" else "")
                             if (!isMovie) subUrl += "&season=$season&episode=$episode"
                             val sr = s.get(subUrl, true, 15_000L)
@@ -443,7 +455,7 @@ class CineLiteProvider : MainAPI() {
                     names.addAll(providers)
                     var serversBody = s.events.firstOrNull { it.kind == "servers" && it.status in 200..299 }?.body
                     if (serversBody == null) {
-                        val r = s.get("$apiUrl/servers", true, 8_000L)
+                        val r = s.get("$backend/servers", true, 8_000L)
                         if (r != null && r.first in 200..299) serversBody = r.second
                     }
                     val display = HashMap<String, String>()
@@ -464,9 +476,9 @@ class CineLiteProvider : MainAPI() {
                     // every server is handled on its own: links are listed as soon as that server
                     // answers, instead of waiting for the slowest one
                     val jobs = have.map { (n, body) -> async { emitServer(n, display[n], body, s, out, dbg) } } +
-                        names.filter { it !in have }.take(12).map { n ->
+                        names.filter { it !in have }.take(20).map { n ->
                             async {
-                                val r = s.get("$apiUrl/provider/$n?$query", true, 30_000L)
+                                val r = s.get("$backend/provider/$n?$query", true, 30_000L)
                                 if (r != null && r.first in 200..299 && r.second.isNotBlank()) {
                                     emitServer(n, display[n], r.second, s, out, dbg)
                                 } else {

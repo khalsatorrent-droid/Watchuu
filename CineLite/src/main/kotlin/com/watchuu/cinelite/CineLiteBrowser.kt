@@ -151,7 +151,11 @@ object CineLiteBrowser {
     private fun allowedWhenStrict(u: String): Boolean {
         val l = u.lowercase()
         val host = l.substringAfter("://").substringBefore("/").substringBefore(":")
-        return host == "api.cinelite.xyz" || host.endsWith("cloudflare.com") ||
+        // the backend domain changes (api.cinelite.xyz -> api.mycinebackendfuckoff.site -> ...),
+        // so recognise it by its paths instead of a fixed host
+        val isBackend = l.contains("/provider/") || l.contains("/servers") ||
+            l.contains("/subtitles") || l.contains("/turnstile/verify") || host.startsWith("api.")
+        return isBackend || host.endsWith("cloudflare.com") ||
             isPlaylistUrl(l) || l.contains("/vault/proxy?") || l.contains("/vault/hls.m3u8")
     }
 
@@ -236,10 +240,11 @@ object CineLiteBrowser {
     try { return new URL(String(u), location.href).href; } catch(e){ return String(u); }
   }
   function classify(u){
-    if (/api\.cinelite\.xyz\/provider\//.test(u)) return 'provider';
-    if (/api\.cinelite\.xyz\/servers/.test(u)) return 'servers';
-    if (/api\.cinelite\.xyz\/subtitles/.test(u)) return 'subtitles';
-    if (/api\.cinelite\.xyz\/api\/turnstile\/verify/.test(u)) return 'verify';
+    // the backend host changes often, so match the api by path, not a fixed domain
+    if (/\/api\/turnstile\/verify/.test(u)) return 'verify';
+    if (/\/provider\/[a-z0-9]+/i.test(u)) return 'provider';
+    if (/\/servers(\?|$)/.test(u)) return 'servers';
+    if (/\/subtitles(\?|$)/.test(u)) return 'subtitles';
     if (/\/vault\/proxy\?/.test(u)) return 'proxy';
     if (/\/vault\/hls\.m3u8/.test(u)) return 'hls';
     return null;

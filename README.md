@@ -37,7 +37,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN | ✅ Beta |
 | **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
 | **Almostott** | [almostott.aethoflix.world](https://almostott.aethoflix.world) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
-| **Vedu** | Vedu app resolvers (Orbit · Nova) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
+| **Vedu** | Part of the Vedu app's sources (no Bollywood/Pikashow, YouTube or FlixCloud) | Movie · TV Series · Anime · Short Drama | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

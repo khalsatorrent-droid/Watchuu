@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class VeduPlugin : Plugin() {
     override fun load(context: Context) {
+        VeduBrowser.init(context)
         registerMainAPI(VeduProvider())
     }
 }

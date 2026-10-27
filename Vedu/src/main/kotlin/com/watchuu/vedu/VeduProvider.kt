@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
@@ -29,14 +30,18 @@ import org.json.JSONObject
  *  - Orbit (67Movies network): VidRock, Vidnest, VidKing, VidLink, VidUp, Videasy, 111Movies,
  *    2Embed, Peachify, Cinezo, Vidlove, Vidsuper
  *  - Nova (Bingr): 11 api.bingr.one stream servers, plus Multi/Sub/Dub anime adapters
- * Catalog, search and metadata come from TMDB.
+ * plus the resolvers that key titles by their own site ids, each found by searching the site:
+ *  - MovieBox (signed aoneroom api, see [VeduMovieBox]) incl. language variants and ShortTV
+ *  - 9Anime (Anikoto/MegaPlay), AnimePahe, Dramika, NetMirror (Netflix/Prime/Hotstar), ReelShort ([VeduSites])
+ *  - Flixer, VidFast and vidsrc.mov (WASM / packet-cipher players) through a hidden WebView ([VeduBrowser])
+ * Catalog, search and metadata come from TMDB; ShortTV and ReelShort short dramas have their own rows.
  */
 class VeduProvider : MainAPI() {
     override var mainUrl = "https://moviesbox.net.co"
     override var name = "Vedu"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AnimeMovie, TvType.AsianDrama)
 
     private val tmdbApi = "https://api.tmdb.org/3"
     private val tmdbApiKey = "fca1c3fa675f74cf4aa8d24b72dd4807"
@@ -53,6 +58,8 @@ class VeduProvider : MainAPI() {
         "/movie/top_rated" to "Top Rated Movies",
         "/tv/top_rated" to "Top Rated TV Shows",
         "/discover/tv?with_original_language=ko&sort_by=popularity.desc" to "K-Drama",
+        "shorttv" to "MovieBox ShortTV",
+        "reelshort" to "ReelShort",
     )
 
     // ---------------------------------------------------------------- models
@@ -69,6 +76,10 @@ class VeduProvider : MainAPI() {
         val imdbId: String = "",
         val totalSeasons: Int? = null,
         val anime: Boolean = false,
+        val lang: String = "",
+        val kind: String = "tmdb",   // tmdb | shorttv | reelshort
+        val ref: String = "",        // ShortTV subject id / ReelShort book id
+        val chapter: String = "",    // ReelShort chapter id
     )
 
     data class TmdbItem(
@@ -173,7 +184,21 @@ class VeduProvider : MainAPI() {
         }
     }
 
+    private fun VeduMovieBox.Subject.toShortSearch(): SearchResponse =
+        newTvSeriesSearchResponse(title, "$mainUrl/shorttv/$id", TvType.TvSeries) { this.posterUrl = cover }
+
+    private fun VeduSites.Book.toReelSearch(): SearchResponse =
+        newTvSeriesSearchResponse(title, "$mainUrl/reelshort/$id", TvType.TvSeries) { this.posterUrl = cover }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data == "shorttv") {
+            val items = VeduMovieBox.trendingShorts(page).map { it.toShortSearch() }
+            return newHomePageResponse(request.name, items, items.isNotEmpty())
+        }
+        if (request.data == "reelshort") {
+            val items = if (page == 1) VeduSites.reelHome().map { it.toReelSearch() } else emptyList()
+            return newHomePageResponse(request.name, items, false)
+        }
         return try {
             val defType = when {
                 request.data.startsWith("/movie") || request.data.startsWith("/discover/movie") -> "movie"
@@ -210,9 +235,16 @@ class VeduProvider : MainAPI() {
                     }
                 }.awaitAll()
             }
-            ((first.results ?: emptyList()) + rest.filterNotNull().flatten())
+            val tmdb = ((first.results ?: emptyList()) + rest.filterNotNull().flatten())
                 .mapNotNull { it.toSearch(null) }
                 .distinctBy { it.url }
+            // short dramas live outside TMDB: MovieBox ShortTV (subjectType 7) and ReelShort books
+            val shorts = coroutineScope {
+                val mb = async { safeList { VeduMovieBox.search(query.trim()).filter { it.type == 7 }.map { it.toShortSearch() } } }
+                val rs = async { safeList { VeduSites.reelSearch(query.trim()).map { it.toReelSearch() } } }
+                mb.await() + rs.await()
+            }
+            tmdb + shorts
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -220,10 +252,59 @@ class VeduProvider : MainAPI() {
         }
     }
 
+    private suspend fun <T> safeList(block: suspend () -> List<T>): List<T> = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        emptyList()
+    }
+
     // -------------------------------------------------------------------- load
+
+    private suspend fun loadShortTv(url: String, id: String): LoadResponse? {
+        val d = try { VeduMovieBox.subjectDetail(id) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+        val subject = (d?.optJSONObject("subject") ?: d) ?: return null
+        val title = subject.optString("title").takeIf { it.isNotBlank() } ?: return null
+        val cover = subject.optJSONObject("cover")?.optString("url")
+        // episode count: detail fields first, else count what mini-list returns
+        var total = listOf("totalEpisode", "episodeCount", "totalEp", "maxEp").firstNotNullOfOrNull { k -> subject.optInt(k).takeIf { it > 0 } }
+            ?: d?.optJSONObject("resource")?.optJSONArray("seasons")?.optJSONObject(0)?.optInt("maxEp")?.takeIf { it > 0 }
+        if (total == null) {
+            val (info, eps) = try { VeduMovieBox.shortEpisodes(id, 1, 300) } catch (e: CancellationException) { throw e } catch (_: Exception) { null to emptyList() }
+            total = info?.optInt("totalEpisode")?.takeIf { it > 0 } ?: eps.maxOfOrNull { it.ep }
+        }
+        val episodes = (1..(total ?: 1)).map { ep ->
+            newEpisode(LinkData("tv", 0, 1, ep, title = title, kind = "shorttv", ref = id).toJson()) {
+                this.name = "Episode $ep"; this.season = 1; this.episode = ep
+            }
+        }
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = cover
+            this.plot = subject.optString("description").takeIf { it.isNotBlank() }
+            this.tags = listOf("Short Drama")
+        }
+    }
+
+    private suspend fun loadReelShort(url: String, id: String): LoadResponse? {
+        val book = try { VeduSites.reelBook(id) } catch (e: CancellationException) { throw e } catch (_: Exception) { null } ?: return null
+        val episodes = book.chapters.map { c ->
+            newEpisode(LinkData("tv", 0, 1, c.serial, title = book.title, kind = "reelshort", ref = id, chapter = c.id).toJson()) {
+                this.name = "Episode ${c.serial}" + if (book.paidStart != null && c.serial >= book.paidStart) " (paid)" else ""
+                this.season = 1; this.episode = c.serial
+            }
+        }
+        return newTvSeriesLoadResponse(book.title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = book.cover
+            this.plot = book.description
+            this.tags = listOf("Short Drama")
+        }
+    }
 
     override suspend fun load(url: String): LoadResponse? {
         val path = url.removePrefix(mainUrl).trim('/').split("/")
+        if (path.getOrNull(0) == "shorttv") return loadShortTv(url, path.getOrNull(1) ?: return null)
+        if (path.getOrNull(0) == "reelshort") return loadReelShort(url, path.getOrNull(1) ?: return null)
         val tmdbType = path.getOrNull(0)?.takeIf { it == "movie" || it == "tv" } ?: return null
         val tmdbId = path.getOrNull(1)?.toIntOrNull() ?: return null
 
@@ -254,7 +335,8 @@ class VeduProvider : MainAPI() {
         val recs = detail.recommendations?.results?.mapNotNull { it.toSearch(tmdbType) }
 
         if (tmdbType == "movie") {
-            val data = LinkData("movie", tmdbId, title = title, originalTitle = originalTitle, year = yearStr, imdbId = imdb, anime = anime)
+            val data = LinkData("movie", tmdbId, title = title, originalTitle = originalTitle, year = yearStr, imdbId = imdb, anime = anime,
+                lang = detail.originalLanguage ?: "")
             return newMovieLoadResponse(title, url, if (anime) TvType.AnimeMovie else TvType.Movie, data.toJson()) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = bg
@@ -295,7 +377,7 @@ class VeduProvider : MainAPI() {
                 "tv", tmdbId, ep.seasonNumber, ep.episodeNumber,
                 absEpisode = (offsets[ep.seasonNumber] ?: 0) + ep.episodeNumber,
                 title = title, originalTitle = originalTitle, year = yearStr, imdbId = imdb,
-                totalSeasons = detail.numberOfSeasons, anime = anime,
+                totalSeasons = detail.numberOfSeasons, anime = anime, lang = detail.originalLanguage ?: "",
             )
             newEpisode(data.toJson()) {
                 this.name = ep.name
@@ -357,8 +439,6 @@ class VeduProvider : MainAPI() {
         }
     }
 
-    private fun job(block: suspend () -> Unit): suspend () -> Unit = block
-
     private fun qualityOf(label: String): Int =
         Regex("""(?i)(2160|1440|1080|720|576|540|480|360|240)""").find(label)?.groupValues?.get(1)?.toIntOrNull()
             ?: when {
@@ -411,28 +491,101 @@ class VeduProvider : MainAPI() {
             }
         }
 
-        val jobs = ArrayList<Pair<String, suspend () -> Unit>>()
-        for (srv in VeduSources.orbitServers) {
-            jobs.add(srv.name to job { emit("Orbit", srv.name, srv.resolve(target)) })
+        // ---- short dramas (own catalogs) ---------------------------------------------------
+        if (d.kind == "shorttv") {
+            val ep = d.episode ?: 1
+            val (_, eps) = VeduMovieBox.shortEpisodes(d.ref, ep, ep)
+            val hit = eps.firstOrNull { it.ep == ep } ?: eps.firstOrNull()
+            emit("MovieBox", "ShortTV", VeduSources.Result(hit?.streams?.map { VeduSources.Src(it.url, it.type, it.quality, it.headers) } ?: emptyList()))
+            return found
         }
+        if (d.kind == "reelshort") {
+            emit("ReelShort", "Free", VeduSites.reelChapter(d.ref, d.chapter))
+            return found
+        }
+
+        val isMovie = d.type == "movie"
+        val season = d.season ?: 1
+        val episode = d.episode ?: 1
+        // (label, timeout, work)
+        val jobs = ArrayList<Triple<String, Long, suspend () -> Unit>>()
+        fun add(label: String, timeout: Long = 45_000L, block: suspend () -> Unit) { jobs.add(Triple(label, timeout, block)) }
+
+        // ---- Orbit (67Movies) and Nova (Bingr): TMDB-keyed APIs ------------------------------
+        for (srv in VeduSources.orbitServers) add(srv.name) { emit("Orbit", srv.name, srv.resolve(target)) }
         if (d.title.isNotBlank()) {
-            for (srv in VeduSources.novaServers) {
-                jobs.add(srv to job { emit("Nova", srv.uppercase(), VeduSources.bingr(srv, target)) })
+            for (srv in VeduSources.novaServers) add(srv) { emit("Nova", srv.uppercase(), VeduSources.bingr(srv, target)) }
+        }
+
+        // ---- WASM / packet-cipher players: let a hidden WebView play them and keep the manifest
+        val coords = if (isMovie) "movie/${d.tmdbId}" else "tv/${d.tmdbId}/$season/$episode"
+        val sniffed = listOf(
+            Triple("Flixer", "https://flixer.gd/watch/$coords", "https://flixer.gd/"),
+            Triple("VidFast", "https://vidfast.vc/$coords", "https://vidfast.vc/"),
+            Triple("VidSrc", "https://vsembed.ru/embed/$coords", "https://vsembed.ru/"),
+        )
+        for ((label, embed, referer) in sniffed) add(label, 30_000L) {
+            val hits = VeduBrowser.sniff(embed, referer, ua, 22_000L)
+            val best = hits.firstOrNull { it.url.contains("master", true) } ?: hits.firstOrNull { it.url.contains(".mpd", true) } ?: hits.firstOrNull()
+            if (best != null) {
+                val origin = best.origin?.takeIf { it.startsWith("http") } ?: best.referer?.let { VeduSources.originOf(it) } ?: VeduSources.originOf(embed) ?: referer
+                emit("Orbit", label, VeduSources.Result(listOf(VeduSources.Src(best.url, "", "", mapOf("Referer" to (best.referer ?: "$origin/"), "Origin" to origin)))))
             }
         }
+
+        // ---- MovieBox (original + dubbed variants) -------------------------------------------
+        if (d.title.isNotBlank()) add("MovieBox", 40_000L) {
+            val subjects = VeduMovieBox.match(d.title, d.year, isMovie)
+            coroutineScope {
+                subjects.map { subj ->
+                    async {
+                        try {
+                            val se = if (isMovie) 0 else season
+                            val ep = if (isMovie) 0 else episode
+                            val streams = VeduMovieBox.play(subj.id, se, ep)
+                            val variant = Regex("""\[([^\]]+)]|\(([^)]+)\)""").find(subj.title)?.let { m -> m.groupValues[1].ifBlank { m.groupValues[2] } }
+                            val subs = streams.firstOrNull()?.let { VeduMovieBox.captions(subj.id, it.streamId) } ?: emptyList()
+                            emit("MovieBox", variant ?: "Original", VeduSources.Result(
+                                streams.map { VeduSources.Src(it.url, it.type, it.quality, it.headers) }, subs))
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+
+        // ---- NetMirror (Netflix / Prime / Hotstar catalogues) ---------------------------------
+        if (d.title.isNotBlank()) add("NetMirror", 75_000L) {
+            emit("NetMirror", "HLS", VeduSites.netMirror(d.title, isMovie, season, episode))
+        }
+
+        // ---- Asian dramas: Dramika -------------------------------------------------------------
+        if (!d.anime && d.lang in setOf("ko", "zh", "ja", "th", "tl", "id", "vi", "ms", "cn", "tw")) add("Dramika") {
+            val r = VeduSites.dramika(d.title, isMovie, episode) { url, referer ->
+                loadExtractor(url, referer, subtitleCallback) { link -> found = true; callback.invoke(link) }
+            }
+            if (r.sources.isEmpty() && d.originalTitle.isNotBlank() && d.originalTitle != d.title) {
+                emit("Dramika", "", VeduSites.dramika(d.originalTitle, isMovie, episode) { url, referer ->
+                    loadExtractor(url, referer, subtitleCallback) { link -> found = true; callback.invoke(link) }
+                })
+            } else emit("Dramika", "", r)
+        }
+
+        // ---- Anime: Nova adapters, 9Anime (Anikoto), AnimePahe --------------------------------
         if (d.anime) {
-            val isMovie = d.type == "movie"
-            val ep = if (isMovie) 1 else (d.absEpisode ?: d.episode ?: 1)
-            jobs.add("multi" to job {
-                emit("Nova Anime", "Multi", VeduSources.animeMulti(listOf(d.title, d.originalTitle), ep, isMovie))
-            })
-            jobs.add("subdub" to job {
+            val absEp = if (isMovie) 1 else (d.absEpisode ?: episode)
+            val seasonTitle = if (!isMovie && season > 1) "${d.title} Season $season" else d.title
+            add("multi") {
+                emit("Nova Anime", "Multi", VeduSources.animeMulti(listOf(d.title, d.originalTitle), absEp, isMovie))
+            }
+            add("subdub") {
                 // AniList splits seasons; try "<title> Season N" first for later seasons.
-                val season = d.season ?: 1
-                val seasonal = if (!isMovie && season > 1) anilistId("${d.title} Season $season", false) else null
+                val seasonal = if (!isMovie && season > 1) anilistId(seasonTitle, false) else null
                 val aid = seasonal ?: anilistId(d.title, isMovie) ?: anilistId(d.originalTitle, isMovie)
                 if (aid != null) {
-                    val epNum = if (isMovie) 1 else if (seasonal != null) (d.episode ?: 1) else ep
+                    val epNum = if (isMovie) 1 else if (seasonal != null) episode else absEp
                     coroutineScope {
                         listOf(false, true).map { dub ->
                             async {
@@ -446,16 +599,27 @@ class VeduProvider : MainAPI() {
                         }.awaitAll()
                     }
                 }
-            })
+            }
+            add("9anime") {
+                // Anikoto has a separate entry per season: seasonal title first, then whole-show numbering
+                var r = VeduSites.nineAnime(seasonTitle, if (season > 1) episode else absEp)
+                if (r.sources.isEmpty() && seasonTitle != d.title) r = VeduSites.nineAnime(d.title, absEp)
+                emit("9Anime", "MegaPlay", r)
+            }
+            add("animepahe") {
+                var r = VeduSites.animePahe(seasonTitle, if (season > 1) episode else absEp)
+                if (r.sources.isEmpty() && seasonTitle != d.title) r = VeduSites.animePahe(d.title, absEp)
+                emit("AnimePahe", "", r)
+            }
         }
 
-        val gate = Semaphore(8)
+        val gate = Semaphore(10)
         coroutineScope {
-            jobs.map { (_, job) ->
+            jobs.map { (_, timeout, work) ->
                 async {
                     gate.withPermit {
                         try {
-                            withTimeoutOrNull(45_000L) { job() }
+                            withTimeoutOrNull(timeout) { work() }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Exception) {

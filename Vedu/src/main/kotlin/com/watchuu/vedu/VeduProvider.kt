@@ -439,13 +439,6 @@ class VeduProvider : MainAPI() {
         }
     }
 
-    private fun qualityOf(label: String): Int =
-        Regex("""(?i)(2160|1440|1080|720|576|540|480|360|240)""").find(label)?.groupValues?.get(1)?.toIntOrNull()
-            ?: when {
-                label.contains("4k", true) -> Qualities.P2160.value
-                else -> Qualities.Unknown.value
-            }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -468,26 +461,37 @@ class VeduProvider : MainAPI() {
                 val fresh = synchronized(lock) { emittedSubs.add(sub.url) }
                 if (fresh) subtitleCallback.invoke(newSubtitleFile(sub.lang, sub.url))
             }
-            for (src in result.sources) {
-                val fresh = synchronized(lock) { emittedLinks.add(src.url).also { if (it) found = true } }
-                if (!fresh) continue
-                val kind = VeduSources.sourceKind(src.type, src.url)
-                val type = when (kind) {
-                    "dash" -> ExtractorLinkType.DASH
-                    "mp4" -> ExtractorLinkType.VIDEO
-                    else -> ExtractorLinkType.M3U8
-                }
-                val extra = src.label.takeIf { it.isNotBlank() && !it.equals(src.quality, true) }?.let { " ($it)" } ?: ""
-                val headers = LinkedHashMap(src.headers)
-                if (headers.keys.none { it.equals("User-Agent", true) }) headers["User-Agent"] = ua
-                val referer = headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value ?: ""
-                callback.invoke(
-                    newExtractorLink(name, "$group · $server$extra", src.url, type) {
-                        this.referer = referer
-                        this.quality = qualityOf(src.quality.ifBlank { src.url })
-                        this.headers = headers
+            // every link is checked against its own manifest before it is marked (see VeduQuality);
+            // adaptive HLS comes back as its best variant
+            coroutineScope {
+                result.sources.map { src ->
+                    async {
+                        val fresh = synchronized(lock) { emittedLinks.add(src.url) }
+                        if (!fresh) return@async
+                        val headers = LinkedHashMap(src.headers)
+                        if (headers.keys.none { it.equals("User-Agent", true) }) headers["User-Agent"] = ua
+                        val checked = VeduQuality.check(src.url, VeduSources.sourceKind(src.type, src.url), headers, src.quality)
+                        val again = synchronized(lock) {
+                            (checked.url == src.url || emittedLinks.add(checked.url)).also { if (it) found = true }
+                        }
+                        if (!again) return@async
+                        val type = when (checked.kind) {
+                            "dash" -> ExtractorLinkType.DASH
+                            "mp4" -> ExtractorLinkType.VIDEO
+                            else -> ExtractorLinkType.M3U8
+                        }
+                        // a label that is itself a quality claim ("4K", "1080p") is dropped: the verified mark is shown instead
+                        val extra = src.label.takeIf { it.isNotBlank() && VeduQuality.strictQuality(it) == null }?.let { " ($it)" } ?: ""
+                        val referer = headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value ?: ""
+                        callback.invoke(
+                            newExtractorLink(name, "$group · $server$extra", checked.url, type) {
+                                this.referer = referer
+                                this.quality = checked.quality ?: Qualities.Unknown.value
+                                this.headers = headers
+                            }
+                        )
                     }
-                )
+                }.awaitAll()
             }
         }
 

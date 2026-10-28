@@ -41,6 +41,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | NSFW | 🇮🇳 HI | ✅ Beta |
 | **FamilyPornHD** | [familypornhd.com](https://familypornhd.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 | **Freeuseporn** | [freeuseporn.com](https://www.freeuseporn.com) | NSFW | 🇬🇧 EN | ✅ Beta |
+| **SupJav** | [supjav.com](https://supjav.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

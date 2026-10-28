@@ -29,11 +29,17 @@ class FreeusepornProvider : MainAPI() {
     // standard renditions to probe when the page markup doesn't spell the sources out
     private val probeHeights = listOf(2160, 1080, 720, 480, 360, 240)
 
+    // category paths confirmed from the site's /videos/<slug> links
     override val mainPage = mainPageOf(
         "" to "Latest",
         "videos/mind-control" to "Mind Control",
+        "videos/general-freeuse" to "General Freeuse",
+        "videos/free-service" to "Free Service",
         "videos/forced" to "Forced",
-        "videos/hypno" to "Hypno",
+        "videos/ignored-sex" to "Ignored Sex",
+        "videos/glory-hole" to "Glory Hole",
+        "videos/time-stop" to "Time Stop",
+        "videos/japanese" to "Japanese",
         "videos" to "All Videos",
     )
 

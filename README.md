@@ -40,6 +40,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **Vedu** | Part of the Vedu app's sources (no Bollywood/Pikashow, YouTube or FlixCloud) | Movie · TV Series · Anime · Short Drama | 🇬🇧 EN | ✅ Beta |
 | **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | NSFW | 🇮🇳 HI | ✅ Beta |
 | **FamilyPornHD** | [familypornhd.com](https://familypornhd.com) | NSFW | 🇬🇧 EN | ✅ Beta |
+| **Freeuseporn** | [freeuseporn.com](https://www.freeuseporn.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

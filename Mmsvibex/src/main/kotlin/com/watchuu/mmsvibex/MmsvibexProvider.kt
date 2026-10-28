@@ -8,10 +8,7 @@ class MmsvibexProvider : MainAPI() {
     override var mainUrl = "https://mmsvibex.fit"
     override var name = "Mmsvibex"
     override val hasMainPage = true
-    override val supportedTypes = setOf(
-        TvType.Movie,
-        TvType.TvSeries,
-    )
+    override val supportedTypes = setOf(TvType.NSFW)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val items = mutableListOf<HomePageList>()
@@ -36,7 +33,7 @@ class MmsvibexProvider : MainAPI() {
             val title = item["title"] as? String ?: return@mapNotNull null
             val url = item["url"] as? String ?: return@mapNotNull null
             val poster = item["thumbnail"] as? String
-            newMovieSearchResponse(title, url, TvType.Movie) { posterUrl = poster }
+            newMovieSearchResponse(title, url, TvType.NSFW) { posterUrl = poster }
         }
     }
 
@@ -58,13 +55,13 @@ class MmsvibexProvider : MainAPI() {
         }
 
         return if (episodes.isNotEmpty()) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            newTvSeriesLoadResponse(title, url, TvType.NSFW, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = tags
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
+            newMovieLoadResponse(title, url, TvType.NSFW, url) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = tags
@@ -104,6 +101,6 @@ class MmsvibexProvider : MainAPI() {
         val title = selectFirst(".title")?.text() ?: return null
         val url = selectFirst("a")?.attr("href") ?: return null
         val posterUrl = selectFirst("img")?.attr("src")
-        return newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = posterUrl }
+        return newMovieSearchResponse(title, url, TvType.NSFW) { this.posterUrl = posterUrl }
     }
 }

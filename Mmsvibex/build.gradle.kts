@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     language = "en"
@@ -6,6 +6,6 @@ cloudstream {
     authors = listOf("khalsatorrent-droid")
 
     status = 1
-    tvTypes = listOf("Movie", "TvSeries")
+    tvTypes = listOf("NSFW")
     iconUrl = "https://www.google.com/s2/favicons?domain=mmsvibex.fit&sz=128"
 }

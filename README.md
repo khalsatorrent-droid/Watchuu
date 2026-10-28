@@ -42,6 +42,7 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **FamilyPornHD** | [familypornhd.com](https://familypornhd.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 | **Freeuseporn** | [freeuseporn.com](https://www.freeuseporn.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 | **SupJav** | [supjav.com](https://supjav.com) | NSFW | 🇬🇧 EN | ✅ Beta |
+| **Archivebate** | [archivebate.com](https://archivebate.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

@@ -38,6 +38,8 @@ https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/main/repo.json
 | **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
 | **Almostott** | [almostott.aethoflix.world](https://almostott.aethoflix.world) | Movie · TV Series · Anime | 🇬🇧 EN | ✅ Beta |
 | **Vedu** | Part of the Vedu app's sources (no Bollywood/Pikashow, YouTube or FlixCloud) | Movie · TV Series · Anime · Short Drama | 🇬🇧 EN | ✅ Beta |
+| **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | NSFW | 🇮🇳 HI | ✅ Beta |
+| **FamilyPornHD** | [familypornhd.com](https://familypornhd.com) | NSFW | 🇬🇧 EN | ✅ Beta |
 
 ## 🛠 Build
 

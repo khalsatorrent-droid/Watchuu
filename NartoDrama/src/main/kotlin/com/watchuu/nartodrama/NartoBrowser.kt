@@ -336,6 +336,10 @@ object NartoBrowser {
         wv.layout(0, 0, dm.widthPixels.coerceAtLeast(360), dm.heightPixels.coerceAtLeast(640))
         wv.addJavascriptInterface(Bridge(), "ndBridge")
         wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                view?.evaluateJavascript(guardPatch(), null)
+            }
+
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val u = request?.url?.toString() ?: return null
                 if (isNeeded(u)) return null
@@ -449,14 +453,43 @@ object NartoBrowser {
         }
     }
 
-    private const val SNIFF_HOOK = "(function(){if(window.__ndHook)return;window.__ndHook=1;try{var of=window.fetch;" +
-        "window.fetch=function(i,o){var u=(typeof i==='string')?i:(i&&i.url)||'';var p=of.apply(this,arguments);" +
+    /**
+     * The player runs an anti-automation guard ("nd-player-guard"): it flags the client as
+     * "suspect" and refuses to build the stream when navigator.userAgentData.brands is empty,
+     * which it always is in a bare Android WebView. Give it a real Chrome brand list (and hide
+     * navigator.webdriver) so the gate opens like it does in a normal browser.
+     */
+    private fun chromeMajor(): String = Regex("""Chrome/(\d+)""").find(userAgent())?.groupValues?.get(1) ?: "131"
+
+    private fun guardPatch(): String {
+        val v = chromeMajor()
+        return "(function(){try{var b=[{brand:'Chromium',version:'$v'},{brand:'Google Chrome',version:'$v'},{brand:'Not_A Brand',version:'24'}];" +
+            "var u={brands:b,mobile:true,platform:'Android'," +
+            "getHighEntropyValues:function(h){return Promise.resolve({brands:b,mobile:true,platform:'Android',platformVersion:'14.0.0',architecture:'',bitness:'64',model:'Pixel 8',uaFullVersion:'$v.0.0.0',fullVersionList:b,wow64:false})}," +
+            "toJSON:function(){return{brands:b,mobile:true,platform:'Android'}}};" +
+            "try{Object.defineProperty(Navigator.prototype,'userAgentData',{configurable:true,get:function(){return u}})}catch(e){}" +
+            "try{Object.defineProperty(navigator,'userAgentData',{configurable:true,get:function(){return u}})}catch(e){}" +
+            "try{Object.defineProperty(navigator,'webdriver',{configurable:true,get:function(){return false}})}catch(e){}" +
+            "}catch(e){}})()"
+    }
+
+    // catch any stream address the player builds, whatever host it lives on (the CDN has no fixed
+    // domain and the url is made entirely in JS, so we watch fetch, XHR and the <video> element)
+    private const val SNIFF_HOOK = "(function(){if(window.__ndHook)return;window.__ndHook=1;try{" +
+        "function rep(u){try{u=String(u);if(u.indexOf('http')==0&&/\\.m3u8|\\.mpd|\\.mp4(\\?|$)/i.test(u))ndSniff.onMedia(u)}catch(e){}}" +
+        "var of=window.fetch;window.fetch=function(i,o){var u=(typeof i==='string')?i:(i&&i.url)||'';rep(u);var p=of.apply(this,arguments);" +
         "if(/\\/(api|e)\\/[^?]*(source|play|stream|video)/i.test(String(u))){p.then(function(r){r.clone().text().then(function(t){try{ndSniff.onApi(t)}catch(e){}})}).catch(function(){})}" +
-        "return p};}catch(e){}})()"
+        "return p};" +
+        "var ox=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){rep(u);return ox.apply(this,arguments)};" +
+        "}catch(e){}})()"
 
     private const val SNIFF_POKE = "(function(){try{var v=document.querySelector('video');if(v){var s=v.currentSrc||v.src;" +
         "if(s&&s.indexOf('http')==0)ndSniff.onMedia(s);try{v.muted=true;v.play()}catch(e){}}" +
-        "var b=document.querySelector('button[aria-label=\"Play\"],button[aria-label*=\"play\" i],[data-play],.play-button');if(b)b.click();}catch(e){}})()"
+        "var sel=['button[aria-label=\"Play\"]','button[aria-label*=\"play\" i]','[data-play]','.play-button','.vjs-big-play-button'," +
+        "'.plyr__control--overlaid','.jw-icon-display','.ad-gate','[data-gate]','.play'];" +
+        "for(var i=0;i<sel.length;i++){var b=document.querySelector(sel[i]);if(b){try{b.click()}catch(e){}}}" +
+        "var c=document.querySelector('#player,.player,.video-wrap,video');if(c){['pointerdown','mousedown','mouseup','click'].forEach(function(t){" +
+        "try{c.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}))}catch(e){}})}}catch(e){}})()"
 
     private fun isMediaUrl(u: String): Boolean {
         val p = u.lowercase().substringBefore("?")
@@ -473,7 +506,7 @@ object NartoBrowser {
 
     /** Opens the episode page like a viewer would and collects what the site's player loads. */
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun sniff(episodeUrl: String, timeoutMs: Long = 30_000L): Sniffed {
+    suspend fun sniff(episodeUrl: String, timeoutMs: Long = 45_000L): Sniffed {
         val ctx = appContext ?: return Sniffed(emptyList(), emptyList(), emptyList())
         val api = java.util.Collections.synchronizedList(ArrayList<String>())
         val media = java.util.Collections.synchronizedList(ArrayList<String>())
@@ -489,6 +522,7 @@ object NartoBrowser {
             w.addJavascriptInterface(SniffBridge(api, video), "ndSniff")
             w.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    view?.evaluateJavascript(guardPatch(), null)
                     view?.evaluateJavascript(SNIFF_HOOK, null)
                 }
 
@@ -506,7 +540,10 @@ object NartoBrowser {
             }
             w.webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    if (newProgress in 5..90) view?.evaluateJavascript(SNIFF_HOOK, null)
+                    if (newProgress in 5..90) {
+                        view?.evaluateJavascript(guardPatch(), null)
+                        view?.evaluateJavascript(SNIFF_HOOK, null)
+                    }
                 }
             }
             w.loadUrl(episodeUrl, mapOf("X-Requested-With" to ""))

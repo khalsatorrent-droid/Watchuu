@@ -25,8 +25,12 @@ import org.jsoup.Jsoup
  *  - detail page     : /detail/watch/{slug}  (JSON-LD TVSeries, a.episode-item links)
  *  - episode count   : GET edge.narto-drama.com/e/rs/detail/watch/{slug}/check-new-episodes
  *  - "more like this": GET /detail/watch/{slug}/extras  (json with html cards)
- *  - episode page    : /detail/watch/{slug}/{n}  - the video address is created by the page's
- *                      player, so it is taken from a hidden WebView (NartoBrowser.sniff)
+ *  - episode page    : /detail/watch/{slug}/{n}  - the player POSTs a signed token to
+ *                      /player/ads/gate-unlock, then builds the CDN playlist url (wolftv.online,
+ *                      changing host, no fixed extension) entirely in obfuscated JS behind an
+ *                      anti-automation guard. There is no server endpoint that returns the url,
+ *                      so it is taken from a hidden WebView that runs the player (NartoBrowser.sniff,
+ *                      which spoofs navigator.userAgentData so the guard lets the gate open).
  *
  * Requests: plain (with the nd_ck cookie and the WebView's cookies) -> CloudflareKiller -> a
  * hidden WebView that loads the page like a browser.
@@ -348,6 +352,9 @@ class NartoDramaProvider : MainAPI() {
             }
             // any stream-host address in the page (scripts, data attributes), escaped or not
             Regex("""https?:(?:\\?/){2}[a-z0-9-]*stream[a-z0-9.-]*\.narto-drama\.com(?:\\?/)[A-Za-z0-9_-]{40,}""")
+                .findAll(html).forEach { videos.putIfAbsent(it.value.replace("\\/", "/"), name) }
+            // a playlist url embedded anywhere in the page (the CDN host changes; match the file, not the host)
+            Regex("""https?:(?:\\?/){2}[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
                 .findAll(html).forEach { videos.putIfAbsent(it.value.replace("\\/", "/"), name) }
             report.append("page: ${html.length} chars, ${videos.size} video, ld=${html.contains("VideoObject")}, " +
                 "challenge=${NartoBrowser.isChallenge(200, html)}; ")

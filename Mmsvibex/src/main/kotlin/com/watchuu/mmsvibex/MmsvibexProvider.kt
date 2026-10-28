@@ -10,18 +10,28 @@ class MmsvibexProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
 
+    // Each row is a WordPress listing that pages with /page/N/. "" is the site root (latest videos).
+    override val mainPage = mainPageOf(
+        "" to "Latest Videos",
+        "category/indian/" to "Indian",
+        "category/desi/" to "Desi",
+        "category/others/" to "Others",
+        "photos/" to "Photos",
+    )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val items = mutableListOf<HomePageList>()
-        val document = app.get("$mainUrl/page/$page/").document
+        // page 1 is the bare path; later pages are /<path>/page/N/
+        val base = mainUrl.trimEnd('/') + "/" + request.data.trim('/').let { if (it.isEmpty()) "" else "$it/" }
+        val url = if (page > 1) "${base}page/$page/" else base
 
-        val sections = document.select("section")
-        sections.forEach { section ->
-            val title = section.selectFirst("h2")?.text() ?: return@forEach
-            val videos = section.select("article.thumb-block.video-preview-item").mapNotNull { it.toSearchResult() }
-            if (videos.isNotEmpty()) items.add(HomePageList(title, videos))
-        }
+        val document = app.get(url).document
+        val videos = document.select("article.thumb-block.video-preview-item").mapNotNull { it.toSearchResult() }
 
-        return newHomePageResponse(items)
+        // keep loading while the page advertises a next page and still returns items
+        val hasNext = videos.isNotEmpty() &&
+            document.selectFirst("link[rel=next], a.next.page-numbers, .pagination a[href*=/page/]") != null
+
+        return newHomePageResponse(request.name, videos, hasNext = hasNext)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -98,9 +108,13 @@ class MmsvibexProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = selectFirst(".title")?.text() ?: return null
-        val url = selectFirst("a")?.attr("href") ?: return null
-        val posterUrl = selectFirst("img")?.attr("src")
+        val title = selectFirst(".title")?.text()?.takeIf { it.isNotBlank() } ?: return null
+        val url = selectFirst("a")?.attr("href")?.takeIf { it.isNotBlank() } ?: return null
+        // thumbnails are lazy-loaded, so prefer the real source attributes over a placeholder src
+        val img = selectFirst("img")
+        val posterUrl = img?.let {
+            it.attr("data-src").ifBlank { it.attr("data-original").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } } }
+        }?.takeIf { it.isNotBlank() }
         return newMovieSearchResponse(title, url, TvType.NSFW) { this.posterUrl = posterUrl }
     }
 }

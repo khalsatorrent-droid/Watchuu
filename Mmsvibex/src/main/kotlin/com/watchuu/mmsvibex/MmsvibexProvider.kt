@@ -39,11 +39,14 @@ class MmsvibexProvider : MainAPI() {
             "$mainUrl/wp-json/mmsvibe/v1/search-suggest",
             params = mapOf("q" to query)
         )
+        // API returns: {"label": "...", "type": "Video"|"Actor album", "url": "..."}
+        // Only "Video" items have real post URLs; "Actor album" items link to ?s= search pages
         return response.parsed<List<Map<String, Any>>>().mapNotNull { item ->
-            val title = item["title"] as? String ?: return@mapNotNull null
+            val type = item["type"] as? String ?: return@mapNotNull null
+            if (type != "Video") return@mapNotNull null
+            val title = item["label"] as? String ?: return@mapNotNull null
             val url = item["url"] as? String ?: return@mapNotNull null
-            val poster = item["thumbnail"] as? String
-            newMovieSearchResponse(title, url, TvType.NSFW) { posterUrl = poster }
+            newMovieSearchResponse(title, url, TvType.NSFW)
         }
     }
 
@@ -108,13 +111,9 @@ class MmsvibexProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = selectFirst(".title")?.text()?.takeIf { it.isNotBlank() } ?: return null
-        val url = selectFirst("a")?.attr("href")?.takeIf { it.isNotBlank() } ?: return null
-        // thumbnails are lazy-loaded, so prefer the real source attributes over a placeholder src
-        val img = selectFirst("img")
-        val posterUrl = img?.let {
-            it.attr("data-src").ifBlank { it.attr("data-original").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } } }
-        }?.takeIf { it.isNotBlank() }
+        val title = selectFirst(".title")?.text() ?: return null
+        val url = selectFirst("a")?.attr("href") ?: return null
+        val posterUrl = selectFirst("img")?.attr("src")
         return newMovieSearchResponse(title, url, TvType.NSFW) { this.posterUrl = posterUrl }
     }
 }

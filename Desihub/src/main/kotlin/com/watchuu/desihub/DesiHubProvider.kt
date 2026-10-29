@@ -1,22 +1,24 @@
 package com.watchuu.desihub
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import java.net.URLDecoder
 import java.net.URLEncoder
 import org.jsoup.nodes.Element
 
 /**
- * desihub.sh - Indian adult content site (Next.js based).
+ * desihub.sh - Indian adult content site (Next.js, server-rendered).
  *
  * Built from a captured network log (CS3 Extension Builder):
- *  - listing cards    : a.transform.overflow-hidden -> title h3, poster img[src*="images.downloaddirect"]
- *  - home             : / (latest content)
- *  - explore pages    : /explore/{page} with pagination
- *  - feed             : /feed (main content feed)
- *  - search           : GET /x?q=<query>
- *  - detail           : /post/{slug} -> title h1/h2, poster og:image
- *  - streams          : direct MP4 from video.downloaddirect.xyz/uuid.mp4 (Referer: downloaddirect.xyz)
- *  - images           : WebP posters from images.downloaddirect.xyz/timestamp-id.webp
+ *  - listing cards : a.transform.overflow-hidden -> href /post/{slug}; title from img[alt]
+ *                    ("Featured image for <title>"); poster is a /_next/image?url=<encoded> proxy
+ *  - home (Latest) : / then /page/{n}
+ *  - explore       : /explore/{n}
+ *  - feed          : /feed
+ *  - search        : /x/{query}  (and /x/{query}/{n})
+ *  - detail        : /post/{slug} -> og:title / og:image, <source> mp4 in the page
+ *  - streams       : direct mp4 from video.downloaddirect.xyz/{uuid}.mp4 (Referer downloaddirect.xyz)
  */
 class DesiHubProvider : MainAPI() {
     override var mainUrl = "https://desihub.sh"
@@ -25,69 +27,62 @@ class DesiHubProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    private val imageHost = "https://images.downloaddirect.xyz"
-    private val videoHost = "https://video.downloaddirect.xyz"
-    private val referer = "https://downloaddirect.xyz/"
+    private val streamReferer = "https://downloaddirect.xyz/"
+    private val cf = CloudflareKiller()
 
-    // Home sections with path and name
     override val mainPage = mainPageOf(
         "" to "Latest",
-        "explore/1" to "Explore Page 1",
+        "explore" to "Explore",
         "feed" to "Feed",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val path = request.data.trim('/')
-        val url = when {
-            path.isEmpty() -> "$mainUrl/"
-            path.contains("explore") -> "$mainUrl/explore/${page}"
-            else -> "$mainUrl/$path"
+        val url = when (request.data) {
+            "" -> if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page"
+            "explore" -> "$mainUrl/explore/$page"
+            "feed" -> "$mainUrl/feed"
+            else -> "$mainUrl/${request.data.trim('/')}"
         }
+        val items = app.get(url, referer = "$mainUrl/", interceptor = cf).document
+            .select("a.transform.overflow-hidden").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
 
-        val doc = app.get(url).document
-        val items = doc.select("a.transform.overflow-hidden")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
-
-        // Check for next page by looking for pagination indicators
-        val hasNext = items.isNotEmpty() && page < 50 // reasonable pagination limit
-
+        // /feed isn't paged; Latest and Explore keep loading the next page
+        val hasNext = items.isNotEmpty() && request.data != "feed"
         return newHomePageResponse(request.name, items, hasNext = hasNext)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query.trim(), "UTF-8")
-        val url = "$mainUrl/x?q=$q"
-        val doc = app.get(url).document
-
-        return doc.select("a.transform.overflow-hidden")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
+        val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
+        val out = LinkedHashMap<String, SearchResponse>()
+        for (p in 1..3) {
+            val url = if (p == 1) "$mainUrl/x/$q" else "$mainUrl/x/$q/$p"
+            val found = runCatching {
+                app.get(url, referer = "$mainUrl/", interceptor = cf).document
+                    .select("a.transform.overflow-hidden").mapNotNull { it.toSearchResult() }
+            }.getOrNull().orEmpty()
+            val fresh = found.filter { out[it.url] == null }
+            if (fresh.isEmpty()) break
+            fresh.forEach { out.putIfAbsent(it.url, it) }
+        }
+        return out.values.toList()
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
-
-        // Extract title
-        val title = (doc.selectFirst("h1")?.text()
+        val doc = app.get(url, referer = "$mainUrl/", interceptor = cf).document
+        val title = (doc.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: doc.selectFirst("h1")?.text()
             ?: doc.selectFirst("h2")?.text()
-            ?: doc.selectFirst("meta[name=og:title]")?.attr("content")
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
-            ?: doc.selectFirst("title")?.text()
-            ?: "Video").trim()
-
-        // Extract poster/cover image
-        val poster = doc.selectFirst("img[src*=\"$imageHost\"]")?.attr("src")
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("meta[name=og:image]")?.attr("content")
-
-        // Extract description/plot
+            ?: doc.title().substringBefore(" - ")).trim().ifBlank { "Video" }
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+            ?: realImage(doc.selectFirst("img[alt]")?.attr("src"))
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
             ?: doc.selectFirst("meta[name=description]")?.attr("content")
+        val tags = doc.select("a[href*=/category/]").map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = plot
+            this.tags = tags
         }
     }
 
@@ -97,63 +92,42 @@ class DesiHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = app.get(data, referer = mainUrl).text
-
-        // Extract all video streams from the HTML
-        val videoRegex = Regex("""https?://video\.downloaddirect\.xyz/([a-f0-9\-]+\.mp4)""", RegexOption.IGNORE_CASE)
-        val videoMatches = videoRegex.findAll(html)
-
-        var foundStreams = false
-
-        videoMatches.forEach { match ->
-            val fullUrl = match.value
-            val filename = match.groupValues[1]
-
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = fullUrl,
-                    referer = referer,
-                    quality = 720, // Default quality - adjust based on available info
-                    type = ExtractorLinkType.VIDEO
+        val html = app.get(data, referer = "$mainUrl/", interceptor = cf).text
+        var found = false
+        Regex("""https?://video\.downloaddirect\.xyz/[a-z0-9\-]+\.mp4""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.value }.distinct().forEach { link ->
+                callback.invoke(
+                    newExtractorLink(name, name, link, ExtractorLinkType.VIDEO) {
+                        this.referer = streamReferer
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
-            )
-            foundStreams = true
-        }
-
-        return foundStreams
+                found = true
+            }
+        return found
     }
 
-    /**
-     * Convert a listing card element to a SearchResponse
-     */
-    private fun Element.toSearchResult(): SearchResponse? {
-        val href = attr("href")
-            .takeIf { it.startsWith("/post/") || it.contains("/post/") }
-            ?: return null
-
-        val url = fixUrl(href)
-
-        // Extract title from h3 tag
-        val title = selectFirst("h3")?.text()?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: href.substringAfterLast("/").replace("-", " ").trim()
-                .takeIf { it.isNotBlank() }
-            ?: return null
-
-        // Extract poster image - prefer images.downloaddirect.xyz
-        val posterUrl = selectFirst("img[src*=\"$imageHost\"]")?.attr("src")
-            ?: selectFirst("img[src*=\"images.downloaddirect\"]")?.attr("src")
-            ?: selectFirst("img")?.attr("src")
-            ?: selectFirst("img")?.attr("data-src")
-
-        return newMovieSearchResponse(
-            title = title,
-            url = url,
-            type = TvType.NSFW
-        ) {
-            this.posterUrl = posterUrl
+    /** A card's image is a Next.js proxy: /_next/image?url=<encoded real url>&w=..&q=.. */
+    private fun realImage(src: String?): String? {
+        if (src.isNullOrBlank()) return null
+        if (src.contains("/_next/image")) {
+            Regex("""[?&]url=([^&]+)""").find(src)?.groupValues?.get(1)?.let { enc ->
+                runCatching { URLDecoder.decode(enc, "UTF-8") }.getOrNull()?.takeIf { it.startsWith("http") }?.let { return it }
+            }
         }
+        return fixUrlNull(src)
+    }
+
+    private fun Element.toSearchResult(): SearchResponse? {
+        val href = attr("href").takeIf { it.contains("/post/") } ?: return null
+        val url = fixUrl(href)
+        // the featured <img> carries alt="Featured image for <title>" and the proxied poster src
+        val featured = select("img").firstOrNull { it.attr("alt").isNotBlank() } ?: selectFirst("img")
+        val title = featured?.attr("alt")?.trim().orEmpty()
+            .removePrefix("Featured image for").trim()
+            .ifBlank { href.substringAfterLast("/").substringBeforeLast("-").replace("-", " ").trim() }
+            .ifBlank { href.substringAfterLast("/").replace("-", " ") }
+        val poster = realImage(featured?.attr("src"))
+        return newMovieSearchResponse(title, url, TvType.NSFW) { this.posterUrl = poster }
     }
 }

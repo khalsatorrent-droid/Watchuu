@@ -35,19 +35,21 @@ class MmsvibexProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val response = app.get(
-            "$mainUrl/wp-json/mmsvibe/v1/search-suggest",
-            params = mapOf("q" to query)
-        )
-        // API returns: {"label": "...", "type": "Video"|"Actor album", "url": "..."}
-        // Only "Video" items have real post URLs; "Actor album" items link to ?s= search pages
-        return response.parsed<List<Map<String, Any>>>().mapNotNull { item ->
-            val type = item["type"] as? String ?: return@mapNotNull null
-            if (type != "Video") return@mapNotNull null
-            val title = item["label"] as? String ?: return@mapNotNull null
-            val url = item["url"] as? String ?: return@mapNotNull null
-            newMovieSearchResponse(title, url, TvType.NSFW)
+        // Scrape paginated HTML search — site uses /?s=query&paged=N
+        val results = mutableListOf<SearchResponse>()
+        var page = 1
+        while (true) {
+            val document = app.get(
+                mainUrl,
+                params = mapOf("s" to query, "paged" to page.toString())
+            ).document
+            val items = document.select("article.thumb-block.video-preview-item").mapNotNull { it.toSearchResult() }
+            results.addAll(items)
+            // Stop when no more pages or no results
+            if (items.isEmpty() || document.selectFirst("a.next.page-numbers") == null) break
+            page++
         }
+        return results
     }
 
     override suspend fun load(url: String): LoadResponse {

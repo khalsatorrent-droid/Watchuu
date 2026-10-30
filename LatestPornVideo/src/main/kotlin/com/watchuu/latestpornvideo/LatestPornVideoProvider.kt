@@ -1,7 +1,6 @@
 package com.watchuu.latestpornvideo
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
 import org.jsoup.Jsoup
@@ -40,25 +39,9 @@ class LatestPornVideoProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.NSFW)
     override val vpnStatus = VPNStatus.MightBeNeeded
 
-    private val cf by lazy { CloudflareKiller() }
     private val ua =
         "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
-
-    //
-    // The capture shows Cloudflare answering plain OkHttp with a 503 bot challenge on the detail
-    // pages (/1188551/ is challenged, the same URL is 200 for the browser), while listings are
-    // served directly. Cloudflare scores the whole header set, so send the full browser one.
-    private val headers = mapOf(
-        "User-Agent" to ua,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "Upgrade-Insecure-Requests" to "1",
-        "Sec-Fetch-Dest" to "document",
-        "Sec-Fetch-Mode" to "navigate",
-        "Sec-Fetch-Site" to "same-origin",
-        "Sec-Fetch-User" to "?1"
-    )
 
     // Home sections observed in the capture.
     override val mainPage = mainPageOf(
@@ -70,34 +53,14 @@ class LatestPornVideoProvider : MainAPI() {
 
     // ── Transport ──────────────────────────────────────────────────────────────
 
-    /** Plain request first, CloudflareKiller only when Cloudflare answers with a challenge. */
-    private suspend fun fetchHtml(url: String, referer: String = "$mainUrl/"): String? {
-        val plain = runCatching {
-            app.get(url, headers = headers, referer = referer).text
-        }.getOrNull()
-        if (!looksBroken(plain)) return plain
-
-        val solved = runCatching {
-            app.get(url, headers = headers, referer = referer, interceptor = cf).text
-        }.getOrNull()
-        if (!looksBroken(solved)) return solved
-
-        // Still a challenge: hand the caller the real page if there was one, otherwise null.
-        // Returning the challenge HTML used to make the parser see a page with no cards and no
-        // iframes, which reads as "search broken / videos do not play" instead of a clear failure.
-        return if (!looksBroken(plain)) plain else null
-    }
-
-    private fun looksBroken(body: String?): Boolean {
-        if (body == null || body.length < 600) return true
-        val head = body.take(6000)
-        return head.contains("Just a moment", ignoreCase = true) ||
-            head.contains("challenge-platform") ||
-            head.contains("cf-browser-verification") ||
-            head.contains("cf_chl_opt") ||
-            head.contains("Attention Required", ignoreCase = true) ||
-            !head.contains("<html", ignoreCase = true)
-    }
+    /**
+     * All page fetching goes through LatestPornVideoBrowser: plain HTTP with the cookies the
+     * WebView has earned, then CloudstreamKiller, then the WebView's own DOM. OkHttp alone gets a
+     * Cloudflare challenge on the detail pages, and without the detail page there are no iframes
+     * to resolve.
+     */
+    private suspend fun fetchHtml(url: String, referer: String = "$mainUrl/"): String? =
+        LatestPornVideoBrowser.html(url, referer)
 
     // ── Main page / category listings ──────────────────────────────────────────
 

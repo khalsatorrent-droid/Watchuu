@@ -435,5 +435,4 @@ object EightKPornerBrowser {
         }
     }
 
-    private fun home() = EightKPornerSettings.siteUrl + "/"
 }

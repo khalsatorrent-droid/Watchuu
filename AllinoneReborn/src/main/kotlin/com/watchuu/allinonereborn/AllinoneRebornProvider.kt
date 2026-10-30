@@ -302,7 +302,7 @@ class FancodeProvider : MainAPI() {
 // ──────────────────────────────────────────────
 //  Shared stream invocation logic
 // ──────────────────────────────────────────────
-fun invokeStream(
+suspend fun invokeStream(
     ld: LoadData,
     sourceName: String,
     callback: (ExtractorLink) -> Unit

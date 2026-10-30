@@ -7,9 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newDrmExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import java.util.UUID
 
 // ──────────────────────────────────────────────
 //  Data models – JioTV (jjtvxweb)
@@ -313,20 +311,16 @@ suspend fun invokeStream(
     val hasDrm = ld.keyId.isNotBlank() && ld.key.isNotBlank()
 
     if (isDash && hasDrm) {
-        // ClearKey DASH stream
+        // ClearKey DASH stream — pass key info in headers for player-level DRM handling
         callback.invoke(
-            newDrmExtractorLink(
-                source  = sourceName,
-                name    = ld.title,
-                url     = ld.url,
-                type    = INFER_TYPE,
-                uuid    = UUID.randomUUID()
-            ) {
-                quality  = Qualities.Unknown.value
-                kid      = ld.keyId.trim()
-                key      = ld.key.trim()
-                referer  = ld.referer
-                headers  = mapOf("User-Agent" to ld.userAgent)
+            newExtractorLink(sourceName, ld.title, ld.url, ExtractorLinkType.DASH) {
+                quality = Qualities.Unknown.value
+                referer = ld.referer
+                headers = mapOf(
+                    "User-Agent" to ld.userAgent,
+                    "clearkey-kid" to ld.keyId.trim(),
+                    "clearkey-key" to ld.key.trim()
+                )
             }
         )
     } else if (ld.url.contains(".m3u8", ignoreCase = true) ||
@@ -334,12 +328,7 @@ suspend fun invokeStream(
                ld.url.contains("hls")) {
         // HLS / M3U8 stream
         callback.invoke(
-            newExtractorLink(
-                source  = sourceName,
-                name    = ld.title,
-                url     = ld.url,
-                type    = ExtractorLinkType.M3U8
-            ) {
+            newExtractorLink(sourceName, ld.title, ld.url, ExtractorLinkType.M3U8) {
                 quality = Qualities.Unknown.value
                 referer = ld.referer
                 headers = mapOf("User-Agent" to ld.userAgent)
@@ -348,12 +337,7 @@ suspend fun invokeStream(
     } else {
         // Generic / inferred type (plain DASH without keys, etc.)
         callback.invoke(
-            newExtractorLink(
-                source  = sourceName,
-                name    = ld.title,
-                url     = ld.url,
-                type    = INFER_TYPE
-            ) {
+            newExtractorLink(sourceName, ld.title, ld.url, INFER_TYPE) {
                 quality = Qualities.Unknown.value
                 referer = ld.referer
                 headers = mapOf("User-Agent" to ld.userAgent)

@@ -116,14 +116,10 @@ class BeegProvider : MainAPI() {
 
         if (hlsMatch != null) {
             callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = "$name HLS",
-                    url = hlsMatch.groupValues[1],
-                    referer = embedUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.M3U8
-                )
+                newExtractorLink(name, "$name HLS", hlsMatch.groupValues[1], ExtractorLinkType.M3U8) {
+                    this.referer = embedUrl
+                    this.quality = Qualities.Unknown.value
+                }
             )
             return true
         }
@@ -132,14 +128,10 @@ class BeegProvider : MainAPI() {
         val previewUrl = meta?.preview_url
         if (!previewUrl.isNullOrBlank()) {
             callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = "$name Preview",
-                    url = previewUrl,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.VIDEO
-                )
+                newExtractorLink(name, "$name Preview", previewUrl, ExtractorLinkType.VIDEO) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.Unknown.value
+                }
             )
             return true
         }

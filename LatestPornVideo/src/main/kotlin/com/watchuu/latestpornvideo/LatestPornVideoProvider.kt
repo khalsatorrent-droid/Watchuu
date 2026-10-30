@@ -45,10 +45,19 @@ class LatestPornVideoProvider : MainAPI() {
         "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
 
+    //
+    // The capture shows Cloudflare answering plain OkHttp with a 503 bot challenge on the detail
+    // pages (/1188551/ is challenged, the same URL is 200 for the browser), while listings are
+    // served directly. Cloudflare scores the whole header set, so send the full browser one.
     private val headers = mapOf(
         "User-Agent" to ua,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9"
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests" to "1",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "same-origin",
+        "Sec-Fetch-User" to "?1"
     )
 
     // Home sections observed in the capture.
@@ -71,11 +80,12 @@ class LatestPornVideoProvider : MainAPI() {
         val solved = runCatching {
             app.get(url, headers = headers, referer = referer, interceptor = cf).text
         }.getOrNull()
-        return when {
-            !looksBroken(solved) -> solved
-            solved != null -> solved          // best effort, let the parser try
-            else -> plain
-        }
+        if (!looksBroken(solved)) return solved
+
+        // Still a challenge: hand the caller the real page if there was one, otherwise null.
+        // Returning the challenge HTML used to make the parser see a page with no cards and no
+        // iframes, which reads as "search broken / videos do not play" instead of a clear failure.
+        return if (!looksBroken(plain)) plain else null
     }
 
     private fun looksBroken(body: String?): Boolean {
@@ -189,7 +199,11 @@ class LatestPornVideoProvider : MainAPI() {
         for (embed in iframes) {
             if (isAdHost(embed)) continue
 
-            val playlists = resolveEmbed(embed, data)
+            // The site alternates between luluvdo.com and luluvido.com for the same 12-char code;
+            // if one host is down or challenged, try the same code on the other before giving up.
+            val playlists = resolveEmbed(embed).ifEmpty {
+                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
+            }
             if (playlists.isNotEmpty()) {
                 val referer = originOf(embed)
                 playlists.forEachIndexed { index, url ->
@@ -246,16 +260,28 @@ class LatestPornVideoProvider : MainAPI() {
         return found
     }
 
+    /** luluvdo.com/e/<code> -> luluvido.com/e/<code> and back. */
+    private fun mirrorEmbed(embedUrl: String): String? {
+        val code = Regex("/e/([A-Za-z0-9]+)").find(embedUrl)?.groupValues?.get(1) ?: return null
+        val other = when {
+            embedUrl.contains("luluvdo.com") -> "https://luluvido.com/e/$code"
+            embedUrl.contains("luluvido.com") -> "https://luluvdo.com/e/$code"
+            else -> return null
+        }
+        return other
+    }
+
     /**
      * Resolve an embed page to playlist URLs. The player config is packed with the classic
      * `eval(function(p,a,c,k,e,d){…})` packer, so unpack it before looking for the sources.
      */
-    private suspend fun resolveEmbed(embedUrl: String, pageRef: String): List<String> {
-        val html = fetchHtml(embedUrl, pageRef) ?: return emptyList()
+    private suspend fun resolveEmbed(embedUrl: String): List<String> {
+        // The capture fetches the embed with the site root as referer, not the detail page.
+        val html = fetchHtml(embedUrl, "$mainUrl/") ?: return emptyList()
         val js = unpackJs(html)
         val out = LinkedHashSet<String>()
 
-        // luluvido style: sources:[{file:"https://…/master.m3u8?t=…"}]
+        // luluvido / luluvdo style: sources:[{file:"https://…/master.m3u8?t=…"}]
         Regex(
             """sources\s*:\s*\[[^]]*?file\s*:\s*["'](https?://[^"']+)["']""",
             RegexOption.DOT_MATCHES_ALL

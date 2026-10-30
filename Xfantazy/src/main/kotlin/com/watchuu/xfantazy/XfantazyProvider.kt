@@ -1,4 +1,4 @@
-package com.xfantazy
+package com.watchuu.xfantazy
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller

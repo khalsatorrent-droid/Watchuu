@@ -51,10 +51,6 @@ class XfantazyProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // Home sections are fetched one by one with a small gap; the origin 503s when hit in parallel.
-    override var sequentialMainPage = true
-    override var sequentialMainPageDelay = 300L
-
     private val apiUrl = "https://api.xfantazy.com"
     private val thumbBase = "https://s.xfantazy.com/thumbnail"
 

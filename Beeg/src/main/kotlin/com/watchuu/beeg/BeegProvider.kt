@@ -95,11 +95,16 @@ class BeegProvider : MainAPI() {
 
     // ── Search ───────────────────────────────────────────────────────────────
 
-    override suspend fun search(query: String): List<SearchResponse> = searchPage(query, 1)
-
-    override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val items = searchPage(query, page)
-        return newSearchResponseList(items, hasNext = items.isNotEmpty())
+    /**
+     * Only the long-standing search(query) API is used: the paginated overload returns
+     * SearchResponseList, a type missing from older Cloudstream builds, and a provider that
+     * declares it cannot be loaded there at all. Two pages are merged instead.
+     */
+    override suspend fun search(query: String): List<SearchResponse> {
+        val first = searchPage(query, 1)
+        if (first.isEmpty()) return first
+        val second = runCatching { searchPage(query, 2) }.getOrNull().orEmpty()
+        return (first + second).distinctBy { it.url }
     }
 
     private suspend fun searchPage(query: String, page: Int): List<SearchResponse> {

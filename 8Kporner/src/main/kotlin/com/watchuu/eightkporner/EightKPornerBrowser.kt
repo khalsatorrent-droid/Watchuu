@@ -191,6 +191,25 @@ object EightKPornerBrowser {
         wv.loadUrl(home(), mapOf("Referer" to home()))
     }
 
+    /**
+     * The 18+ popup is rendered by the site's own JS, which can land after onPageFinished, so a
+     * single click can miss it. Keep poking it for a few seconds; CONSENT_JS is idempotent.
+     */
+    private fun acceptConsent(wv: WebView?) {
+        if (wv == null) return
+        var tries = 0
+        val poke = object : Runnable {
+            override fun run() {
+                try {
+                    wv.evaluateJavascript(CONSENT_JS, null)
+                } catch (_: Throwable) {
+                }
+                if (++tries < 10) main.postDelayed(this, 500L)
+            }
+        }
+        main.postDelayed(poke, 300L)
+    }
+
     // ------------------------------------------------------------------ hidden browser
 
     private fun createHidden(ctx: Context): WebView {
@@ -202,8 +221,7 @@ object EightKPornerBrowser {
         wv.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                // Accept the 18+ popup as soon as the page is there.
-                view?.evaluateJavascript(CONSENT_JS, null)
+                acceptConsent(view)
             }
         }
         loadSite(wv)
@@ -286,7 +304,16 @@ object EightKPornerBrowser {
         val result = solveLock.withLock {
             solving?.let { return@withLock it.await() }
             if (System.currentTimeMillis() - lastSolvedAt < 15_000L) return@withLock true
-            val act = activity ?: EightKPornerSettings.currentActivity() ?: return@withLock false
+            // CommonActivity.activity is null until the host activity is attached; retry briefly
+            // instead of failing straight away, which used to end as "Cloudflare not passed".
+            var act = activity ?: EightKPornerSettings.currentActivity()
+            var waited = 0
+            while (act == null && waited < 6_000) {
+                delay(500L)
+                waited += 500
+                act = EightKPornerSettings.currentActivity()
+            }
+            if (act == null) return@withLock false
             val d = CompletableDeferred<Boolean>()
             solving = d
             withContext(Dispatchers.Main) { openSolver(act, d) }
@@ -342,7 +369,7 @@ object EightKPornerBrowser {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                view?.evaluateJavascript(CONSENT_JS, null)
+                acceptConsent(view)
             }
         }
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -407,7 +434,13 @@ object EightKPornerBrowser {
         when (mode) {
             EightKPornerSettings.Mode.COOKIE -> {}
             EightKPornerSettings.Mode.CLOUDSTREAM -> viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
-            EightKPornerSettings.Mode.AUTO, EightKPornerSettings.Mode.HIDDEN ->
+            // Auto: Cloudstream's own killer is purpose-built for the JS challenge and is much
+            // faster than a hidden browser, so try it first and keep the WebView as the fallback.
+            EightKPornerSettings.Mode.AUTO -> {
+                viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
+                viaHidden(url, trace)?.let { return done("hidden browser", it) }
+            }
+            EightKPornerSettings.Mode.HIDDEN ->
                 viaHidden(url, trace)?.let { return done("hidden browser", it) }
             EightKPornerSettings.Mode.SOLVER -> {}
         }

@@ -52,7 +52,13 @@ class FamilyPornHDProvider : MainAPI() {
         val doc = Jsoup.parse(fetch(url))
         val title = (doc.selectFirst("h1.entry-title")?.text() ?: doc.selectFirst("h1")?.text()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content") ?: "Video").trim()
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+            ?: doc.selectFirst("meta[name=og:image]")?.attr("content")?.ifBlank { null }
+            ?: doc.selectFirst(".entry-content img, article img, .g1-featured img")?.let { img ->
+                listOf("data-src", "data-original", "src").firstNotNullOfOrNull { attr ->
+                    img.attr(attr).trim().takeIf { it.isNotEmpty() }
+                }
+            }?.let { resolveImage(it) }
         val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
             ?: doc.selectFirst("meta[name=description]")?.attr("content")
             ?: doc.selectFirst(".entry-content p")?.text()
@@ -151,23 +157,65 @@ class FamilyPornHDProvider : MainAPI() {
     }
 
     /**
-     * The grid thumbnail is the card's only wp-content/uploads image (bimber lazy-loads it, so it
-     * can sit in src, data-src, srcset or a style, and the url may be host-relative). Scan the whole
-     * card, accept absolute OR relative uploads urls, skip the site logo/favicon, and take the largest.
+     * Posters.
+     *
+     * The old version only accepted urls containing "/wp-content/uploads/", which fails as soon as
+     * the theme lazy-loads through a CDN, an image proxy or a differently named folder — the card
+     * then renders with no artwork. This looks at the real image attributes first (data-src /
+     * data-srcset / srcset / src, plus inline background-image), falls back to scanning the card,
+     * accepts absolute, protocol-relative and host-relative urls, and picks the largest candidate.
      */
-    private val uploadImgRe =
-        Regex("""(?:https?://[^\s"'\\<>()]+?)?/wp-content/uploads/[^\s"'\\<>()]+?\.(?:jpe?g|png|webp)""", RegexOption.IGNORE_CASE)
-    private val sizeRe = Regex("""-(\d+)x(\d+)\.(?:jpe?g|png|webp)""", RegexOption.IGNORE_CASE)
+    private val imgUrlRe = Regex(
+        """(?:(?:https?:)?//[^\s"',<>()\\]+?\.(?:jpe?g|png|webp|gif|avif)(?:\?[^\s"',<>()\\]*)?|/wp-content/[^\s"',<>()\\]+?\.(?:jpe?g|png|webp|gif|avif)(?:\?[^\s"',<>()\\]*)?)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val sizeRe = Regex("""-(\d+)x(\d+)\.(?:jpe?g|png|webp|gif|avif)""", RegexOption.IGNORE_CASE)
+    private val junkImageRe = Regex(
+        """favicon|cropped-|/logo|light-normal|avatar|spinner|placeholder|gravatar|/emoji/|blank\.|pixel""",
+        RegexOption.IGNORE_CASE
+    )
 
     private fun pickImage(card: Element): String? {
-        val urls = uploadImgRe.findAll(card.outerHtml()).map { it.value }.distinct()
-            .filter { u -> !Regex("""favicon|cropped-|/logo|light-normal""", RegexOption.IGNORE_CASE).containsMatchIn(u) }
-            .toList()
-        if (urls.isEmpty()) return null
-        // prefer the largest sized thumbnail; an unsized url is the full-size original
-        val best = urls.maxByOrNull { u ->
-            sizeRe.find(u)?.let { it.groupValues[1].toInt() * it.groupValues[2].toInt() } ?: Int.MAX_VALUE
+        val raw = mutableListOf<String>()
+
+        card.select("img").forEach { img ->
+            for (attr in listOf("data-src", "data-original", "data-lazy-src", "data-srcset", "srcset", "src")) {
+                val value = img.attr(attr).trim()
+                if (value.isNotEmpty()) raw += imgUrlRe.findAll(value).map { it.value }
+            }
+            val style = img.attr("style")
+            if (style.isNotEmpty()) raw += imgUrlRe.findAll(style).map { it.value }
         }
-        return best?.let { fixUrl(it) } // resolve host-relative /wp-content/uploads/... urls
+        card.select("[style*=background]").forEach { el ->
+            raw += imgUrlRe.findAll(el.attr("style")).map { it.value }
+        }
+        // Last resort: anything image-shaped anywhere in the card markup.
+        if (raw.isEmpty()) raw += imgUrlRe.findAll(card.outerHtml()).map { it.value }
+
+        return raw.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !junkImageRe.containsMatchIn(it) }
+            .map { resolveImage(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .maxByOrNull { imageScore(it) }
+    }
+
+    private fun resolveImage(url: String): String {
+        val u = url.replace("\\/", "/")
+        return when {
+            u.startsWith("//") -> "https:$u"
+            u.startsWith("http") -> u
+            u.startsWith("/") -> "$mainUrl$u"
+            else -> fixUrl(u)
+        }
+    }
+
+    /** A sized thumbnail wins by area; an unsized url is usually the full-size original. */
+    private fun imageScore(url: String): Int {
+        val m = sizeRe.find(url) ?: return 1_000_000
+        val w = m.groupValues[1].toIntOrNull() ?: 0
+        val h = m.groupValues[2].toIntOrNull() ?: 0
+        return w * h
     }
 }

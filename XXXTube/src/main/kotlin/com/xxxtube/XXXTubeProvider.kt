@@ -25,12 +25,13 @@ class XXXTubeProvider : MainAPI() {
         "Cookie" to "kt_tcookie=1; kt_is_visited=1"
     )
 
+    // No categories on the home page — the site's category / model / album cards are not
+    // playable videos, so they are kept out of every list (see toSearchResult).
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Featured & Top Videos",
         "$mainUrl/latest-updates" to "Latest Updates",
         "$mainUrl/top-rated" to "Top Rated",
-        "$mainUrl/most-popular" to "Most Popular",
-        "$mainUrl/categories" to "Categories"
+        "$mainUrl/most-popular" to "Most Popular"
     )
 
     private suspend fun requestDoc(url: String, referer: String = "$mainUrl/"): Document {
@@ -70,13 +71,15 @@ class XXXTubeProvider : MainAPI() {
             document.select("div.section").forEach { section ->
                 val sectionTitle = section.selectFirst("div.heading .title, h1, h2")?.text()?.trim()
                     ?: return@forEach
+                // Drop the category rows entirely; anything left with no playable card is skipped below.
+                if (sectionTitle.contains("categor", ignoreCase = true)) return@forEach
                 val cards = section.select("div.thumb-inner").mapNotNull { it.toSearchResult() }
                 if (cards.isNotEmpty()) {
                     homeSections.add(
                         HomePageList(
                             name = sectionTitle,
                             list = cards,
-                            isHorizontalImages = !sectionTitle.contains("Categories", ignoreCase = true)
+                            isHorizontalImages = true
                         )
                     )
                 }
@@ -111,9 +114,9 @@ class XXXTubeProvider : MainAPI() {
         if (rawHref.isEmpty() || rawHref.startsWith("#") || rawHref.startsWith("javascript")) return null
         val href = fixUrl(rawHref)
 
-        val isVideo = href.contains("/videos/")
-        val isCategory = href.contains("/categories/")
-        if (!isVideo && !isCategory) return null
+        // Videos only. Category / model / album cards are not playable, so they never become a
+        // result — this is what keeps categories off the home page and out of search.
+        if (!href.contains("/videos/")) return null
 
         val imgEl = this.selectFirst("div.img img, img")
         val title = (
@@ -129,35 +132,37 @@ class XXXTubeProvider : MainAPI() {
             if (rawImg.isNotBlank() && !rawImg.startsWith("data:")) fixUrlNull(rawImg) else null
         }
 
-        return if (isCategory) {
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                this.posterUrl = posterUrl
-            }
-        } else {
-            newMovieSearchResponse(title, href, TvType.NSFW) {
-                this.posterUrl = posterUrl
-            }
+        return newMovieSearchResponse(title, href, TvType.NSFW) {
+            this.posterUrl = posterUrl
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(query: String): List<SearchResponse> = searchPage(query, 1)
+
+    /**
+     * Paginated search. The site pages as /search/{query}/ , /search/{query}/2/ , /search/{query}/3/ …
+     * (the capture has pages 1, 2 and 4). We keep going until a page comes back empty, so no
+     * dependency on the pagination markup.
+     */
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
+        val items = searchPage(query, page)
+        return newSearchResponseList(items, hasNext = items.isNotEmpty())
+    }
+
+    private suspend fun searchPage(query: String, page: Int): List<SearchResponse> {
         val encodedQuery = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        val results = mutableListOf<SearchResponse>()
+        if (encodedQuery.isBlank()) return emptyList()
 
-        for (page in 1..2) {
-            val searchUrl = if (page == 1) {
-                "$mainUrl/search/$encodedQuery/"
-            } else {
-                "$mainUrl/search/$encodedQuery/$page/"
-            }
-            val document = runCatching { requestDoc(searchUrl) }.getOrNull() ?: break
-            val pageItems = document.select("div.item.thumb div.thumb-inner, div.thumb-inner")
-                .mapNotNull { it.toSearchResult() }
-            if (pageItems.isEmpty()) break
-            results.addAll(pageItems)
+        val searchUrl = if (page <= 1) {
+            "$mainUrl/search/$encodedQuery/"
+        } else {
+            "$mainUrl/search/$encodedQuery/$page/"
         }
+        val document = runCatching { requestDoc(searchUrl) }.getOrNull() ?: return emptyList()
 
-        return results.distinctBy { it.url }
+        return document.select("div.item.thumb div.thumb-inner, div.thumb-inner")
+            .mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {

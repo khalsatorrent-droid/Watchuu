@@ -1,8 +1,8 @@
-version = 1
+version = 2
 
 cloudstream {
     language = "en"
-    description = "Latest free porn videos from latestpornvideo.com — streaming via luluvido / hanerix embeds"
+    description = "Latest free videos from latestpornvideo.com — paginated search, streaming via luluvido / hanerix"
     authors = listOf("khalsatorrent-droid")
 
     status = 1

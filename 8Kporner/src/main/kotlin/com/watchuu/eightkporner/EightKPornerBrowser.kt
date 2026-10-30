@@ -45,6 +45,36 @@ object EightKPornerBrowser {
     private const val FALLBACK_UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
+    /**
+     * 8kporner gates the content behind an "18+" consent popup (`div#pop_up_18` with a
+     * `button#pop_up_18_yes`), and remembers the answer in the `pop_up_18=yes` cookie — it is in
+     * 93 of the captured request Cookie headers, right after the user clicked Yes.
+     * `adb_user` / `ads_pageview` / `pageViews` / `isfadshow` / `mode` are the other cookies the
+     * site sets while walking through that popup; sending them means the wall never appears.
+     */
+    private val consentCookies = linkedMapOf(
+        "pop_up_18" to "yes",
+        "adb_user" to "true",
+        "ads_pageview" to "1",
+        "pageViews" to "1",
+        "isfadshow" to "1",
+        "mode" to "night"
+    )
+
+    private val consentCookieString: String
+        get() = consentCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
+    /** Clicks "Yes" on the 18+ popup if it is on screen, and hides it either way. */
+    private const val CONSENT_JS =
+        "(function(){try{" +
+            "var b=document.querySelector('#pop_up_18_yes,button[submit]#pop_up_18_yes,div#pop_up_18 button');" +
+            "if(b){try{b.click()}catch(e){}}" +
+            "var p=document.getElementById('pop_up_18');if(p){try{p.style.display='none'}catch(e){};try{p.remove()}catch(e){}}" +
+            "document.cookie='pop_up_18=yes;path=/';" +
+            "document.cookie='adb_user=true;path=/';" +
+            "document.cookie='ads_pageview=1;path=/';" +
+            "}catch(e){}return true})()"
+
     private var appContext: Context? = null
     private var webView: WebView? = null
     private val lock = Mutex()
@@ -90,12 +120,17 @@ object EightKPornerBrowser {
     }
 
     private fun applyManualCookie() {
-        val raw = EightKPornerSettings.manualCookie
-        if (raw.isBlank()) return
         try {
             val cm = CookieManager.getInstance()
-            raw.split(";").map { it.trim() }.filter { it.contains("=") }.forEach {
-                cm.setCookie(site(), "$it; path=/; secure")
+            // Accept the 18+ gate up front so the popup never blocks the page.
+            consentCookies.forEach { (k, v) ->
+                try { cm.setCookie(site(), "$k=$v; path=/") } catch (_: Throwable) {}
+            }
+            val raw = EightKPornerSettings.manualCookie
+            if (raw.isNotBlank()) {
+                raw.split(";").map { it.trim() }.filter { it.contains("=") }.forEach {
+                    cm.setCookie(site(), "$it; path=/; secure")
+                }
             }
             cm.flush()
         } catch (_: Throwable) {
@@ -110,7 +145,11 @@ object EightKPornerBrowser {
             null
         }
         val manual = EightKPornerSettings.manualCookie
-        return listOfNotNull(fromWv?.ifBlank { null }, manual.ifBlank { null }).joinToString("; ").ifBlank { null }
+        return listOfNotNull(
+            consentCookieString,
+            fromWv?.ifBlank { null },
+            manual.ifBlank { null }
+        ).joinToString("; ").ifBlank { null }
     }
 
     fun hasClearance(): Boolean = cookies()?.contains("cf_clearance") == true
@@ -160,7 +199,13 @@ object EightKPornerBrowser {
         configure(wv, EightKPornerSettings.lightweight)
         val dm = ctx.resources.displayMetrics
         wv.layout(0, 0, dm.widthPixels.coerceAtLeast(360), dm.heightPixels.coerceAtLeast(640))
-        wv.webViewClient = WebViewClient()
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Accept the 18+ popup as soon as the page is there.
+                view?.evaluateJavascript(CONSENT_JS, null)
+            }
+        }
         loadSite(wv)
         return wv
     }
@@ -294,6 +339,11 @@ object EightKPornerBrowser {
         wv.webChromeClient = WebChromeClient()
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                view?.evaluateJavascript(CONSENT_JS, null)
+            }
         }
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -403,7 +453,11 @@ object EightKPornerBrowser {
     }
 
     private suspend fun viaKiller(url: String, referer: String, trace: StringBuilder): String? = try {
-        val r = app.get(url, headers = mapOf("Referer" to referer), interceptor = killer, timeout = 60L)
+        val h = HashMap<String, String>()
+        h["Referer"] = referer
+        h["User-Agent"] = userAgent()
+        cookies()?.let { h["Cookie"] = it }
+        val r = app.get(url, headers = h, interceptor = killer, timeout = 60L)
         val body = r.text
         if (r.code in 200..299 && !isChallenge(r.code, body)) body
         else { trace.append("cloudstream HTTP ").append(r.code).append("; "); null }

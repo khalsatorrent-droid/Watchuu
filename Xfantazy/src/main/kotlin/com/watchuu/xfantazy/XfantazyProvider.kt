@@ -93,11 +93,17 @@ class XfantazyProvider : MainAPI() {
 
     // ── Search (paginated) ─────────────────────────────────────────────────────
 
-    override suspend fun search(query: String): List<SearchResponse> = searchPage(query, 1)
-
-    override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val items = searchPage(query, page)
-        return newSearchResponseList(items, hasNext = items.isNotEmpty())
+    /**
+     * Deliberately uses only the long-standing `search(query)` API. The paginated overload
+     * `search(query, page)` returns `SearchResponseList`, a type that does not exist in older
+     * Cloudstream builds; a provider that declares it fails to load there, and the app reports
+     * that as an install error. So we fetch the first two result pages ourselves instead.
+     */
+    override suspend fun search(query: String): List<SearchResponse> {
+        val first = searchPage(query, 1)
+        if (first.isEmpty()) return first
+        val second = runCatching { searchPage(query, 2) }.getOrNull().orEmpty()
+        return (first + second).distinctBy { it.url }
     }
 
     private suspend fun searchPage(query: String, page: Int): List<SearchResponse> {

@@ -16,5 +16,4 @@ cloudstream {
     // Replace with your own hosted icon if desired
     iconUrl = "https://widespread-plum-gffbkraoo7-deis8y3f44.edgeone.dev/sony-liv-logo.avif"
 
-    isCrossPlatform = true
 }

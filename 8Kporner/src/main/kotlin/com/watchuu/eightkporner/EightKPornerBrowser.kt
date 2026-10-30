@@ -78,6 +78,7 @@ object EightKPornerBrowser {
     private var appContext: Context? = null
     private var webView: WebView? = null
     private val lock = Mutex()
+    private val domLock = Mutex()
     private val solveLock = Mutex()
     private val main = Handler(Looper.getMainLooper())
     private val killer by lazy { CloudflareKiller() }
@@ -283,67 +284,68 @@ object EightKPornerBrowser {
      * both produced by the site's own JS. So for document pages the WebView is not a fallback, it
      * is the only thing that can see the content.
      */
+    /**
+     * Bounded on purpose. The first version gave every step its own full timeout, so one page
+     * could take 60s (killer) + 35s (ensure) + 35s (navigation) + 20s (DOM) and the home screen
+     * just span forever. Now the whole attempt has a fixed budget, and a navigation already
+     * showing the wanted page is reused instead of reloaded.
+     */
     private suspend fun viaWebViewHtml(url: String, trace: StringBuilder): String? {
         trace.append("webview dom; ")
-        return try {
-            if (!ensure()) {
-                trace.append("webview not ready; ")
-                return null
-            }
-            val wv = webView ?: return null
-            // pageReady() would still match the page that is already loaded, so wait for this
-            // navigation to finish before trusting the DOM.
-            lastFinishedUrl = null
-            withContext(Dispatchers.Main) {
+        // The app asks for several home sections at once and they all drive this one WebView,
+        // which raced on lastFinishedUrl and never returned. One navigation at a time.
+        return domLock.withLock {
+            try {
+                if (!ensure(timeoutMs = 12_000L)) {
+                    trace.append("webview not ready; ")
+                    return@withLock null
+                }
+                val wv = webView ?: return@withLock null
+
+                val wanted = url.substringAfter(site()).ifBlank { "/" }
+                val alreadyThere = lastFinishedUrl?.contains(wanted) == true
+                if (!alreadyThere) {
+                    lastFinishedUrl = null
+                    withContext(Dispatchers.Main) {
+                        try {
+                            wv.loadUrl(url, mapOf("Referer" to home()))
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    val navDeadline = System.currentTimeMillis() + 15_000L
+                    var navigated = false
+                    while (System.currentTimeMillis() < navDeadline) {
+                        delay(350L)
+                        val finished = lastFinishedUrl
+                        if (finished != null && (finished == url || finished.contains(wanted))) {
+                            navigated = true
+                            break
+                        }
+                    }
+                    if (!navigated) {
+                        trace.append("webview nav timeout; ")
+                        return@withLock null
+                    }
+                    // Let the site's own JS build the grid before the DOM is taken.
+                    delay(700L)
+                }
+
+                val raw = evalLong(wv, "document.documentElement.outerHTML", 10_000L)
+                val html = raw?.let { decodeJsString(it) }
+                if (html.isNullOrBlank() || html.length < 500) {
+                    trace.append("webview empty; ")
+                    return@withLock null
+                }
                 try {
-                    wv.loadUrl(url, mapOf("Referer" to home()))
+                    CookieManager.getInstance().flush()
                 } catch (_: Throwable) {
                 }
+                html
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                trace.append("webview error ").append(e.javaClass.simpleName).append("; ")
+                null
             }
-            val wanted = url.substringAfter(site()).ifBlank { "/" }
-            val deadline = System.currentTimeMillis() + EightKPornerSettings.timeoutSec * 1000L
-            var navigated = false
-            while (System.currentTimeMillis() < deadline) {
-                delay(400L)
-                val finished = lastFinishedUrl
-                if (finished != null && (finished == url || finished.contains(wanted))) {
-                    navigated = true
-                    break
-                }
-            }
-            if (!navigated) {
-                trace.append("webview nav timeout; ")
-                return null
-            }
-            var ready = false
-            while (System.currentTimeMillis() < deadline) {
-                if (pageReady(wv)) {
-                    ready = true
-                    break
-                }
-                delay(600L)
-            }
-            if (!ready) {
-                trace.append("webview timeout; ")
-                return null
-            }
-            // Let the 18+ click and the grid rendering land before grabbing the DOM.
-            delay(600L)
-            val raw = evalLong(wv, "document.documentElement.outerHTML", 20_000L)
-            val html = raw?.let { decodeJsString(it) }
-            if (html.isNullOrBlank() || html.length < 500) {
-                trace.append("webview empty; ")
-                return null
-            }
-            try {
-                CookieManager.getInstance().flush()
-            } catch (_: Throwable) {
-            }
-            html
-        } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-            trace.append("webview error ").append(e.javaClass.simpleName).append("; ")
-            null
         }
     }
 
@@ -552,6 +554,11 @@ object EightKPornerBrowser {
         val body = getRaw(url, referer)
         if (consentDone) return body
 
+        // If the page already has cards there is nothing to unlock, so skip the extra round-trip.
+        if (body.contains("keep-padding") || body.contains("/watch/")) {
+            consentDone = true
+            return body
+        }
         val hash = consentHashRx.find(body)?.value ?: return body
         val accepted = runCatching {
             val h = HashMap<String, String>()
@@ -587,9 +594,10 @@ object EightKPornerBrowser {
             // page in the WebView and read the DOM, because this site only serves content to a
             // real browser (the client gets a 503 challenge on the very same URL).
             EightKPornerSettings.Mode.AUTO -> {
-                viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
+                // The WebView is tried first in Auto: CloudstreamKiller spends up to a minute on
+                // its own WebView and the capture shows it never gets this site through anyway.
                 viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }
-                viaHidden(url, trace)?.let { return done("hidden browser", it) }
+                viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
             }
             EightKPornerSettings.Mode.HIDDEN -> {
                 viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }
@@ -644,7 +652,7 @@ object EightKPornerBrowser {
         h["Referer"] = referer
         h["User-Agent"] = userAgent()
         cookies()?.let { h["Cookie"] = it }
-        val r = app.get(url, headers = h, interceptor = killer, timeout = 60L)
+        val r = app.get(url, headers = h, interceptor = killer, timeout = 20L)
         val body = r.text
         if (r.code in 200..299 && !isChallenge(r.code, body)) body
         else { trace.append("cloudstream HTTP ").append(r.code).append("; "); null }

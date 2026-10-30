@@ -1,0 +1,421 @@
+[
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Almostott.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "Almostott",
+        "internalName": "Almostott",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies, TV and anime from Almostott (almostott.aethoflix.world) - TMDB catalog, 13 embed servers incl. anime (MegaPlay, 4Animo, Vumeto)",
+        "fileSize": 53533,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=almostott.aethoflix.world&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-4f62bae33e4641a9b08fdf171463cb851dde005a19fe2a79e8410218d7f46546"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Archivebate.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "Archivebate",
+        "internalName": "Archivebate",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Archived cam shows from Archivebate (archivebate.com)",
+        "fileSize": 37166,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=archivebate.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-7b10242a385e76f3ccf133481c725a34d8bc223e47ee73d9a7fc3fa3b5bc52bb"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Beeg.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "Beeg",
+        "internalName": "Beeg",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Adult videos from beeg.porn - Latest, Trending, Best & Search",
+        "fileSize": 25713,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://beeg.porn/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-0e8c6fa321fae40149b7d39f17b05fd084dbb54d428f07bc2e9f5462cc47a2fd"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/CineLite.cs3",
+        "status": 1,
+        "version": 26,
+        "name": "CineLite",
+        "internalName": "CineLite",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies and TV shows from CineLite (cinelite.xyz) - TMDB catalog with HLS streams",
+        "fileSize": 109533,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://cinelite.xyz/cinelite-logo.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-92dde93d7e2fc9876bea1b33ddf7977af4cc5ea5759d419d5f1ca12fa49d6fee"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Desihub.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "Desihub",
+        "internalName": "Desihub",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Indian adult content from desihub.sh - Explore, Feed, Search & Direct Streams",
+        "fileSize": 14114,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://desihub.sh/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-a2ec581dc26226b6e9b37ae3e08afe7ec9784e4dc6ebd839b925f534f1c2f481"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/FamilyPornHD.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "FamilyPornHD",
+        "internalName": "FamilyPornHD",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Family-themed HD videos from familypornhd.com - latest, categories and search",
+        "fileSize": 51750,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://familypornhd.com/wp-content/uploads/2024/07/cropped-favicon-192x192.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-d228f0074d3e0cceacadb0bd671e7689d985e203e769ea350afca48e3fcb9d52"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Freeuseporn.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "Freeuseporn",
+        "internalName": "Freeuseporn",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Freeuse, mind-control and hypno porn from freeuseporn.com - latest, categories and search (direct MP4, marked by real resolution)",
+        "fileSize": 15623,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.freeuseporn.com/images/favicons/favicon-96x96.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-6a67bd79d9a049fa03c3a20077d97dfb7db8d32d41bb2a935eb02a28216dbefa"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/KiligDrama.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "KiligDrama",
+        "internalName": "KiligDrama",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Vertical short dramas from KiligDrama (kiligdrama.com) - ReelShort, DramaBox, ShortMax, GoodShort and more, free in HD",
+        "fileSize": 79580,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=kiligdrama.com&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-1828000b57d9fb6a5217f20aadb61a657600a4381976fea936df48f04e8e80a3"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/LatestPornVideo.cs3",
+        "status": 1,
+        "version": 15,
+        "name": "LatestPornVideo",
+        "internalName": "LatestPornVideo",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Videos from latestpornvideo.com - latest, categories and search",
+        "fileSize": 50057,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=latestpornvideo.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-a08d3d1c51c2c4ad48d73dd0c7750773086fff88bfa7fe962503d544ca8e3203"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Mmsvibex.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "Mmsvibex",
+        "internalName": "Mmsvibex",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies and TV series from Mmsvibex (mmsvibex.fit)",
+        "fileSize": 13095,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=mmsvibex.fit&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-66063daf616013d7400a7c3d641223dc460de8b8bc687d5cbcb4aead0a5ba877"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Monochrome.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "Monochrome",
+        "internalName": "Monochrome",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Lossless music from Monochrome (monochrome.st) - search songs, albums and artists",
+        "fileSize": 25731,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Music"
+        ],
+        "iconUrl": "https://monochrome.st/assets/appicon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-71307f9e04b61eabc6ca65c97687159b89e488d46e4ba97047b31d596edadda9"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/MovieNerds.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "MovieNerds",
+        "internalName": "MovieNerds",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies and TV shows from movienerds.site - TMDB catalogue with HLS streams and subtitles",
+        "fileSize": 28033,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://movienerds.site/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-e3b309fdfdaac7453a09a0bcd6c0544cedfa388f5666065ef24e0fa016d2cf7d"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/NartoDrama.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "NartoDrama",
+        "internalName": "NartoDrama",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Short dramas, movies and anime from Narto Drama (narto-drama.com) - DramaBox, ReelShort, ShortMax and 50+ providers",
+        "fileSize": 78498,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "iconUrl": "https://narto-drama.com/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-6a121ed1a2ade86c391ca071d6b1c3e9ea4ba29d553c902b30c1940116e5dbcd"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Pornxday.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "Pornxday",
+        "internalName": "Pornxday",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Videos from pornxday.com - latest, categories and search",
+        "fileSize": 51157,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pornxday.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-03164db4cbbf92e7308d5cd30d3c44b6763f229726ef65f44e4e4f8f813ecd3f"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/RedFlix.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "RedFlix",
+        "internalName": "RedFlix",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies, TV and anime from RedFlix (redflix.one) - TMDB catalog, 13 embed servers incl. Hindi",
+        "fileSize": 51486,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=redflix.one&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-34df83feb495f378504b6166961bc96ce09e80302ae52cd93b2e73489b4a373d"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/SuperJav.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "SuperJav",
+        "internalName": "SuperJav",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "JAV from SupJav (supjav.com) - censored, uncensored, subtitled, with multiple servers",
+        "fileSize": 20830,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=supjav.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-a6a77e0f282739ec5e955626b361bc2ddbca79ec8e3e258bfa610aa1135c9ecf"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Vedu.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "Vedu",
+        "internalName": "Vedu",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies, TV and anime (TMDB catalog) using part of the Vedu app's sources: Orbit servers (VidRock, Vidnest, VidKing, VidLink, VidUp, Videasy, 111Movies, 2Embed, Peachify, Cinezo, Vidlove, Vidsuper), Nova (Bingr) servers and anime adapters, MovieBox, Flixer, VidFast, VidSrc, NetMirror, 9Anime, AnimePahe, Dramika, plus MovieBox ShortTV and ReelShort (free episodes) short dramas. Not included: Bollywood (Pikashow), YouTube and AnimePahe's FlixCloud server",
+        "fileSize": 224762,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "AnimeMovie",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=moviesbox.net.co&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-c2410a5400908e18e7ee9428d34c563d216e7f80bbb912e1c592bbda650233d3"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/Vivarium.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "Vivarium",
+        "internalName": "Vivarium",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Movies and TV from Vivarium (vivarium.su) - TMDB catalog, streams caught behind Cloudflare in a hidden browser",
+        "fileSize": 80217,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=vivarium.su&sz=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-27b982c262037bc1dd7180ab7807cf5cbbd8e87e3df96fce03bf5a0f79f0c6e8"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/XFantazy.cs3",
+        "status": 1,
+        "version": 11,
+        "name": "XFantazy",
+        "internalName": "XFantazy",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Free HD videos from XFantazy.com - New, Trending, Most Viewed, search and streaming",
+        "fileSize": 19998,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://xfantazy.com/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-29da81b1de27ef8d4bfab79a8c541a652d166f4a17a97070937e1b9f125d2ecc"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/khalsatorrent-droid/Watchuu/builds/XXXTube.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "XXXTube",
+        "internalName": "XXXTube",
+        "authors": [
+            "khalsatorrent-droid"
+        ],
+        "description": "Watch HD videos from X-X-X.tube \u2014 Featured, Latest, Top Rated, Most Popular and paginated search",
+        "fileSize": 25916,
+        "repositoryUrl": "https://github.com/khalsatorrent-droid/Watchuu",
+        "language": "en",
+        "tvTypes": [
+            "NSFW",
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://x-x-x.tube/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-7c4766b061f616f311bf8d4ca7385a14f418bbc824b2cb2a7e6f4d668ebdefbb"
+    }
+]

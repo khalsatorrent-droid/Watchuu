@@ -396,8 +396,8 @@ object VeduSites {
             val decoded = Regex("""\b[0-9a-z]+\b""").replace(jsLiteral(m.groupValues[1])) { t ->
                 dict.getOrNull(t.value.toIntOrNull(36) ?: -1)?.takeIf { it.isNotEmpty() } ?: t.value
             }
-            val list = Regex("""jwplayer\(["']vplayer["']\)\.setup\(\{\s*sources:\[([^\]]{1,16000})]""").find(decoded)?.groupValues?.get(1) ?: continue
-            val out = Regex("""\{([^{}]+)}""").findAll(list).mapNotNull { e ->
+            val list = Regex("""jwplayer\(["']vplayer["']\)\.setup\(\{\s*sources:\[([^\]]{1,16000})\]""").find(decoded)?.groupValues?.get(1) ?: continue
+            val out = Regex("""\{([^{}]+)\}""").findAll(list).mapNotNull { e ->
                 val file = Regex("""\bfile:\s*"([^"\\]+)"""").find(e.groupValues[1])?.groupValues?.get(1) ?: return@mapNotNull null
                 val label = Regex("""\blabel:\s*"(\d{3,4})p"""").find(e.groupValues[1])?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 if (file.startsWith("https://")) file to label else null

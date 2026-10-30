@@ -140,11 +140,11 @@ class XfantazyProvider : MainAPI() {
             app.get("$apiUrl/pub/video-sources/$id", headers = apiHeaders).text
         }.getOrNull() ?: return false
 
-        val sources = Regex(""""sources"\s*:\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL)
+        val sources = Regex(""""sources"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
             .find(json)?.groupValues?.get(1) ?: return false
 
         var found = false
-        Regex("""\{[^{}]*}""").findAll(sources).forEach { obj ->
+        Regex("""\{[^{}]*\}""").findAll(sources).forEach { obj ->
             val o = obj.value
             if (blockedRx.containsMatchIn(o)) return@forEach
             val src = firstMatch(o, """"src"\s*:\s*"([^"]+)"""") ?: return@forEach
@@ -225,7 +225,7 @@ class XfantazyProvider : MainAPI() {
     private fun cards(payload: String): List<SearchResponse> {
         if (payload.isBlank()) return emptyList()
 
-        return Regex(""""thumb"\s*:\s*\{([^{}]*)}""").findAll(payload).mapNotNull { match ->
+        return Regex(""""thumb"\s*:\s*\{([^{}]*)\}""").findAll(payload).mapNotNull { match ->
             val block = match.groupValues[1]
             val id = firstMatch(block, """"id"\s*:\s*"([0-9a-f]{24})"""") ?: return@mapNotNull null
             val rawTitle = firstMatch(block, """"title"\s*:\s*"((?:[^"\\]|\\.)*)"""")
@@ -247,7 +247,7 @@ class XfantazyProvider : MainAPI() {
 
     /** `"tags":[{…},{"name":"…"}]` → the names inside that array. */
     private fun namesIn(scope: String, field: String): List<String> {
-        val array = Regex("\"$field\"\\s*:\\s*\\[(.*?)]", RegexOption.DOT_MATCHES_ALL)
+        val array = Regex("\"$field\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
             .find(scope)?.groupValues?.get(1) ?: return emptyList()
         return Regex(""""name"\s*:\s*"((?:[^"\\]|\\.)*)"""")
             .findAll(array).map { unescape(it.groupValues[1]).trim() }

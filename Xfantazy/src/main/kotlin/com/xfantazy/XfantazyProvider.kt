@@ -31,7 +31,6 @@ class XfantazyProvider : MainAPI() {
     override var name = "XFantazy"
     override var lang = "en"
     override val hasMainPage = true
-    override val hasSearch = true
     override val supportedTypes = setOf(TvType.NSFW)
 
     private val apiUrl = "https://api.xfantazy.com"

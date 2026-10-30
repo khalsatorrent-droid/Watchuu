@@ -279,7 +279,7 @@ class BeegProvider : MainAPI() {
     }
 
     /** Reads html5player.setVideoHLS / setVideoUrlHigh / setVideoUrlLow out of the player page. */
-    private fun emitPlayerSources(html: String, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun emitPlayerSources(html: String, callback: (ExtractorLink) -> Unit): Boolean {
         if (html.isBlank()) return false
         val referer = "$xvideosBase/"
 

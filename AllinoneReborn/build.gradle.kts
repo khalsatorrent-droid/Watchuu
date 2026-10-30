@@ -1,5 +1,5 @@
 // Increment this each time you publish a new version
-version = 1
+version = 2
 
 cloudstream {
     language    = "hi"

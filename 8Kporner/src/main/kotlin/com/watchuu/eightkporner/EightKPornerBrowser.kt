@@ -419,8 +419,38 @@ object EightKPornerBrowser {
 
     // ------------------------------------------------------------------ main entry
 
+    /**
+     * The 18+ gate is server side: the page calls GET /aj/main/yes_18?hash=<40 hex> and only then
+     * do the listing pages render cards. Sending pop_up_18 as a cookie is not enough, so the first
+     * successful response is used to lift the hash out of the page and the gate is accepted
+     * explicitly, after which the same URL is fetched again.
+     */
+    @Volatile private var consentDone = false
+    private val consentHashRx = Regex("[0-9a-f]{40}")
+
     /** GET an 8kporner url as text, going through Cloudflare the way the settings say. */
     suspend fun get(url: String, referer: String): String {
+        val body = getRaw(url, referer)
+        if (consentDone) return body
+
+        val hash = consentHashRx.find(body)?.value ?: return body
+        val accepted = runCatching {
+            val h = HashMap<String, String>()
+            h["User-Agent"] = userAgent()
+            h["Referer"] = referer
+            h["X-Requested-With"] = "XMLHttpRequest"
+            cookies()?.let { h["Cookie"] = it }
+            app.get("${site()}/aj/main/yes_18?hash=$hash", headers = h, timeout = 20L).code in 200..299
+        }.getOrDefault(false)
+
+        if (!accepted) return body
+        consentDone = true
+        try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+        // The body we just read was the gate page; fetch the real one now that it is accepted.
+        return runCatching { getRaw(url, referer) }.getOrElse { body }
+    }
+
+    private suspend fun getRaw(url: String, referer: String): String {
         val mode = EightKPornerSettings.mode
         val trace = StringBuilder()
         fun done(method: String, body: String): String {

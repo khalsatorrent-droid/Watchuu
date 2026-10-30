@@ -84,6 +84,7 @@ object EightKPornerBrowser {
 
     @Volatile private var lastUse = 0L
     @Volatile private var defaultUa: String? = null
+    @Volatile private var lastFinishedUrl: String? = null
 
     @Volatile
     var lastTrace = ""
@@ -221,6 +222,7 @@ object EightKPornerBrowser {
         wv.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                lastFinishedUrl = url
                 acceptConsent(view)
             }
         }
@@ -259,6 +261,123 @@ object EightKPornerBrowser {
             "!!document.querySelector('div.keep-padding,div.pt_srch_vids,h4,.ra-thumb,.container')}catch(e){return false}})()"
 
     private suspend fun pageReady(wv: WebView?): Boolean = eval(wv, READY_JS) == "true"
+
+    /** Like eval(), but a full page DOM can take longer than the 5s default to serialise. */
+    private suspend fun evalLong(wv: WebView?, js: String, timeoutMs: Long): String? =
+        withContext(Dispatchers.Main) {
+            if (wv == null) return@withContext null
+            val d = CompletableDeferred<String?>()
+            try {
+                wv.evaluateJavascript(js) { d.complete(it) }
+            } catch (_: Throwable) {
+                d.complete(null)
+            }
+            withTimeoutOrNull(timeoutMs) { d.await() }
+        }
+
+    /**
+     * Load the page in the hidden browser and hand back its rendered DOM.
+     *
+     * The capture shows the site only ever answers a real browser: / returns 503 + a Cloudflare
+     * challenge to the client and 200 to the WebView, and the 18+ gate plus the listing grid are
+     * both produced by the site's own JS. So for document pages the WebView is not a fallback, it
+     * is the only thing that can see the content.
+     */
+    private suspend fun viaWebViewHtml(url: String, trace: StringBuilder): String? {
+        trace.append("webview dom; ")
+        return try {
+            if (!ensure()) {
+                trace.append("webview not ready; ")
+                return null
+            }
+            val wv = webView ?: return null
+            // pageReady() would still match the page that is already loaded, so wait for this
+            // navigation to finish before trusting the DOM.
+            lastFinishedUrl = null
+            withContext(Dispatchers.Main) {
+                try {
+                    wv.loadUrl(url, mapOf("Referer" to home()))
+                } catch (_: Throwable) {
+                }
+            }
+            val wanted = url.substringAfter(site()).ifBlank { "/" }
+            val deadline = System.currentTimeMillis() + EightKPornerSettings.timeoutSec * 1000L
+            var navigated = false
+            while (System.currentTimeMillis() < deadline) {
+                delay(400L)
+                val finished = lastFinishedUrl
+                if (finished != null && (finished == url || finished.contains(wanted))) {
+                    navigated = true
+                    break
+                }
+            }
+            if (!navigated) {
+                trace.append("webview nav timeout; ")
+                return null
+            }
+            var ready = false
+            while (System.currentTimeMillis() < deadline) {
+                if (pageReady(wv)) {
+                    ready = true
+                    break
+                }
+                delay(600L)
+            }
+            if (!ready) {
+                trace.append("webview timeout; ")
+                return null
+            }
+            // Let the 18+ click and the grid rendering land before grabbing the DOM.
+            delay(600L)
+            val raw = evalLong(wv, "document.documentElement.outerHTML", 20_000L)
+            val html = raw?.let { decodeJsString(it) }
+            if (html.isNullOrBlank() || html.length < 500) {
+                trace.append("webview empty; ")
+                return null
+            }
+            try {
+                CookieManager.getInstance().flush()
+            } catch (_: Throwable) {
+            }
+            html
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            trace.append("webview error ").append(e.javaClass.simpleName).append("; ")
+            null
+        }
+    }
+
+    /** evaluateJavascript hands back a JSON string literal; turn it back into plain HTML. */
+    private fun decodeJsString(raw: String): String {
+        var s = raw
+        if (s.length >= 2 && s.startsWith("\"") && s.endsWith("\"")) s = s.substring(1, s.length - 1)
+        if (!s.contains('\\')) return s
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                when (val n = s[i + 1]) {
+                    'n' -> { sb.append('\n'); i += 2 }
+                    'r' -> { sb.append('\r'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    'b' -> { sb.append('\b'); i += 2 }
+                    'f' -> { sb.append('\u000C'); i += 2 }
+                    'u' -> {
+                        val hex = s.substring(i + 2, minOf(i + 6, s.length))
+                        val code = hex.toIntOrNull(16)
+                        if (code != null) sb.append(code.toChar())
+                        i += 6
+                    }
+                    else -> { sb.append(n); i += 2 }
+                }
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
 
     /** Opens (or reuses) the hidden page and waits until Cloudflare lets it through. */
     suspend fun ensure(timeoutMs: Long = EightKPornerSettings.timeoutSec * 1000L): Boolean = lock.withLock {
@@ -464,14 +583,18 @@ object EightKPornerBrowser {
         when (mode) {
             EightKPornerSettings.Mode.COOKIE -> {}
             EightKPornerSettings.Mode.CLOUDSTREAM -> viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
-            // Auto: Cloudstream's own killer is purpose-built for the JS challenge and is much
-            // faster than a hidden browser, so try it first and keep the WebView as the fallback.
+            // Auto: Cloudstream's own killer is cheap and often enough; when it is not, render the
+            // page in the WebView and read the DOM, because this site only serves content to a
+            // real browser (the client gets a 503 challenge on the very same URL).
             EightKPornerSettings.Mode.AUTO -> {
                 viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
+                viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }
                 viaHidden(url, trace)?.let { return done("hidden browser", it) }
             }
-            EightKPornerSettings.Mode.HIDDEN ->
+            EightKPornerSettings.Mode.HIDDEN -> {
+                viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }
                 viaHidden(url, trace)?.let { return done("hidden browser", it) }
+            }
             EightKPornerSettings.Mode.SOLVER -> {}
         }
 
@@ -481,6 +604,7 @@ object EightKPornerBrowser {
             trace.append("solver window; ")
             if (solveInteractive(null)) {
                 direct(url, referer, trace)?.let { return done("solver + cookie", it) }
+                viaWebViewHtml(url, trace)?.let { return done("solver + webview DOM", it) }
                 viaHidden(url, trace)?.let { return done("solver + hidden browser", it) }
             } else trace.append("not solved; ")
         }

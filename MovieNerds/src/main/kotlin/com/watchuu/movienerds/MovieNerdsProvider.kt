@@ -283,37 +283,75 @@ class MovieNerdsProvider : MainAPI() {
         if (sources.isEmpty()) return false
 
         sources.values.forEach { s ->
-            val url = s.optString("url").ifBlank { s.optString("rawUrl") }
+            val rawUrl = cleanUrl(s.optString("url").ifBlank { s.optString("rawUrl") })
+            if (!rawUrl.startsWith("http")) return@forEach
+
+            val directUrl = cleanUrl(s.optString("rawUrl"))
             val provider = s.optString("providerName").ifBlank { s.optString("name") }
             val label = s.optString("displayName").ifBlank { s.optString("name") }
             val quality = s.optString("quality")
             val language = s.optString("language")
 
-            val linkHeaders = HashMap<String, String>()
+            // The headers in the payload belong to the upstream CDN the site's server pulls from.
+            // Everything the player touches is rewritten to the proxy (master -> proxy.m3u8,
+            // variants -> proxy.m3u8, segments -> proxy.ts), so for those urls the only headers
+            // that matter are the ones the browser sent the proxy: UA, Origin, Accept.
+            val upstreamHeaders = HashMap<String, String>()
             s.optJSONObject("headers")?.let { h ->
                 for (key in h.keys()) {
                     val value = h.optString(key)
-                    if (key.isNotBlank() && value.isNotBlank()) linkHeaders[key] = value
+                    if (key.isNotBlank() && value.isNotBlank()) upstreamHeaders[key] = value
                 }
             }
+
+            fun title(suffix: String = "") = buildString {
+                append(provider.ifBlank { name })
+                if (label.isNotBlank() && !label.startsWith(provider)) append(" - ").append(label)
+                if (quality.isNotBlank()) append(" [").append(quality).append("]")
+                if (language.isNotBlank()) append(" (").append(language).append(")")
+                if (suffix.isNotBlank()) append(suffix)
+            }
+
+            val proxied = rawUrl.contains("/api/stream/proxy")
 
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name = buildString {
-                        append(provider.ifBlank { name })
-                        if (label.isNotBlank() && !label.startsWith(provider)) append(" - ").append(label)
-                        if (quality.isNotBlank()) append(" [").append(quality).append("]")
-                        if (language.isNotBlank()) append(" (").append(language).append(")")
-                    },
-                    url = url,
+                    name = title(),
+                    url = rawUrl,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = linkHeaders["Referer"] ?: "$mainUrl/"
                     this.quality = getQualityFromName(quality)
-                    this.headers = linkHeaders
+                    if (proxied) {
+                        this.referer = "$mainUrl/"
+                        this.headers = mapOf(
+                            "User-Agent" to UA,
+                            "Origin" to mainUrl,
+                            "Accept" to "*/*"
+                        )
+                    } else {
+                        this.referer = upstreamHeaders["Referer"] ?: "$mainUrl/"
+                        this.headers = upstreamHeaders
+                    }
                 }
             )
+
+            // If the proxy is what is failing, the same source usually has the real CDN url in
+            // rawUrl - offer it too, with the headers that CDN wants.
+            if (proxied && directUrl.startsWith("http") && directUrl != rawUrl) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = title(" - direct"),
+                        url = directUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = getQualityFromName(quality)
+                        this.referer = upstreamHeaders["Referer"] ?: "$mainUrl/"
+                        this.headers = upstreamHeaders
+                    }
+                )
+            }
         }
 
         subtitles.distinctBy { it.optString("url") }.forEach { sub ->
@@ -331,6 +369,10 @@ class MovieNerdsProvider : MainAPI() {
         return true
     }
 
+    /** Urls from the API occasionally arrive html-escaped; a stray &amp; breaks every request. */
+    private fun cleanUrl(url: String): String =
+        url.trim().replace("&amp;", "&").replace("\\/", "/")
+
     private companion object {
         /**
          * The site's own TMDB key, embedded in its public web client - the whole catalogue is
@@ -343,5 +385,9 @@ class MovieNerdsProvider : MainAPI() {
         const val STREAM_KEY = "mn_sec_2026_stream_auth"
 
         const val API = "https://api.movienerds.online"
+
+        /** What the site's own player sends; the proxy rejects some clients without it. */
+        const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
     }
 }

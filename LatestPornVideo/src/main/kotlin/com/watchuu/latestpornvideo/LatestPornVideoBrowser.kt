@@ -65,6 +65,7 @@ object LatestPornVideoBrowser {
     @Volatile private var solving: CompletableDeferred<Boolean>? = null
     private val solveLock = Mutex()
     @Volatile private var lastSolvedAt = 0L
+    @Volatile private var lastSolvedHost = ""
     @Volatile private var lastPromptAt = 0L
 
     private val killer by lazy { CloudflareKiller() }
@@ -95,7 +96,7 @@ object LatestPornVideoBrowser {
             // Ask for the box first, then read normally.
             LatestPornVideoSettings.Mode.SOLVER -> {
                 http(url, referer)?.let { return@withLock it }
-                if (!solveIfAllowed()) return@withLock null
+                if (!solveIfAllowed(url)) return@withLock null
                 return@withLock http(url, referer)
             }
 
@@ -104,16 +105,16 @@ object LatestPornVideoBrowser {
                 http(url, referer)?.let { return@withLock it }
                 viaKiller(url, referer)?.let { return@withLock it }
                 dom(url, referer)?.let { return@withLock it }
-                if (!solveIfAllowed()) return@withLock null
+                if (!solveIfAllowed(url)) return@withLock null
                 http(url, referer)
             }
         }
     }
 
-    /** The solver is only opened when the user allows it. */
-    private suspend fun solveIfAllowed(): Boolean {
+    /** The solver is only opened when the user allows it, and opens the url that actually failed. */
+    private suspend fun solveIfAllowed(url: String): Boolean {
         if (!LatestPornVideoSettings.autoPrompt) return false
-        return solveInteractive(LatestPornVideoSettings.currentActivity())
+        return solveInteractive(LatestPornVideoSettings.currentActivity(), url)
     }
 
     // ── rung 1 ─────────────────────────────────────────────────────────────────
@@ -157,32 +158,39 @@ object LatestPornVideoBrowser {
             val wv = withContext(Dispatchers.Main) {
                 webView ?: create(context).also { webView = it }
             }
-            finishedUrl = null
-            withContext(Dispatchers.Main) {
-                try {
-                    wv.loadUrl(url, mapOf("Referer" to referer))
-                } catch (_: Throwable) {
-                }
-            }
 
-            val deadline = System.currentTimeMillis() + 15_000L
-            var navigated = false
-            while (System.currentTimeMillis() < deadline) {
-                delay(350L)
-                if (finishedUrl != null) {
-                    navigated = true
-                    break
+            // The site answers 503 and then 200 once Cloudflare's JS has run - the capture shows
+            // exactly that for /1200032/. So a page that is still a challenge is not a failure:
+            // keep looking at the DOM for a while instead of reading it once, early, and giving up.
+            var attempt = 0
+            while (attempt < 4) {
+                finishedUrl = null
+                withContext(Dispatchers.Main) {
+                    try {
+                        wv.loadUrl(url, mapOf("Referer" to referer))
+                    } catch (_: Throwable) {
+                    }
                 }
-            }
-            if (!navigated) return null
 
-            delay(700L)
-            val raw = evalDom(wv) ?: return null
-            try {
-                CookieManager.getInstance().flush()
-            } catch (_: Throwable) {
+                val deadline = System.currentTimeMillis() + 15_000L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(350L)
+                    if (finishedUrl != null) break
+                }
+
+                delay(900L)
+                val raw = evalDom(wv)
+                if (raw != null && !isChallenge(raw)) {
+                    try {
+                        CookieManager.getInstance().flush()
+                    } catch (_: Throwable) {
+                    }
+                    return raw
+                }
+                attempt++
+                delay(1_500L)
             }
-            raw.takeIf { it.length > 500 }
+            null
         } catch (e: Throwable) {
             if (e is CancellationException) throw e
             null
@@ -235,12 +243,17 @@ object LatestPornVideoBrowser {
      * Shows the real site full-screen so the challenge can be ticked. Closes by itself once the
      * page is through and a cf_clearance cookie exists.
      */
-    suspend fun solveInteractive(activity: Activity?): Boolean {
+    suspend fun solveInteractive(activity: Activity?, url: String = SITE): Boolean {
+        val host = hostOf(url)
         solving?.let { return it.await() }
 
         val result = solveLock.withLock {
             solving?.let { return@withLock it.await() }
-            if (System.currentTimeMillis() - lastSolvedAt < SOLVED_TRUST_MS) return@withLock true
+            // Trusted only for the host that was actually solved: the embed hosts have their own
+            // challenge, so clearing latestpornvideo.com does not clear luluvido.com.
+            if (lastSolvedHost == host &&
+                System.currentTimeMillis() - lastSolvedAt < SOLVED_TRUST_MS
+            ) return@withLock true
             if (System.currentTimeMillis() - lastPromptAt < PROMPT_BACKOFF_MS) return@withLock false
             lastPromptAt = System.currentTimeMillis()
 
@@ -257,7 +270,7 @@ object LatestPornVideoBrowser {
 
             val d = CompletableDeferred<Boolean>()
             solving = d
-            withContext(Dispatchers.Main) { openSolver(act, d) }
+            withContext(Dispatchers.Main) { openSolver(act, d, url) }
             val ok = withTimeoutOrNull(5 * 60_000L) { d.await() } ?: false
             solving = null
             ok
@@ -265,12 +278,13 @@ object LatestPornVideoBrowser {
 
         if (result) {
             lastSolvedAt = System.currentTimeMillis()
+            lastSolvedHost = host
             withContext(Dispatchers.Main) { destroyHidden() }
         }
         return result
     }
 
-    private fun openSolver(act: Activity, done: CompletableDeferred<Boolean>) {
+    private fun openSolver(act: Activity, done: CompletableDeferred<Boolean>, startUrl: String) {
         if (act.isFinishing) {
             done.complete(false)
             return
@@ -347,22 +361,22 @@ object LatestPornVideoBrowser {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                if (hasClearance()) finish(true)
+                if (hasClearance(startUrl)) finish(true)
             }
         }
 
-        close.setOnClickListener { finish(hasClearance()) }
-        dialog.setOnDismissListener { finish(hasClearance()) }
+        close.setOnClickListener { finish(hasClearance(startUrl)) }
+        dialog.setOnDismissListener { finish(hasClearance(startUrl)) }
 
         dialog.show()
-        wv.loadUrl("$SITE/")
+        wv.loadUrl(startUrl)
 
         // A tick can pass without a new page load, so poll for the cookie as well.
         wv.postDelayed(object : Runnable {
             private var ticks = 0
             override fun run() {
                 if (finished) return
-                if (hasClearance()) {
+                if (hasClearance(startUrl)) {
                     finish(true)
                     return
                 }
@@ -371,10 +385,10 @@ object LatestPornVideoBrowser {
         }, 2_000L)
     }
 
-    /** True once Cloudflare has handed out its clearance cookie for this site. */
-    fun hasClearance(): Boolean {
+    /** True once Cloudflare has handed out its clearance cookie for this host. */
+    fun hasClearance(url: String = SITE): Boolean {
         val cookie = try {
-            CookieManager.getInstance().getCookie(SITE)
+            CookieManager.getInstance().getCookie(url)
         } catch (_: Throwable) {
             null
         } ?: return false
@@ -448,6 +462,9 @@ object LatestPornVideoBrowser {
         if (combined.isNotBlank()) h["Cookie"] = combined
         return h
     }
+
+    private fun hostOf(url: String): String =
+        Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1) ?: SITE
 
     private fun cookiesFor(url: String): String? = try {
         CookieManager.getInstance().getCookie(url)?.ifBlank { null }

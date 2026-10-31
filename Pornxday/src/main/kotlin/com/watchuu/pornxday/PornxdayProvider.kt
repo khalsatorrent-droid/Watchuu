@@ -149,6 +149,15 @@ class PornxdayProvider : MainAPI() {
         for (embed in embeds) {
             if (isAdHost(embed)) continue
 
+            // Cloudstream's own LuluStream extractor first; our unpacker only as a fallback.
+            val viaExtractor = runCatching {
+                loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+            }.getOrDefault(false)
+            if (viaExtractor) {
+                found = true
+                continue
+            }
+
             val playlists = resolveEmbed(embed)
             if (playlists.isEmpty()) continue
 
@@ -235,7 +244,7 @@ class PornxdayProvider : MainAPI() {
         }
 
         val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulust|lulucdn|luluvdo|luluvido|playhubconnect)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|playhubconnect)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
             RegexOption.IGNORE_CASE
         ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
 

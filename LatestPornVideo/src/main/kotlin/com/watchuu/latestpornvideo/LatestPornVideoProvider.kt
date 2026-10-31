@@ -138,6 +138,17 @@ class LatestPornVideoProvider : MainAPI() {
         for (embed in (fromDom + fromSource).distinct()) {
             if (isAdHost(embed)) continue
 
+            // Cloudstream ships a LuluStream extractor and keeps it up to date with the host's
+            // changes, so the embed is handed over first. Only if it declines do we unpack the
+            // player config ourselves, which is the part that breaks when the packer changes.
+            val viaExtractor = runCatching {
+                loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+            }.getOrDefault(false)
+            if (viaExtractor) {
+                found = true
+                continue
+            }
+
             val playlists = resolveEmbed(embed).ifEmpty {
                 mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
             }

@@ -154,10 +154,18 @@ class LatestPornVideoProvider : MainAPI() {
         val doc = Jsoup.parse(html)
         var found = false
 
-        val iframes = doc.select("iframe[src]")
+        val fromDom = doc.select("iframe[src]")
             .map { it.attr("src").replace("&amp;", "&").trim() }
             .filter { it.startsWith("http") && !it.contains("latestpornvideo") }
-            .distinct()
+
+        // Some layouts inject the player from JS, so the iframe may not be in the DOM we got.
+        // The embed urls are also present in the raw source, sometimes with escaped slashes.
+        val fromSource = Regex(
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:luluvdo|luluvido|hanerix|hgcloud|lulustream)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
+
+        val iframes = (fromDom + fromSource).distinct()
 
         for (embed in iframes) {
             if (isAdHost(embed)) continue

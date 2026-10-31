@@ -296,7 +296,7 @@ object EightKPornerBrowser {
         // which raced on lastFinishedUrl and never returned. One navigation at a time.
         return domLock.withLock {
             try {
-                if (!ensure(timeoutMs = 12_000L)) {
+                if (!ensure(timeoutMs = 10_000L)) {
                     trace.append("webview not ready; ")
                     return@withLock null
                 }
@@ -312,7 +312,7 @@ object EightKPornerBrowser {
                         } catch (_: Throwable) {
                         }
                     }
-                    val navDeadline = System.currentTimeMillis() + 15_000L
+                    val navDeadline = System.currentTimeMillis() + 12_000L
                     var navigated = false
                     while (System.currentTimeMillis() < navDeadline) {
                         delay(350L)
@@ -330,7 +330,7 @@ object EightKPornerBrowser {
                     delay(700L)
                 }
 
-                val raw = evalLong(wv, "document.documentElement.outerHTML", 10_000L)
+                val raw = evalLong(wv, "document.documentElement.outerHTML", 8_000L)
                 val html = raw?.let { decodeJsString(it) }
                 if (html.isNullOrBlank() || html.length < 500) {
                     trace.append("webview empty; ")
@@ -605,10 +605,9 @@ object EightKPornerBrowser {
             // page in the WebView and read the DOM, because this site only serves content to a
             // real browser (the client gets a 503 challenge on the very same URL).
             EightKPornerSettings.Mode.AUTO -> {
-                // The WebView is tried first in Auto: CloudstreamKiller spends up to a minute on
-                // its own WebView and the capture shows it never gets this site through anyway.
+                // WebView only, then the solver. CloudstreamKiller never got this site through in
+                // any capture, and it costs up to 20s per page on the way to the same failure.
                 viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }
-                viaKiller(url, referer, trace)?.let { return done("Cloudstream bypass", it) }
             }
             EightKPornerSettings.Mode.HIDDEN -> {
                 viaWebViewHtml(url, trace)?.let { return done("webview DOM", it) }

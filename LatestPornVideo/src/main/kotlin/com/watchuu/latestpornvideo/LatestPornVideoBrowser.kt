@@ -8,7 +8,6 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -43,8 +42,8 @@ object LatestPornVideoBrowser {
     private var appContext: Context? = null
     private var webView: WebView? = null
     private val lock = Mutex()
+    private val domLock = Mutex()
     private val main = Handler(Looper.getMainLooper())
-    private val killer by lazy { CloudflareKiller() }
 
     @Volatile private var lastFinishedUrl: String? = null
     @Volatile private var lastUse = 0L
@@ -57,16 +56,24 @@ object LatestPornVideoBrowser {
 
     // ── entry point ────────────────────────────────────────────────────────────
 
-    /** Page HTML for [url], going through Cloudflare the only way that works for this site. */
-    suspend fun html(url: String, referer: String): String? {
+    /**
+     * Page HTML for [url].
+     *
+     * Budget matters as much as correctness here: Cloudstream gives up on a link request long
+     * before a stacked ladder finishes. The previous version allowed 25s + 60s (killer) + 45s +
+     * 25s per page, which is why links came back "not found" — it never got an answer in time.
+     * So: one short plain attempt, then the WebView. No killer rung; the capture shows it never
+     * gets these hosts through anyway.
+     */
+    suspend fun html(url: String, referer: String): String? = domLock.withLock {
         http(url, referer)?.let {
             lastMethod = "http"
-            return it
+            return@withLock it
         }
-        return dom(url, referer)?.also { lastMethod = "webview" }
+        dom(url, referer)?.also { lastMethod = "webview" }
     }
 
-    // ── rung 1 and 2: plain HTTP, then Cloudstream's killer ────────────────────
+    // ── rung 1: plain HTTP, carrying the cookies the WebView earned ─────────────
 
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()
@@ -76,13 +83,8 @@ object LatestPornVideoBrowser {
         headers["Referer"] = referer
         cookiesFor(url)?.let { headers["Cookie"] = it }
 
-        val plain = runCatching { app.get(url, headers = headers, timeout = 25L).text }.getOrNull()
+        val plain = runCatching { app.get(url, headers = headers, timeout = 20L).text }.getOrNull()
         if (!isChallenge(plain)) return plain
-
-        val solved = runCatching {
-            app.get(url, headers = headers, interceptor = killer, timeout = 60L).text
-        }.getOrNull()
-        if (!isChallenge(solved)) return solved
 
         return null
     }
@@ -124,7 +126,7 @@ object LatestPornVideoBrowser {
                     }
                 }
 
-                val deadline = System.currentTimeMillis() + 45_000L
+                val deadline = System.currentTimeMillis() + 15_000L
                 while (System.currentTimeMillis() < deadline) {
                     delay(400L)
                     if (lastFinishedUrl != null) break
@@ -153,7 +155,7 @@ object LatestPornVideoBrowser {
         } catch (_: Throwable) {
             done.complete(null)
         }
-        val raw = withTimeoutOrNull(25_000L) { done.await() } ?: return@withContext null
+        val raw = withTimeoutOrNull(10_000L) { done.await() } ?: return@withContext null
         decodeJsString(raw)?.takeIf { it.length > 500 }
     }
 

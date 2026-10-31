@@ -3,6 +3,7 @@ package com.watchuu.movienerds
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,7 +17,8 @@ import org.json.JSONObject
  * Playback goes through its own JSON API, which is the part worth writing down:
  *
  *   GET https://api.movienerds.online/api/stream
- *       ?tmdbId=155&type=movie&lang=en&fast=1&originalLanguage=en
+ *       ?tmdbId=155&type=movie&lang=en&originalLanguage=en      -> "isFull": true, all providers
+ *       ?tmdbId=155&type=movie&lang=en&fast=1&originalLanguage=en -> "isFull": false, quick ones only
  *       [&season=1&episode=1]            for tv
  *   headers: x-client-app: movienerds
  *            x-app-key:   mn_sec_2026_stream_auth
@@ -216,11 +218,14 @@ class MovieNerdsProvider : MainAPI() {
         val id = parts[1]
         val originalLanguage = parts.getOrElse(2) { "en" }.ifBlank { "en" }
 
-        val query = buildList {
+        // The API resolves its providers on the fly and answers in stages:
+        //   plain call  -> "isFull": true,  every provider (6 sources in the capture)
+        //   &fast=1     -> "isFull": false, only the quick ones (3 sources)
+        // So ask for the full set first, and only fall back to fast if that yields nothing.
+        val base = buildList {
             add("tmdbId=$id")
             add("type=$type")
             add("lang=en")
-            add("fast=1")
             add("originalLanguage=$originalLanguage")
             if (type == "tv") {
                 add("season=${parts.getOrNull(3) ?: "1"}")
@@ -236,27 +241,52 @@ class MovieNerdsProvider : MainAPI() {
             "x-app-key" to STREAM_KEY
         )
 
-        val body = runCatching {
-            app.get("$API/api/stream?$query", headers = headers, timeout = 40L).text
-        }.getOrNull() ?: return false
+        val sources = LinkedHashMap<String, JSONObject>()
+        val subtitles = ArrayList<JSONObject>()
 
-        val root = runCatching { JSONObject(body) }.getOrNull() ?: return false
+        /** One API call; merges what it returns. Returns whether the server called it complete. */
+        suspend fun collect(query: String): Boolean {
+            val body = runCatching {
+                app.get("$API/api/stream?$query", headers = headers, timeout = 45L).text
+            }.getOrNull() ?: return false
+            val root = runCatching { JSONObject(body) }.getOrNull() ?: return false
 
-        var found = false
-        val sources = root.optJSONArray("sources")
-        val list = ArrayList<JSONObject>()
-        if (sources != null) {
-            for (i in 0 until sources.length()) sources.optJSONObject(i)?.let { list.add(it) }
+            root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val s = arr.optJSONObject(i) ?: continue
+                    val url = s.optString("url").ifBlank { s.optString("rawUrl") }
+                    if (url.startsWith("http") && !sources.containsKey(url)) sources[url] = s
+                }
+            }
+            root.optJSONObject("activeSource")?.let { s ->
+                val url = s.optString("url").ifBlank { s.optString("rawUrl") }
+                if (url.startsWith("http") && !sources.containsKey(url)) sources[url] = s
+            }
+            root.optJSONArray("subtitles")?.let { subs ->
+                for (i in 0 until subs.length()) subs.optJSONObject(i)?.let { subtitles.add(it) }
+            }
+            return root.optBoolean("isFull", false)
         }
-        if (list.isEmpty()) root.optJSONObject("activeSource")?.let { list.add(it) }
 
-        for (s in list) {
+        var complete = collect(base)
+        if (!complete || sources.size < 2) {
+            // Providers were still resolving, or almost nothing came back - ask once more, then
+            // take the quick set if that still gave us nothing.
+            if (sources.isEmpty()) {
+                collect("$base&fast=1")
+            } else {
+                delay(1_500L)
+                complete = collect(base)
+            }
+        }
+        if (sources.isEmpty()) collect("$base&fast=1")
+
+        if (sources.isEmpty()) return false
+
+        sources.values.forEach { s ->
             val url = s.optString("url").ifBlank { s.optString("rawUrl") }
-            if (!url.startsWith("http")) continue
-
-            val label = s.optString("displayName")
-                .ifBlank { s.optString("name") }
-                .ifBlank { s.optString("providerName") }
+            val provider = s.optString("providerName").ifBlank { s.optString("name") }
+            val label = s.optString("displayName").ifBlank { s.optString("name") }
             val quality = s.optString("quality")
             val language = s.optString("language")
 
@@ -267,44 +297,39 @@ class MovieNerdsProvider : MainAPI() {
                     if (key.isNotBlank() && value.isNotBlank()) linkHeaders[key] = value
                 }
             }
-            val referer = linkHeaders["Referer"] ?: "$mainUrl/"
 
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = buildString {
-                        append(name)
-                        if (label.isNotBlank()) append(" - ").append(label)
+                        append(provider.ifBlank { name })
+                        if (label.isNotBlank() && !label.startsWith(provider)) append(" - ").append(label)
                         if (quality.isNotBlank()) append(" [").append(quality).append("]")
                         if (language.isNotBlank()) append(" (").append(language).append(")")
                     },
                     url = url,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = referer
+                    this.referer = linkHeaders["Referer"] ?: "$mainUrl/"
                     this.quality = getQualityFromName(quality)
                     this.headers = linkHeaders
                 }
             )
-            found = true
         }
 
-        root.optJSONArray("subtitles")?.let { subs ->
-            for (i in 0 until subs.length()) {
-                val sub = subs.optJSONObject(i) ?: continue
-                val subUrl = sub.optString("url")
-                if (subUrl.isBlank()) continue
-                val absolute = if (subUrl.startsWith("http")) subUrl else "$API$subUrl"
-                subtitleCallback.invoke(
-                    newSubtitleFile(
-                        sub.optString("label").ifBlank { sub.optString("language").ifBlank { "Subtitle" } },
-                        absolute
-                    )
+        subtitles.distinctBy { it.optString("url") }.forEach { sub ->
+            val subUrl = sub.optString("url")
+            if (subUrl.isBlank()) return@forEach
+            val absolute = if (subUrl.startsWith("http")) subUrl else "$API$subUrl"
+            subtitleCallback.invoke(
+                newSubtitleFile(
+                    sub.optString("label").ifBlank { sub.optString("language").ifBlank { "Subtitle" } },
+                    absolute
                 )
-            }
+            )
         }
 
-        return found
+        return true
     }
 
     private companion object {

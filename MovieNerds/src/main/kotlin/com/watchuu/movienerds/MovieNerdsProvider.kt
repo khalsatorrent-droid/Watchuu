@@ -189,7 +189,6 @@ class MovieNerdsProvider : MainAPI() {
                             this.episode = epNumber
                             this.posterUrl = posterUrl(ep.optString("still_path"))
                             this.description = ep.optString("overview").ifBlank { null }
-                            this.rating = ep.optDouble("vote_average", 0.0).takeIf { it > 0 }
                         }
                     )
                 }

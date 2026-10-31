@@ -69,6 +69,9 @@ object LatestPornVideoBrowser {
 
     private val killer by lazy { CloudflareKiller() }
 
+    /** Custom user agent when one is set, otherwise the built-in one. */
+    fun userAgent(): String = LatestPornVideoSettings.customUa.ifBlank { UA }
+
     fun init(context: Context) {
         if (ctx == null) ctx = context.applicationContext
     }
@@ -76,25 +79,48 @@ object LatestPornVideoBrowser {
     // ── entry point ────────────────────────────────────────────────────────────
 
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
-        val hasCookie = LatestPornVideoSettings.cookie.isNotBlank()
+        when (LatestPornVideoSettings.mode) {
+            // Only the pasted cookie. Nothing else is tried, and no window is ever opened.
+            LatestPornVideoSettings.Mode.COOKIE ->
+                return@withLock http(url, referer)
 
-        http(url, referer)?.let { return@withLock it }
-        // A pasted cookie is the user's own answer to Cloudflare; do not open windows over it.
-        if (hasCookie) return@withLock null
+            // Only Cloudstream's own solver.
+            LatestPornVideoSettings.Mode.CLOUDSTREAM ->
+                return@withLock viaKiller(url, referer) ?: http(url, referer)
 
-        viaKiller(url, referer)?.let { return@withLock it }
-        dom(url, referer)?.let { return@withLock it }
+            // Only the hidden browser, never a window.
+            LatestPornVideoSettings.Mode.HIDDEN ->
+                return@withLock http(url, referer) ?: dom(url, referer)
 
-        // Everything automatic failed. Ask the user to solve it once, then retry plain HTTP.
-        if (!solveInteractive(LatestPornVideoSettings.currentActivity())) return@withLock null
-        http(url, referer)
+            // Ask for the box first, then read normally.
+            LatestPornVideoSettings.Mode.SOLVER -> {
+                http(url, referer)?.let { return@withLock it }
+                if (!solveIfAllowed()) return@withLock null
+                return@withLock http(url, referer)
+            }
+
+            // Everything in order, ending with the solver window.
+            LatestPornVideoSettings.Mode.AUTO -> {
+                http(url, referer)?.let { return@withLock it }
+                viaKiller(url, referer)?.let { return@withLock it }
+                dom(url, referer)?.let { return@withLock it }
+                if (!solveIfAllowed()) return@withLock null
+                http(url, referer)
+            }
+        }
+    }
+
+    /** The solver is only opened when the user allows it. */
+    private suspend fun solveIfAllowed(): Boolean {
+        if (!LatestPornVideoSettings.autoPrompt) return false
+        return solveInteractive(LatestPornVideoSettings.currentActivity())
     }
 
     // ── rung 1 ─────────────────────────────────────────────────────────────────
 
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()
-        headers["User-Agent"] = LatestPornVideoSettings.userAgent.ifBlank { UA }
+        headers["User-Agent"] = userAgent()
         headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         headers["Accept-Language"] = "en-US,en;q=0.9"
         headers["Referer"] = referer
@@ -113,7 +139,7 @@ object LatestPornVideoBrowser {
 
     private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
         val headers = mapOf(
-            "User-Agent" to LatestPornVideoSettings.userAgent.ifBlank { UA },
+            "User-Agent" to userAgent(),
             "Referer" to referer
         )
         val body = app.get(url, headers = headers, interceptor = killer, timeout = 25L).text
@@ -182,7 +208,7 @@ object LatestPornVideoBrowser {
             databaseEnabled = true
             useWideViewPort = true
             loadWithOverviewMode = true
-            userAgentString = LatestPornVideoSettings.userAgent.ifBlank { UA }
+            userAgentString = userAgent()
         }
         try {
             CookieManager.getInstance().apply {
@@ -284,7 +310,7 @@ object LatestPornVideoBrowser {
             databaseEnabled = true
             useWideViewPort = true
             loadWithOverviewMode = true
-            userAgentString = LatestPornVideoSettings.userAgent.ifBlank { UA }
+            userAgentString = userAgent()
         }
         try {
             CookieManager.getInstance().apply {
@@ -346,13 +372,53 @@ object LatestPornVideoBrowser {
     }
 
     /** True once Cloudflare has handed out its clearance cookie for this site. */
-    private fun hasClearance(): Boolean {
+    fun hasClearance(): Boolean {
         val cookie = try {
             CookieManager.getInstance().getCookie(SITE)
         } catch (_: Throwable) {
             null
         } ?: return false
         return cookie.contains("cf_clearance")
+    }
+
+    /** Reports what a plain request currently gets, for the settings screen. */
+    suspend fun test(): String {
+        val cookie = if (hasClearance()) "present" else "absent"
+        val body = runCatching {
+            app.get(
+                "$SITE/",
+                headers = mapOf("User-Agent" to userAgent()),
+                timeout = 20L
+            )
+        }.getOrNull()
+
+        return if (body == null) {
+            "No response from the site.\ncf_clearance cookie: $cookie"
+        } else {
+            val challenged = isChallenge(body.text)
+            buildString {
+                append("HTTP ").append(body.code).append('\n')
+                append("Body: ").append(body.text.length).append(" chars\n")
+                append("Challenge page: ").append(if (challenged) "yes" else "no").append('\n')
+                append("cf_clearance cookie: ").append(cookie)
+            }
+        }
+    }
+
+    /** Drops the hidden browser, and optionally the stored cookies. */
+    suspend fun reset(clearCookies: Boolean, uaChanged: Boolean = false) {
+        withContext(Dispatchers.Main) { destroyHidden() }
+        if (clearCookies) {
+            try {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
+            } catch (_: Throwable) {
+            }
+            lastSolvedAt = 0L
+            lastPromptAt = 0L
+        } else if (uaChanged) {
+            lastSolvedAt = 0L
+        }
     }
 
     private fun destroyHidden() {
@@ -374,7 +440,7 @@ object LatestPornVideoBrowser {
      */
     fun posterHeaders(): Map<String, String> {
         val h = LinkedHashMap<String, String>()
-        h["User-Agent"] = LatestPornVideoSettings.userAgent.ifBlank { UA }
+        h["User-Agent"] = userAgent()
         h["Referer"] = "$SITE/"
         val manual = LatestPornVideoSettings.cookie
         val jar = cookiesFor(SITE).orEmpty()

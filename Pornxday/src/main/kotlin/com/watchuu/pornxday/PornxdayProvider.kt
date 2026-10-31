@@ -162,19 +162,52 @@ class PornxdayProvider : MainAPI() {
         for (embed in embeds) {
             if (isAdHost(embed)) continue
 
-            // Cloudstream's own LuluStream extractor first; our unpacker only as a fallback.
-            // The extractor's url can arrive html-escaped (&amp; instead of &), which renames every
-            // query parameter after the first and makes the link unplayable. Collect what it emits
-            // and re-emit with a cleaned url, so nothing reaches the player in that state.
+            // Our own unpacker runs FIRST. That is the order this extension worked in up to v7:
+            // the packed jwplayer config is what these hosts actually serve, and handing the
+            // embed to an extractor first let a "handled" result swallow it and emit nothing.
+            report.append("    unpacking the player config...\n")
+            val playlists = resolveEmbed(embed).ifEmpty {
+                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
+            }
+            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
+
+            if (playlists.isNotEmpty()) {
+                // The CDN is sent Referer, Origin and a browser UA by the real player, and
+                // Cloudstream reuses a link's headers for the segments too.
+                val referer = originOf(embed)
+                val origin = referer.trimEnd('/')
+                val headers = mapOf(
+                    "Referer" to referer,
+                    "Origin" to origin,
+                    "User-Agent" to PLAYER_UA,
+                    "Accept" to "*/*"
+                )
+
+                playlists.forEachIndexed { index, url ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
+                            url = cleanUrl(url),
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = referer
+                            this.quality = Qualities.Unknown.value
+                            this.headers = headers
+                        }
+                    )
+                }
+                found = true
+                continue
+            }
+
+            // Unknown host, or nothing unpacked: hand it to Cloudstream's extractors, which is
+            // what covers streamtape and the other hosts that do not use a packed player.
             val fromExtractor = mutableListOf<ExtractorLink>()
-            val viaExtractor = runCatching {
+            runCatching {
                 loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
-            }.getOrDefault(false)
-
-            report.append("  ").append(embed).append(" -> extractor ")
-                .append(if (fromExtractor.isNotEmpty()) "${fromExtractor.size} link(s)" else "no")
-                .append('\n')
-
+            }
+            report.append("    extractor links: ").append(fromExtractor.size).append('\n')
             if (fromExtractor.isNotEmpty()) {
                 fromExtractor.forEach { link ->
                     callback.invoke(
@@ -191,44 +224,7 @@ class PornxdayProvider : MainAPI() {
                     )
                 }
                 found = true
-                continue
             }
-            if (viaExtractor) {
-                found = true
-                continue
-            }
-
-            report.append("    unpacking the player config...\n")
-            val playlists = resolveEmbed(embed)
-            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
-            if (playlists.isEmpty()) continue
-
-            // The CDN gets Referer, Origin and a browser UA from the real player; Cloudstream
-            // reuses these headers for the segments too, so all three go on the link.
-            val referer = originOf(embed)
-            val origin = referer.trimEnd('/')
-            val linkHeaders = mapOf(
-                "Referer" to referer,
-                "Origin" to origin,
-                "User-Agent" to PLAYER_UA,
-                "Accept" to "*/*"
-            )
-
-            playlists.forEachIndexed { index, url ->
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
-                        url = cleanUrl(url),
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = referer
-                        this.quality = Qualities.Unknown.value
-                        this.headers = linkHeaders
-                    }
-                )
-            }
-            found = true
         }
 
         if (!found) {

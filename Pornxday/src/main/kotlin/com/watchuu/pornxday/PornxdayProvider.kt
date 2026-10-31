@@ -166,9 +166,7 @@ class PornxdayProvider : MainAPI() {
             // the packed jwplayer config is what these hosts actually serve, and handing the
             // embed to an extractor first let a "handled" result swallow it and emit nothing.
             report.append("    unpacking the player config...\n")
-            val playlists = resolveEmbed(embed).ifEmpty {
-                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
-            }
+            val playlists = resolveEmbed(embed)
             report.append("    unpacked playlists: ").append(playlists.size).append('\n')
 
             if (playlists.isNotEmpty()) {

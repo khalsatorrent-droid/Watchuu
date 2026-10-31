@@ -83,6 +83,10 @@ object LatestPornVideoSettings {
         get() = customUa
         set(v) { customUa = v }
 
+    /** What the last link request did, step by step - shown in the settings screen. */
+    @Volatile
+    var lastLinkReport: String = "No link request yet."
+
     fun currentActivity(ctx: Context? = null): Activity? =
         (ctx as? Activity) ?: try { CommonActivity.activity } catch (_: Throwable) { null }
 
@@ -186,6 +190,13 @@ object LatestPornVideoSettings {
                         .show()
                 }
             }
+        })
+        root.addView(button("Show last link report") {
+            AlertDialog.Builder(act)
+                .setTitle("Last link request")
+                .setMessage(lastLinkReport)
+                .setPositiveButton("OK", null)
+                .show()
         })
         root.addView(button("Clear Cloudflare cookies") {
             scope.launch {

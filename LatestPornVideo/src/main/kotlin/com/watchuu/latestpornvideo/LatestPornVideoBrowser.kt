@@ -100,15 +100,28 @@ object LatestPornVideoBrowser {
                 return@withLock http(url, referer)
             }
 
-            // Everything in order, ending with the solver window.
+            // Everything in order. When there is no clearance for this host at all, nothing
+            // automatic can succeed, so the solver is asked for straight away rather than after
+            // the slow rungs - a link request has to answer in seconds, not a minute.
             LatestPornVideoSettings.Mode.AUTO -> {
                 http(url, referer)?.let { return@withLock it }
                 viaKiller(url, referer)?.let { return@withLock it }
+                if (!hasClearance(url)) {
+                    if (!solveIfAllowed(url)) return@withLock null
+                    return@withLock http(url, referer)
+                }
                 dom(url, referer)?.let { return@withLock it }
-                if (!solveIfAllowed(url)) return@withLock null
-                http(url, referer)
+                null
             }
         }
+    }
+
+    /**
+     * The page as a browser renders it, not as the server sends it. Needed where the player
+     * iframes are injected by the site's own JavaScript - the raw HTML contains none of them.
+     */
+    suspend fun renderedHtml(url: String, referer: String): String? = domLock.withLock {
+        dom(url, referer) ?: http(url, referer)
     }
 
     /** The solver is only opened when the user allows it, and opens the url that actually failed. */
@@ -163,7 +176,7 @@ object LatestPornVideoBrowser {
             // exactly that for /1200032/. So a page that is still a challenge is not a failure:
             // keep looking at the DOM for a while instead of reading it once, early, and giving up.
             var attempt = 0
-            while (attempt < 4) {
+            while (attempt < 2) {
                 finishedUrl = null
                 withContext(Dispatchers.Main) {
                     try {
@@ -172,7 +185,7 @@ object LatestPornVideoBrowser {
                     }
                 }
 
-                val deadline = System.currentTimeMillis() + 15_000L
+                val deadline = System.currentTimeMillis() + 8_000L
                 while (System.currentTimeMillis() < deadline) {
                     delay(350L)
                     if (finishedUrl != null) break
@@ -188,7 +201,7 @@ object LatestPornVideoBrowser {
                     return raw
                 }
                 attempt++
-                delay(1_500L)
+                delay(1_000L)
             }
             null
         } catch (e: Throwable) {

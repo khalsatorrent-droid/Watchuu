@@ -120,7 +120,16 @@ class LatestPornVideoProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = fetch(data) ?: return false
+        val report = StringBuilder()
+        report.append("page: ").append(data).append('\n')
+
+        val html = fetch(data)
+        if (html == null) {
+            report.append("fetch: FAILED (page never arrived - see Test connection for the host)")
+            LatestPornVideoSettings.lastLinkReport = report.toString()
+            return false
+        }
+        report.append("fetch: ok, ").append(html.length).append(" chars\n")
         val doc = Jsoup.parse(html)
 
         val fromDom = doc.select("iframe[src]")
@@ -134,8 +143,13 @@ class LatestPornVideoProvider : MainAPI() {
             RegexOption.IGNORE_CASE
         ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
 
+        val embeds = (fromDom + fromSource).distinct()
+        report.append("embeds: ").append(embeds.size)
+            .append(if (embeds.isEmpty()) " (none found on the page)" else " " + embeds.joinToString())
+            .append('\n')
+
         var found = false
-        for (embed in (fromDom + fromSource).distinct()) {
+        for (embed in embeds) {
             if (isAdHost(embed)) continue
 
             // Cloudstream ships a LuluStream extractor and keeps it up to date with the host's
@@ -148,6 +162,10 @@ class LatestPornVideoProvider : MainAPI() {
             val viaExtractor = runCatching {
                 loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
             }.getOrDefault(false)
+
+            report.append("  ").append(embed).append(" -> extractor ")
+                .append(if (fromExtractor.isNotEmpty()) "${fromExtractor.size} link(s)" else "no")
+                .append('\n')
 
             if (fromExtractor.isNotEmpty()) {
                 fromExtractor.forEach { link ->
@@ -172,9 +190,11 @@ class LatestPornVideoProvider : MainAPI() {
                 continue
             }
 
+            report.append("    unpacking the player config...\n")
             val playlists = resolveEmbed(embed).ifEmpty {
                 mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
             }
+            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
             if (playlists.isEmpty()) continue
 
             // The CDN is sent Referer, Origin and a desktop-ish UA by the real player; the
@@ -230,6 +250,8 @@ class LatestPornVideoProvider : MainAPI() {
                 found = true
             }
         }
+        report.append("result: ").append(if (found) "links emitted" else "NO LINKS")
+        LatestPornVideoSettings.lastLinkReport = report.toString()
         return found
     }
 

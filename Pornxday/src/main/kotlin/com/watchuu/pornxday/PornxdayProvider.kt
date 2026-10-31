@@ -130,7 +130,16 @@ class PornxdayProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var html = fetch(data) ?: return false
+        val report = StringBuilder()
+        report.append("page: ").append(data).append('\n')
+
+        var html = fetch(data)
+        if (html == null) {
+            report.append("fetch: FAILED (page never arrived - see Test connection for the host)")
+            PornxdaySettings.lastLinkReport = report.toString()
+            return false
+        }
+        report.append("fetch: ok, ").append(html.length).append(" chars\n")
         var doc = Jsoup.parse(html)
         var embeds = embedsIn(doc, html)
 
@@ -145,6 +154,10 @@ class PornxdayProvider : MainAPI() {
             }
         }
 
+        report.append("embeds: ").append(embeds.size)
+            .append(if (embeds.isEmpty()) " (none found on the page)" else " " + embeds.joinToString())
+            .append('\n')
+
         var found = false
         for (embed in embeds) {
             if (isAdHost(embed)) continue
@@ -157,6 +170,10 @@ class PornxdayProvider : MainAPI() {
             val viaExtractor = runCatching {
                 loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
             }.getOrDefault(false)
+
+            report.append("  ").append(embed).append(" -> extractor ")
+                .append(if (fromExtractor.isNotEmpty()) "${fromExtractor.size} link(s)" else "no")
+                .append('\n')
 
             if (fromExtractor.isNotEmpty()) {
                 fromExtractor.forEach { link ->
@@ -181,7 +198,9 @@ class PornxdayProvider : MainAPI() {
                 continue
             }
 
+            report.append("    unpacking the player config...\n")
             val playlists = resolveEmbed(embed)
+            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
             if (playlists.isEmpty()) continue
 
             // The CDN gets Referer, Origin and a browser UA from the real player; Cloudstream
@@ -232,6 +251,8 @@ class PornxdayProvider : MainAPI() {
                     found = true
                 }
         }
+        report.append("result: ").append(if (found) "links emitted" else "NO LINKS")
+        PornxdaySettings.lastLinkReport = report.toString()
         return found
     }
 

@@ -48,6 +48,9 @@ object EightKPornerBrowser {
     private val killer by lazy { CloudflareKiller() }
     @Volatile private var consentDone = false
 
+    /** User agent to send - the pasted one when set, otherwise the built-in. */
+    fun uaHeader(): String = EightKPornerSettings.userAgent.ifBlank { UA }
+
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
         // A pasted cf_clearance makes plain HTTP enough on its own; the WebView rungs are only
         // reached when no cookie has been supplied.

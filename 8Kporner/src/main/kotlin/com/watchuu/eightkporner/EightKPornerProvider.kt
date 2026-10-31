@@ -45,6 +45,15 @@ class EightKPornerProvider : MainAPI() {
         "incest" to "Incest"
     )
 
+    /** Headers for the thumbnails, served from the same protected host as the pages. */
+    private fun posterHeaders(): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = EightKPornerBrowser.uaHeader()
+        h["Referer"] = "$mainUrl/"
+        EightKPornerSettings.cookie.takeIf { it.isNotBlank() }?.let { h["Cookie"] = it }
+        return h
+    }
+
     private suspend fun fetch(url: String): String? =
         EightKPornerBrowser.html(url, "$mainUrl/")
 
@@ -88,6 +97,7 @@ class EightKPornerProvider : MainAPI() {
                 ?.let { if (it.startsWith("http")) it else "$mainUrl$it" }
             newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
                 this.posterUrl = poster
+                this.posterHeaders = posterHeaders()
             }
         }.distinctBy { it.url }
     }
@@ -136,6 +146,7 @@ class EightKPornerProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
+            this.posterHeaders = posterHeaders()
             this.plot = plot
             this.tags = tags
         }

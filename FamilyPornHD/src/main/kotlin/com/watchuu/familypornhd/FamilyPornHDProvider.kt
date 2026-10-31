@@ -67,6 +67,7 @@ class FamilyPornHDProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
+            this.posterHeaders = FamilyPornHDBrowser.posterHeaders()
             this.plot = plot
             this.tags = tags
         }
@@ -153,7 +154,10 @@ class FamilyPornHDProvider : MainAPI() {
         val href = a.attr("href").takeIf { it.isNotBlank() } ?: return null
         val title = a.text().trim().ifBlank { a.attr("title").trim() }.takeIf { it.isNotBlank() } ?: return null
         val poster = pickImage(this)
-        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) { this.posterUrl = poster }
+        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
+            this.posterUrl = poster
+            this.posterHeaders = FamilyPornHDBrowser.posterHeaders()
+        }
     }
 
     /**

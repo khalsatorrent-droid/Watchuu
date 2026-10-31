@@ -102,6 +102,22 @@ object FamilyPornHDBrowser {
         }
     }
 
+    /**
+     * Headers for loading the thumbnails themselves.
+     *
+     * The artwork is served from the same Cloudflare-protected host as the pages, so Cloudstream's
+     * image loader needs the same user agent, referer and clearance cookie the page requests use.
+     * Without this the urls are correct but every image request is refused and the cards render
+     * blank - which is what "no posters" actually was.
+     */
+    fun posterHeaders(): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = userAgent()
+        h["Referer"] = home()
+        cookies()?.takeIf { it.isNotBlank() }?.let { h["Cookie"] = it }
+        return h
+    }
+
     fun cookies(): String? {
         applyManualCookie()
         val fromWv = try {

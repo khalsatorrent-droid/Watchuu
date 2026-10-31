@@ -90,6 +90,7 @@ class XfantazyProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, id ?: url) {
             this.posterUrl = userFileId?.let { "https://s.xfantazy.com/thumbnail/$it/w320h180/0" }
+            this.posterHeaders = posterHeaders()
             this.plot = description
             this.tags = tags
         }
@@ -184,6 +185,12 @@ class XfantazyProvider : MainAPI() {
 
     // ── Transport ──────────────────────────────────────────────────────────────
 
+    /** Headers for the thumbnails, which are served from the same protected domain. */
+    private fun posterHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to userAgent(),
+        "Referer" to "$mainUrl/"
+    )
+
     private fun userAgent(): String =
         "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
@@ -258,6 +265,7 @@ class XfantazyProvider : MainAPI() {
 
             newMovieSearchResponse(title, url, TvType.NSFW) {
                 this.posterUrl = userFileId?.let { "https://s.xfantazy.com/thumbnail/$it/w320h180/0" }
+                this.posterHeaders = posterHeaders()
             }
         }.distinctBy { it.url }.toList()
     }

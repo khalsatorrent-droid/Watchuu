@@ -9,25 +9,20 @@ import kotlin.random.Random
 /**
  * xfantazy.com — Next.js behind Cloudflare, built from the captures of 2026-10-29 and 2026-10-30.
  *
- * Deliberately defensive about *loading*. A provider is constructed the moment the plugin loads,
- * and anything that runs in that constructor can take the whole plugin down with it, which shows
- * up as "could not load extension". So this class holds no state beyond the five MainAPI fields
- * and the home-page rows: no lazy delegates, no compiled Regex, no constants. Everything else is
- * built inside the function that needs it.
+ * Deliberately defensive about *loading*: a provider is constructed the moment the plugin loads,
+ * and anything that runs in that constructor can take the whole plugin down with it. So this class
+ * holds no state beyond the five MainAPI fields and the home rows — no lazy delegates, no compiled
+ * Regex, no constants. Everything else is built inside the function that needs it.
  *
  * Endpoints (all seen in the captures):
  *   /top , /trending , /top?sort=mostViewed      listings, ?page=N for more
  *   /search/{query}                              search, ?page=N
  *   /video/{hru}?_rsc=…                          detail, carries the `videoInfo` object
+ *   https://api.xfantazy.com/pub/client-token    sets the k2sAccessToken cookie
  *   https://api.xfantazy.com/pub/video-sources/{mongoId}
  *        → {"sources":[{"type":"video/mp4","label":"360p","src":"https://…"},
  *                      {"type":"video/mp4","label":"original","src":"blocked","blocked":true}]}
  *   Streams want `Referer: https://xfantazy.com/`; the free source is 360p, "original" is blocked.
- *
- * Listings are read from the App-Router data endpoints (`?_rsc=<random>` plus the header `RSC: 1`),
- * which return clean JSON. The plain document pages answer with a Cloudflare challenge, and when
- * they do arrive the card data is inlined in `self.__next_f.push(…)` with escaped quotes, so that
- * form is only used as a fallback.
  */
 class XfantazyProvider : MainAPI() {
     override var mainUrl = "https://xfantazy.com"
@@ -108,8 +103,9 @@ class XfantazyProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val id = if (data.matches(Regex("[0-9a-f]{24}"))) data
-        else firstMatch(data, """/video/([0-9a-f]{24})""") ?: return false
+        // Normally load() hands over the mongo id. If the detail page could not be read it hands
+        // over the page url instead, so fall back to resolving the id from the page itself.
+        val id = videoIdOf(data) ?: resolveIdFromPage(data) ?: return false
 
         val apiHeaders = mapOf(
             "User-Agent" to userAgent(),
@@ -117,11 +113,20 @@ class XfantazyProvider : MainAPI() {
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/"
         )
-        // Same order the site uses: client-token first (it sets the k2sAccessToken cookie).
-        runCatching { app.get("https://api.xfantazy.com/pub/client-token", headers = apiHeaders) }
+
+        // The site fetches a client token first, and every video-sources request in the capture
+        // carries the k2sAccessToken cookie that comes back with it. Send it explicitly rather
+        // than relying on a shared cookie jar.
+        val tokenCookies = runCatching {
+            app.get("https://api.xfantazy.com/pub/client-token", headers = apiHeaders).cookies
+        }.getOrNull().orEmpty()
 
         val json = runCatching {
-            app.get("https://api.xfantazy.com/pub/video-sources/$id", headers = apiHeaders).text
+            app.get(
+                "https://api.xfantazy.com/pub/video-sources/$id",
+                headers = apiHeaders,
+                cookies = tokenCookies
+            ).text
         }.getOrNull() ?: return false
 
         val sources = Regex(""""sources"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
@@ -151,6 +156,30 @@ class XfantazyProvider : MainAPI() {
             found = true
         }
         return found
+    }
+
+    /** A mongo id handed over as-is, or one embedded in a /video/… url. */
+    private fun videoIdOf(data: String): String? = when {
+        data.matches(Regex("[0-9a-f]{24}")) -> data
+        else -> firstMatch(data, """/video/([0-9a-f]{24})""")
+    }
+
+    /** Last resort: read the page and take the id out of its videoInfo object. */
+    private suspend fun resolveIdFromPage(data: String): String? {
+        val url = when {
+            data.startsWith("http") -> data
+            data.startsWith("/") -> "$mainUrl$data"
+            else -> "$mainUrl/video/$data"
+        }
+        val path = url.removePrefix(mainUrl).trimStart('/').substringBefore('?')
+        if (path.isBlank()) return null
+
+        var body = fetch(rscUrl(path, ""), rsc = true).orEmpty()
+        if (!body.contains("\"videoInfo\"")) {
+            body = fetch(url).orEmpty().replace("\\\"", "\"")
+        }
+        val scope = body.substring(maxOf(body.indexOf("\"videoInfo\""), 0))
+        return firstMatch(scope, """"id"\s*:\s*"([0-9a-f]{24})"""")
     }
 
     // ── Transport ──────────────────────────────────────────────────────────────

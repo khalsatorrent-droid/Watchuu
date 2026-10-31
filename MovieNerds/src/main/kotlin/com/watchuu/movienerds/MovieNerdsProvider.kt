@@ -32,7 +32,7 @@ import org.json.JSONObject
  *  - everything is rewritten to the site's proxy: master -> proxy.m3u8, variant -> proxy.m3u8,
  *    segment -> proxy.ts. The Referer/Origin/User-Agent in each source's "headers" belong to the
  *    upstream CDN the server pulls from, NOT to the proxy. What the browser sends the proxy is
- *    just UA + Origin: https://movienerds.site + Accept: */*, with no referer.
+ *    just UA + Origin: https://movienerds.site + Accept, with no referer.
  *  - audio is a query parameter on that same proxy url. The site's own player switches track by
  *    rewriting it - the 16:22 capture shows audio=en, audio=English, audio=english and audio=hi
  *    against otherwise identical urls. So each source can be offered per audio track by rewriting

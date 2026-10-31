@@ -123,27 +123,27 @@ class LatestPornVideoProvider : MainAPI() {
         val report = StringBuilder()
         report.append("page: ").append(data).append('\n')
 
-        val html = fetch(data)
+        var html = fetch(data)
         if (html == null) {
             report.append("fetch: FAILED (page never arrived - see Test connection for the host)")
             LatestPornVideoSettings.lastLinkReport = report.toString()
             return false
         }
         report.append("fetch: ok, ").append(html.length).append(" chars\n")
-        val doc = Jsoup.parse(html)
+        var doc = Jsoup.parse(html)
+        var embeds = embedsIn(doc, html)
 
-        val fromDom = doc.select("iframe[src]")
-            .map { it.attr("src").replace("&amp;", "&").trim() }
-            .filter { it.startsWith("http") && !it.contains("latestpornvideo") }
+        // The player iframes are injected by the site's JavaScript, so the raw HTML often contains
+        // none of them - the capture's detail page renders eleven. Fall back to the rendered DOM.
+        if (embeds.isEmpty()) {
+            val rendered = LatestPornVideoBrowser.renderedHtml(data, "$mainUrl/")
+            if (rendered != null && rendered.length > 500) {
+                html = rendered
+                doc = Jsoup.parse(rendered)
+                embeds = embedsIn(doc, rendered)
+            }
+        }
 
-        // Players are sometimes injected from JS, so the embed urls are also taken from the raw
-        // source (where the slashes may be escaped).
-        val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:luluvdo|luluvido|hanerix|hgcloud|lulustream)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
-
-        val embeds = (fromDom + fromSource).distinct()
         report.append("embeds: ").append(embeds.size)
             .append(if (embeds.isEmpty()) " (none found on the page)" else " " + embeds.joinToString())
             .append('\n')
@@ -268,6 +268,37 @@ class LatestPornVideoProvider : MainAPI() {
     /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
     private fun cleanUrl(url: String): String =
         url.trim().replace("&amp;", "&").replace("\\/", "/")
+
+    /**
+     * Every player url on a page: iframes, data-src/data-embed/data-player attributes, embed urls
+     * in the raw source (slashes may be escaped), and anything else that looks like an embed code
+     * path whatever the host. The generic pass is what catches players that are neither an iframe
+     * nor one of the hosts below.
+     */
+    private fun embedsIn(doc: org.jsoup.nodes.Document, html: String): List<String> {
+        val fromDom = ArrayList<String>()
+        doc.select("iframe[src], iframe[data-src], [data-embed], [data-player]").forEach { el ->
+            for (attr in listOf("src", "data-src", "data-embed", "data-player")) {
+                val v = el.attr(attr).replace("&amp;", "&").trim()
+                if (v.startsWith("http")) fromDom.add(v)
+            }
+        }
+
+        val fromSource = Regex(
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|hanerix|hgcloud)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
+
+        val generic = Regex(
+            """https?://[a-z0-9.\-]+/(?:e|embed|v|video)/[A-Za-z0-9]{6,}""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).map { it.value }
+
+        return (fromDom + fromSource + generic)
+            .map { it.replace("&amp;", "&") }
+            .filter { it.startsWith("http") && !it.contains("latestpornvideo") && !isAdHost(it) }
+            .distinct()
+    }
 
     private fun originOf(url: String): String =
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"

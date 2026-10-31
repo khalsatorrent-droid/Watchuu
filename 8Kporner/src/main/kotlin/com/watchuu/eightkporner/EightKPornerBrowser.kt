@@ -127,7 +127,10 @@ object EightKPornerBrowser {
     // ── rung 2 ─────────────────────────────────────────────────────────────────
 
     private suspend fun dom(url: String, referer: String): String? {
-        val context = ctx ?: return null
+        // init() is best-effort (the plugin guards it), so fall back to the live activity
+        val context = ctx
+            ?: try { com.lagradost.cloudstream3.CommonActivity.activity?.applicationContext } catch (_: Throwable) { null }
+            ?: return null
         lastUse = System.currentTimeMillis()
         return try {
             val wv = withContext(Dispatchers.Main) {

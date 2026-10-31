@@ -88,7 +88,10 @@ object LatestPornVideoBrowser {
     }
 
     private suspend fun dom(url: String, referer: String): String? {
-        val context = ctx ?: return null
+        // init() is best-effort (the plugin guards it), so fall back to the live activity
+        val context = ctx
+            ?: try { com.lagradost.cloudstream3.CommonActivity.activity?.applicationContext } catch (_: Throwable) { null }
+            ?: return null
         return try {
             val wv = withContext(Dispatchers.Main) {
                 webView ?: create(context).also { webView = it }

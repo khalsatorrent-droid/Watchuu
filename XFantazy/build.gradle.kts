@@ -1,9 +1,9 @@
 // use an integer for version numbers
-version = 8
+version = 9
 
 cloudstream {
     language = "en"
-    description = "Free HD videos from XFantazy.com — New, Trending, Most Viewed, paginated search and streaming"
+    description = "Free HD videos from XFantazy.com - New, Trending, Most Viewed, search and streaming"
     authors = listOf("khalsatorrent-droid")
 
     /**

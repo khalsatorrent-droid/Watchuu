@@ -415,6 +415,12 @@ object EightKPornerBrowser {
 
     @Volatile private var solving: CompletableDeferred<Boolean>? = null
     @Volatile private var lastSolvedAt = 0L
+    @Volatile private var lastPromptAt = 0L
+
+    /** Once a solve has worked, the clearance lasts a while - do not re-prompt for it. */
+    private const val SOLVED_TRUST_MS = 10 * 60_000L
+    /** After a window is dismissed unsolved, do not nag again immediately. */
+    private const val PROMPT_BACKOFF_MS = 60_000L
 
     /**
      * Shows the real site full-screen so the user can tick the Cloudflare box.
@@ -424,7 +430,12 @@ object EightKPornerBrowser {
         solving?.let { return it.await() }
         val result = solveLock.withLock {
             solving?.let { return@withLock it.await() }
-            if (System.currentTimeMillis() - lastSolvedAt < 15_000L) return@withLock true
+            // The home screen asks for eight sections; without this every failed section opened its
+            // own challenge window, which is the "keeps repeating" behaviour. One solve is trusted
+            // for ten minutes, and a dismissed window buys a minute of quiet.
+            if (System.currentTimeMillis() - lastSolvedAt < SOLVED_TRUST_MS) return@withLock true
+            if (System.currentTimeMillis() - lastPromptAt < PROMPT_BACKOFF_MS) return@withLock false
+            lastPromptAt = System.currentTimeMillis()
             // CommonActivity.activity is null until the host activity is attached; retry briefly
             // instead of failing straight away, which used to end as "Cloudflare not passed".
             var act = activity ?: EightKPornerSettings.currentActivity()

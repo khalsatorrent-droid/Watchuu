@@ -49,56 +49,51 @@ object EightKPornerBrowser {
     @Volatile private var consentDone = false
 
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
-        var body = http(url, referer) ?: viaKiller(url, referer) ?: dom(url, referer)
-        if (body == null) return@withLock null
-
-        // The 18+ gate is server side: the site calls GET /aj/main/yes_18?hash=<40 hex> and only
-        // then do the listing pages render cards. Setting pop_up_18 is not enough on its own.
-        if (!consentDone && !body.contains("keep-padding")) {
-            val hash = Regex("[0-9a-f]{40}").find(body)?.value
-            if (hash != null) {
-                val accepted = runCatching {
-                    app.get(
-                        "https://8kporner.com/aj/main/yes_18?hash=$hash",
-                        headers = mapOf(
-                            "User-Agent" to UA,
-                            "Referer" to referer,
-                            "X-Requested-With" to "XMLHttpRequest",
-                            "Cookie" to consentCookies() + cookiesFor(url)
-                        ),
-                        timeout = 15L
-                    ).code in 200..299
-                }.getOrDefault(false)
-                if (accepted) {
-                    consentDone = true
-                    http(url, referer)?.let { body = it }
-                }
-            }
-        }
-        body
+        // A pasted cf_clearance makes plain HTTP enough on its own; the WebView rungs are only
+        // reached when no cookie has been supplied.
+        val hasCookie = EightKPornerSettings.cookie.isNotBlank()
+        val body = http(url, referer)
+            ?: if (hasCookie) null else (viaKiller(url, referer) ?: dom(url, referer))
+            ?: return@withLock null
+        afterBody(body, url, referer)
     }
 
-    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
-    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
-        val body = app.get(
-            url,
-            headers = mapOf("User-Agent" to UA, "Referer" to referer, "Cookie" to consentCookies() + cookiesFor(url)),
-            interceptor = killer,
-            timeout = 25L
-        ).text
-        if (isChallenge(body)) null else body
-    }.getOrNull()
+    /**
+     * The 18+ gate is server side: the site calls GET /aj/main/yes_18?hash=<40 hex> and only then
+     * do the listing pages render cards. Setting pop_up_18 alone is not enough.
+     */
+    private suspend fun afterBody(body: String, url: String, referer: String): String {
+        if (consentDone || body.contains("keep-padding")) return body
+        val hash = Regex("[0-9a-f]{40}").find(body)?.value ?: return body
+
+        val accepted = runCatching {
+            app.get(
+                "https://8kporner.com/aj/main/yes_18?hash=$hash",
+                headers = mapOf(
+                    "User-Agent" to EightKPornerSettings.userAgent.ifBlank { UA },
+                    "Referer" to referer,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Cookie" to EightKPornerSettings.cookie + "; " + consentCookies() + cookiesFor(url)
+                ),
+                timeout = 15L
+            ).code in 200..299
+        }.getOrDefault(false)
+
+        if (!accepted) return body
+        consentDone = true
+        return http(url, referer) ?: body
+    }
 
     // ── rung 1 ─────────────────────────────────────────────────────────────────
 
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()
-        headers["User-Agent"] = UA
+        headers["User-Agent"] = EightKPornerSettings.userAgent.ifBlank { UA }
         headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         headers["Accept-Language"] = "en-US,en;q=0.9"
         headers["Referer"] = referer
         // The 18+ answer the site remembers, plus whatever Cloudflare clearance the WebView earned.
-        headers["Cookie"] = consentCookies() + cookiesFor(url)
+        headers["Cookie"] = EightKPornerSettings.cookie + "; " + consentCookies() + cookiesFor(url)
 
         return runCatching {
             val body = app.get(url, headers = headers, timeout = 20L).text

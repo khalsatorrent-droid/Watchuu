@@ -8,9 +8,10 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class LatestPornVideoPlugin : Plugin() {
     override fun load(context: Context) {
         // Register first, so the provider is live even if the WebView transport cannot start.
-        // A throw from the transport used to take the whole plugin down, which the app reports as
-        // "could not load extension" - i.e. it looked like an install failure.
         registerMainAPI(LatestPornVideoProvider())
+        runCatching { LatestPornVideoSettings.init(context) }
         runCatching { LatestPornVideoBrowser.init(context) }
+        // Gear icon in Extensions -> this plugin: paste the Cloudflare cookie.
+        openSettings = { ctx -> LatestPornVideoSettings.show(ctx) }
     }
 }

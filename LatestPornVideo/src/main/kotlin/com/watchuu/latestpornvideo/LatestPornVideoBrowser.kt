@@ -46,25 +46,25 @@ object LatestPornVideoBrowser {
     private val killer by lazy { CloudflareKiller() }
 
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
-        http(url, referer)
-            ?: viaKiller(url, referer)
-            ?: dom(url, referer)
+        // A pasted cf_clearance makes plain HTTP enough on its own; the WebView rungs are only
+        // reached when no cookie has been supplied.
+        val hasCookie = LatestPornVideoSettings.cookie.isNotBlank()
+        val body = http(url, referer)
+            ?: if (hasCookie) null else (viaKiller(url, referer) ?: dom(url, referer))
+            ?: return@withLock null
+        body
     }
-
-    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
-    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
-        val headers = mapOf("User-Agent" to UA, "Referer" to referer)
-        val body = app.get(url, headers = headers, interceptor = killer, timeout = 25L).text
-        if (isChallenge(body)) null else body
-    }.getOrNull()
 
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()
-        headers["User-Agent"] = UA
+        headers["User-Agent"] = LatestPornVideoSettings.userAgent.ifBlank { UA }
         headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         headers["Accept-Language"] = "en-US,en;q=0.9"
         headers["Referer"] = referer
-        cookiesFor(url)?.let { headers["Cookie"] = it }
+        val manual = LatestPornVideoSettings.cookie
+        val jar = cookiesFor(url).orEmpty()
+        val combined = listOf(manual, jar).filter { it.isNotBlank() }.joinToString("; ")
+        if (combined.isNotBlank()) headers["Cookie"] = combined
 
         return runCatching {
             val body = app.get(url, headers = headers, timeout = 20L).text

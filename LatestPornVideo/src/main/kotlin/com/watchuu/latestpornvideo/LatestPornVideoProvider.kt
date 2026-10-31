@@ -143,18 +143,29 @@ class LatestPornVideoProvider : MainAPI() {
             }
             if (playlists.isEmpty()) continue
 
+            // The CDN is sent Referer, Origin and a desktop-ish UA by the real player; the
+            // capture shows all three on every playlist and segment request, so all three go on
+            // the link - Cloudstream reuses these headers for the segments too.
             val referer = originOf(embed)
+            val origin = referer.trimEnd('/')
+            val headers = mapOf(
+                "Referer" to referer,
+                "Origin" to origin,
+                "User-Agent" to PLAYER_UA,
+                "Accept" to "*/*"
+            )
+
             playlists.forEachIndexed { index, url ->
                 callback.invoke(
                     newExtractorLink(
                         source = name,
                         name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
-                        url = url,
+                        url = cleanUrl(url),
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = referer
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Referer" to referer)
+                        this.headers = headers
                     }
                 )
             }
@@ -171,12 +182,15 @@ class LatestPornVideoProvider : MainAPI() {
                     newExtractorLink(
                         name,
                         name,
-                        url,
+                        cleanUrl(url),
                         if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = "$mainUrl/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Referer" to "$mainUrl/")
+                        this.headers = mapOf(
+                            "Referer" to "$mainUrl/",
+                            "User-Agent" to PLAYER_UA
+                        )
                     }
                 )
                 found = true
@@ -194,6 +208,10 @@ class LatestPornVideoProvider : MainAPI() {
             else -> null
         }
     }
+
+    /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
+    private fun cleanUrl(url: String): String =
+        url.trim().replace("&amp;", "&").replace("\\/", "/")
 
     private fun originOf(url: String): String =
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"
@@ -263,5 +281,11 @@ class LatestPornVideoProvider : MainAPI() {
             }
         }
         return payload
+    }
+
+    private companion object {
+        /** What the site's player sends the CDN on playlist and segment requests. */
+        const val PLAYER_UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
     }
 }

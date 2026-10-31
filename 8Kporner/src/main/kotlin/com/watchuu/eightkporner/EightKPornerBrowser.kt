@@ -52,36 +52,13 @@ object EightKPornerBrowser {
         // A pasted cf_clearance makes plain HTTP enough on its own; the WebView rungs are only
         // reached when no cookie has been supplied.
         val hasCookie = EightKPornerSettings.cookie.isNotBlank()
-        val body = http(url, referer)
-            ?: if (hasCookie) null else (viaKiller(url, referer) ?: dom(url, referer))
-            ?: return@withLock null
-        afterBody(body, url, referer)
-    }
 
-    /**
-     * The 18+ gate is server side: the site calls GET /aj/main/yes_18?hash=<40 hex> and only then
-     * do the listing pages render cards. Setting pop_up_18 alone is not enough.
-     */
-    private suspend fun afterBody(body: String, url: String, referer: String): String {
-        if (consentDone || body.contains("keep-padding")) return body
-        val hash = Regex("[0-9a-f]{40}").find(body)?.value ?: return body
+        val direct = http(url, referer)
+        if (direct != null) return@withLock afterBody(direct, url, referer)
+        if (hasCookie) return@withLock null
 
-        val accepted = runCatching {
-            app.get(
-                "https://8kporner.com/aj/main/yes_18?hash=$hash",
-                headers = mapOf(
-                    "User-Agent" to EightKPornerSettings.userAgent.ifBlank { UA },
-                    "Referer" to referer,
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Cookie" to EightKPornerSettings.cookie + "; " + consentCookies() + cookiesFor(url)
-                ),
-                timeout = 15L
-            ).code in 200..299
-        }.getOrDefault(false)
-
-        if (!accepted) return body
-        consentDone = true
-        return http(url, referer) ?: body
+        val fallback: String = viaKiller(url, referer) ?: dom(url, referer) ?: return@withLock null
+        afterBody(fallback, url, referer)
     }
 
     // ── rung 1 ─────────────────────────────────────────────────────────────────

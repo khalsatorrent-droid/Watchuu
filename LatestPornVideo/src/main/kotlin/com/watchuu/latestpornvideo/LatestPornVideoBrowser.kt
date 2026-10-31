@@ -49,10 +49,13 @@ object LatestPornVideoBrowser {
         // A pasted cf_clearance makes plain HTTP enough on its own; the WebView rungs are only
         // reached when no cookie has been supplied.
         val hasCookie = LatestPornVideoSettings.cookie.isNotBlank()
-        val body = http(url, referer)
-            ?: if (hasCookie) null else (viaKiller(url, referer) ?: dom(url, referer))
-            ?: return@withLock null
-        body
+
+        val direct = http(url, referer)
+        if (direct != null) return@withLock direct
+        if (hasCookie) return@withLock null
+
+        val fallback: String = viaKiller(url, referer) ?: dom(url, referer) ?: return@withLock null
+        fallback
     }
 
     private suspend fun http(url: String, referer: String): String? {

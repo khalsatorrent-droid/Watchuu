@@ -67,10 +67,9 @@ class FamilyPornHDProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
-            this.posterHeaders = FamilyPornHDBrowser.posterHeaders()
             this.plot = plot
             this.tags = tags
-        }
+        }.withPosterHeaders()
     }
 
     override suspend fun loadLinks(
@@ -156,8 +155,25 @@ class FamilyPornHDProvider : MainAPI() {
         val poster = pickImage(this)
         return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
             this.posterUrl = poster
-            this.posterHeaders = FamilyPornHDBrowser.posterHeaders()
+        }.withPosterHeaders()
+    }
+
+    /**
+     * Attach the headers the thumbnail requests need.
+     *
+     * The artwork lives on the same Cloudflare-protected host as the pages, so without the user
+     * agent, referer and clearance cookie the image requests are refused and the cards render
+     * blank. Set by reflection so that an app whose API does not expose posterHeaders still loads
+     * the plugin and simply shows plain posters, instead of failing to install.
+     */
+    private fun <T : Any> T.withPosterHeaders(): T {
+        runCatching {
+            val headers = FamilyPornHDBrowser.posterHeaders()
+            javaClass.methods.firstOrNull { m ->
+                m.name == "setPosterHeaders" && m.parameterTypes.size == 1
+            }?.invoke(this, headers)
         }
+        return this
     }
 
     /**

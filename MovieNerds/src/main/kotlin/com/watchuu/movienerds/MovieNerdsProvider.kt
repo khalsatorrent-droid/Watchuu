@@ -313,7 +313,7 @@ class MovieNerdsProvider : MainAPI() {
 
             val proxied = url.contains("/api/stream/proxy")
 
-            fun emit(target: String, audioTag: String, suffix: String) {
+            suspend fun emit(target: String, audioTag: String, suffix: String) {
                 callback.invoke(
                     newExtractorLink(
                         source = name,

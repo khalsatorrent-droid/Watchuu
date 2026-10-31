@@ -3,37 +3,40 @@ package com.watchuu.movienerds
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
-import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * movienerds.site — built from the capture of 2026-10-31 11:24.
+ * movienerds.site — built from the captures of 2026-10-31 (11:24 and 16:22).
  *
- * The site is a TMDB front end: its own pages render from api.themoviedb.org (156 of the 875
- * captured requests), so the catalogue, artwork and search all come straight from TMDB and
- * nothing has to be scraped from the HTML.
+ * The site is a TMDB front end: its own pages render from api.themoviedb.org, so the catalogue,
+ * artwork and search come straight from TMDB and nothing is scraped.
  *
- * Playback goes through its own JSON API, which is the part worth writing down:
+ * Playback is its own JSON API:
  *
  *   GET https://api.movienerds.online/api/stream
- *       ?tmdbId=155&type=movie&lang=en&originalLanguage=en      -> "isFull": true, all providers
- *       ?tmdbId=155&type=movie&lang=en&fast=1&originalLanguage=en -> "isFull": false, quick ones only
- *       [&season=1&episode=1]            for tv
+ *       ?tmdbId=155&type=movie&lang=en&originalLanguage=en
+ *       [&season=1&episode=1]                      for tv
+ *       [&bypassCache=1&title=..&year=..&imdbId=..] when the cache is empty
  *   headers: x-client-app: movienerds
  *            x-app-key:   mn_sec_2026_stream_auth
  *            Origin:      https://movienerds.site
  *            Accept:      application/json
  *
- * and answers:
- *   { "success": true, "sources": [ { "url": ".../proxy.m3u8?b64=…", "type": "hls",
- *                                     "quality": "1080p FHD (Master HLS)",
- *                                     "providerName": "Apex Prism", "language": "English",
- *                                     "headers": { "Referer": "https://vidrock.net/", … } } ],
- *     "subtitles": [ { "label": "English", "url": "/api/subtitles/vtt?url=…" } ] }
+ * It answers in stages: the plain call returns "isFull": true with every provider (6 sources in
+ * the first capture), while &fast=1 returns "isFull": false with only the quick ones (3). So the
+ * full call is made first and the fast one is only a fallback.
  *
- * Each source carries the headers its own CDN wants, so those are passed through per link
- * rather than applied globally — that is what makes the proxy m3u8 actually play.
+ * Two things about the urls, both visible in the captures:
+ *
+ *  - everything is rewritten to the site's proxy: master -> proxy.m3u8, variant -> proxy.m3u8,
+ *    segment -> proxy.ts. The Referer/Origin/User-Agent in each source's "headers" belong to the
+ *    upstream CDN the server pulls from, NOT to the proxy. What the browser sends the proxy is
+ *    just UA + Origin: https://movienerds.site + Accept: */*, with no referer.
+ *  - audio is a query parameter on that same proxy url. The site's own player switches track by
+ *    rewriting it - the 16:22 capture shows audio=en, audio=English, audio=english and audio=hi
+ *    against otherwise identical urls. So each source can be offered per audio track by rewriting
+ *    that parameter rather than re-resolving anything.
  */
 class MovieNerdsProvider : MainAPI() {
     override var mainUrl = "https://movienerds.site"
@@ -73,7 +76,6 @@ class MovieNerdsProvider : MainAPI() {
         return runCatching { fetchList(url, "") }.getOrDefault(emptyList())
     }
 
-    /** Reads a TMDB list response. [path] tells movie from tv when the payload does not. */
     private suspend fun fetchList(url: String, path: String): List<SearchResponse> {
         val body = app.get(url, timeout = 25L).text
         val results = JSONObject(body).optJSONArray("results") ?: return emptyList()
@@ -119,7 +121,7 @@ class MovieNerdsProvider : MainAPI() {
 
         val body = app.get(
             "https://api.themoviedb.org/3/$type/$id?api_key=$TMDB_KEY&language=en-US" +
-                "&append_to_response=credits",
+                "&append_to_response=credits,external_ids",
             timeout = 25L
         ).text
         val o = JSONObject(body)
@@ -127,8 +129,9 @@ class MovieNerdsProvider : MainAPI() {
         val title = o.optString("title").ifBlank { o.optString("name") }
             .ifBlank { o.optString("original_title") }.ifBlank { "Unknown" }
         val originalLanguage = o.optString("original_language").ifBlank { "en" }
-        val year = (o.optString("release_date").ifBlank { o.optString("first_air_date") })
-            .take(4).ifBlank { null }
+        val year = (o.optString("release_date").ifBlank { o.optString("first_air_date") }).take(4)
+        val imdbId = o.optJSONObject("external_ids")?.optString("imdb_id").orEmpty()
+            .ifBlank { o.optString("imdb_id") }
         val poster = posterUrl(o.optString("poster_path"))
         val plot = o.optString("overview").ifBlank { null }
 
@@ -145,16 +148,17 @@ class MovieNerdsProvider : MainAPI() {
         }
 
         if (type == "movie") {
-            return newMovieLoadResponse(title, url, TvType.Movie, "$type|$id|$originalLanguage") {
+            return newMovieLoadResponse(
+                title, url, TvType.Movie,
+                payload(type, id, originalLanguage, title, year, imdbId, null, null)
+            ) {
                 this.posterUrl = poster
                 this.plot = plot
-                this.year = year?.toIntOrNull()
+                this.year = year.toIntOrNull()
                 this.tags = tags
             }
         }
 
-        // TV: episodes come from the season endpoints, so the stream API can be asked for a
-        // specific season and episode.
         val episodes = ArrayList<Episode>()
         val seasons = o.optJSONArray("seasons")
         var fetched = 0
@@ -162,8 +166,7 @@ class MovieNerdsProvider : MainAPI() {
             for (i in 0 until seasons.length()) {
                 val season = seasons.optJSONObject(i) ?: continue
                 val number = season.optInt("season_number", 0)
-                val count = season.optInt("episode_count", 0)
-                if (count <= 0 || number <= 0) continue
+                if (season.optInt("episode_count", 0) <= 0 || number <= 0) continue
                 if (fetched >= 10) break
 
                 val seasonBody = runCatching {
@@ -183,7 +186,11 @@ class MovieNerdsProvider : MainAPI() {
                     val epNumber = ep.optInt("episode_number", 0)
                     if (epNumber <= 0) continue
                     episodes.add(
-                        newEpisode("$type|$id|$originalLanguage|$number|$epNumber") {
+                        newEpisode(
+                            payload(
+                                type, id, originalLanguage, title, year, imdbId, number, epNumber
+                            )
+                        ) {
                             this.name = ep.optString("name").ifBlank { "Episode $epNumber" }
                             this.season = number
                             this.episode = epNumber
@@ -198,7 +205,7 @@ class MovieNerdsProvider : MainAPI() {
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
-            this.year = year?.toIntOrNull()
+            this.year = year.toIntOrNull()
             this.tags = tags
         }
     }
@@ -211,26 +218,16 @@ class MovieNerdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split('|')
-        if (parts.size < 2) return false
-        val type = parts[0]
-        val id = parts[1]
-        val originalLanguage = parts.getOrElse(2) { "en" }.ifBlank { "en" }
-
-        // The API resolves its providers on the fly and answers in stages:
-        //   plain call  -> "isFull": true,  every provider (6 sources in the capture)
-        //   &fast=1     -> "isFull": false, only the quick ones (3 sources)
-        // So ask for the full set first, and only fall back to fast if that yields nothing.
-        val base = buildList {
-            add("tmdbId=$id")
-            add("type=$type")
-            add("lang=en")
-            add("originalLanguage=$originalLanguage")
-            if (type == "tv") {
-                add("season=${parts.getOrNull(3) ?: "1"}")
-                add("episode=${parts.getOrNull(4) ?: "1"}")
-            }
-        }.joinToString("&")
+        val o = runCatching { JSONObject(data) }.getOrNull() ?: return false
+        val type = o.optString("type", "movie")
+        val id = o.optString("id")
+        if (id.isBlank()) return false
+        val originalLanguage = o.optString("ol", "en").ifBlank { "en" }
+        val title = o.optString("title")
+        val year = o.optString("year")
+        val imdbId = o.optString("imdb")
+        val season = o.optInt("season", 1)
+        val episode = o.optInt("episode", 1)
 
         val headers = mapOf(
             "Accept" to "application/json",
@@ -240,26 +237,45 @@ class MovieNerdsProvider : MainAPI() {
             "x-app-key" to STREAM_KEY
         )
 
+        fun query(extra: String = ""): String = buildList {
+            add("tmdbId=$id")
+            add("type=$type")
+            add("lang=en")
+            add("originalLanguage=$originalLanguage")
+            if (type == "tv") {
+                add("season=$season")
+                add("episode=$episode")
+            }
+            if (extra.isNotBlank()) add(extra)
+        }.joinToString("&")
+
+        // What the site itself retries with once a title is known but not yet cached.
+        val bypass = buildString {
+            append("bypassCache=1")
+            if (title.isNotBlank()) append("&title=").append(URLEncoder.encode(title, "UTF-8"))
+            if (year.isNotBlank()) append("&year=").append(year)
+            if (imdbId.isNotBlank()) append("&imdbId=").append(imdbId)
+        }
+
         val sources = LinkedHashMap<String, JSONObject>()
         val subtitles = ArrayList<JSONObject>()
 
-        /** One API call; merges what it returns. Returns whether the server called it complete. */
-        suspend fun collect(query: String): Boolean {
+        suspend fun collect(q: String): Boolean {
             val body = runCatching {
-                app.get("$API/api/stream?$query", headers = headers, timeout = 45L).text
+                app.get("$API/api/stream?$q", headers = headers, timeout = 45L).text
             }.getOrNull() ?: return false
             val root = runCatching { JSONObject(body) }.getOrNull() ?: return false
 
             root.optJSONArray("sources")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val s = arr.optJSONObject(i) ?: continue
-                    val url = s.optString("url").ifBlank { s.optString("rawUrl") }
-                    if (url.startsWith("http") && !sources.containsKey(url)) sources[url] = s
+                    val u = cleanUrl(s.optString("url").ifBlank { s.optString("rawUrl") })
+                    if (u.startsWith("http") && !sources.containsKey(u)) sources[u] = s
                 }
             }
             root.optJSONObject("activeSource")?.let { s ->
-                val url = s.optString("url").ifBlank { s.optString("rawUrl") }
-                if (url.startsWith("http") && !sources.containsKey(url)) sources[url] = s
+                val u = cleanUrl(s.optString("url").ifBlank { s.optString("rawUrl") })
+                if (u.startsWith("http") && !sources.containsKey(u)) sources[u] = s
             }
             root.optJSONArray("subtitles")?.let { subs ->
                 for (i in 0 until subs.length()) subs.optJSONObject(i)?.let { subtitles.add(it) }
@@ -267,24 +283,19 @@ class MovieNerdsProvider : MainAPI() {
             return root.optBoolean("isFull", false)
         }
 
-        var complete = collect(base)
+        // Full set first; then the cache-bypass retry the site uses; fast only as a last resort.
+        var complete = collect(query())
         if (!complete || sources.size < 2) {
-            // Providers were still resolving, or almost nothing came back - ask once more, then
-            // take the quick set if that still gave us nothing.
-            if (sources.isEmpty()) {
-                collect("$base&fast=1")
-            } else {
-                delay(1_500L)
-                complete = collect(base)
-            }
+            collect(query(bypass))
         }
-        if (sources.isEmpty()) collect("$base&fast=1")
-
+        if (sources.isEmpty()) {
+            collect(query("fast=1"))
+        }
         if (sources.isEmpty()) return false
 
         sources.values.forEach { s ->
-            val rawUrl = cleanUrl(s.optString("url").ifBlank { s.optString("rawUrl") })
-            if (!rawUrl.startsWith("http")) return@forEach
+            val url = cleanUrl(s.optString("url").ifBlank { s.optString("rawUrl") })
+            if (!url.startsWith("http")) return@forEach
 
             val directUrl = cleanUrl(s.optString("rawUrl"))
             val provider = s.optString("providerName").ifBlank { s.optString("name") }
@@ -292,10 +303,6 @@ class MovieNerdsProvider : MainAPI() {
             val quality = s.optString("quality")
             val language = s.optString("language")
 
-            // The headers in the payload belong to the upstream CDN the site's server pulls from.
-            // Everything the player touches is rewritten to the proxy (master -> proxy.m3u8,
-            // variants -> proxy.m3u8, segments -> proxy.ts), so for those urls the only headers
-            // that matter are the ones the browser sent the proxy: UA, Origin, Accept.
             val upstreamHeaders = HashMap<String, String>()
             s.optJSONObject("headers")?.let { h ->
                 for (key in h.keys()) {
@@ -304,53 +311,57 @@ class MovieNerdsProvider : MainAPI() {
                 }
             }
 
-            fun title(suffix: String = "") = buildString {
-                append(provider.ifBlank { name })
-                if (label.isNotBlank() && !label.startsWith(provider)) append(" - ").append(label)
-                if (quality.isNotBlank()) append(" [").append(quality).append("]")
-                if (language.isNotBlank()) append(" (").append(language).append(")")
-                if (suffix.isNotBlank()) append(suffix)
-            }
+            val proxied = url.contains("/api/stream/proxy")
 
-            val proxied = rawUrl.contains("/api/stream/proxy")
-
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = title(),
-                    url = rawUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.quality = getQualityFromName(quality)
-                    if (proxied) {
-                        this.referer = "$mainUrl/"
-                        this.headers = mapOf(
-                            "User-Agent" to UA,
-                            "Origin" to mainUrl,
-                            "Accept" to "*/*"
-                        )
-                    } else {
-                        this.referer = upstreamHeaders["Referer"] ?: "$mainUrl/"
-                        this.headers = upstreamHeaders
-                    }
-                }
-            )
-
-            // If the proxy is what is failing, the same source usually has the real CDN url in
-            // rawUrl - offer it too, with the headers that CDN wants.
-            if (proxied && directUrl.startsWith("http") && directUrl != rawUrl) {
+            fun emit(target: String, audioTag: String, suffix: String) {
                 callback.invoke(
                     newExtractorLink(
                         source = name,
-                        name = title(" - direct"),
-                        url = directUrl,
+                        name = buildString {
+                            append(provider.ifBlank { name })
+                            if (label.isNotBlank() && !label.startsWith(provider)) {
+                                append(" - ").append(label)
+                            }
+                            if (quality.isNotBlank()) append(" [").append(quality).append("]")
+                            if (audioTag.isNotBlank()) append(" (").append(audioTag).append(")")
+                            if (suffix.isNotBlank()) append(suffix)
+                        },
+                        url = target,
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = getQualityFromName(quality)
-                        this.referer = upstreamHeaders["Referer"] ?: "$mainUrl/"
-                        this.headers = upstreamHeaders
+                        if (proxied) {
+                            this.referer = "$mainUrl/"
+                            this.headers = mapOf(
+                                "User-Agent" to UA,
+                                "Origin" to mainUrl,
+                                "Accept" to "*/*"
+                            )
+                        } else {
+                            this.referer = upstreamHeaders["Referer"] ?: "$mainUrl/"
+                            this.headers = upstreamHeaders
+                        }
                     }
                 )
+            }
+
+            // The source as the API handed it over, in its own audio.
+            emit(url, language, "")
+
+            // Audio is a parameter on the same proxy url - the site's player switches track by
+            // rewriting it, so offer the tracks it demonstrably serves (en and hi both appear in
+            // the 16:22 capture) without resolving anything again.
+            if (proxied) {
+                val baseAudio = audioOf(url)
+                for (code in AUDIO_TRACKS) {
+                    if (baseAudio != null && baseAudio.equals(code, true)) continue
+                    emit(withAudio(url, code), audioName(code), "")
+                }
+            }
+
+            // If the proxy is what fails, rawUrl is the real CDN url with the headers that CDN wants.
+            if (proxied && directUrl.startsWith("http") && directUrl != url) {
+                emit(directUrl, language, " - direct")
             }
         }
 
@@ -369,9 +380,53 @@ class MovieNerdsProvider : MainAPI() {
         return true
     }
 
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
     /** Urls from the API occasionally arrive html-escaped; a stray &amp; breaks every request. */
     private fun cleanUrl(url: String): String =
         url.trim().replace("&amp;", "&").replace("\\/", "/")
+
+    private fun audioOf(url: String): String? =
+        Regex("[?&]audio=([^&]*)").find(url)?.groupValues?.get(1)?.let {
+            runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it)
+        }
+
+    private fun withAudio(url: String, code: String): String =
+        if (url.contains("audio=")) {
+            url.replace(Regex("([?&]audio=)[^&]*")) { m -> m.groupValues[1] + code }
+        } else {
+            "$url${if (url.contains('?')) "&" else "?"}audio=$code"
+        }
+
+    private fun audioName(code: String): String = when (code) {
+        "en" -> "English"
+        "hi" -> "Hindi"
+        "ta" -> "Tamil"
+        "te" -> "Telugu"
+        else -> code
+    }
+
+    private fun payload(
+        type: String,
+        id: String,
+        originalLanguage: String,
+        title: String,
+        year: String,
+        imdbId: String,
+        season: Int?,
+        episode: Int?
+    ): String = JSONObject().apply {
+        put("type", type)
+        put("id", id)
+        put("ol", originalLanguage)
+        put("title", title)
+        put("year", year)
+        put("imdb", imdbId)
+        if (season != null) {
+            put("season", season)
+            put("episode", episode ?: 1)
+        }
+    }.toString()
 
     private companion object {
         /**
@@ -386,8 +441,11 @@ class MovieNerdsProvider : MainAPI() {
 
         const val API = "https://api.movienerds.online"
 
-        /** What the site's own player sends; the proxy rejects some clients without it. */
+        /** What the site's own player sends the proxy. */
         const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
+
+        /** Tracks the proxy is seen serving in the captures. */
+        val AUDIO_TRACKS = listOf("en", "hi")
     }
 }

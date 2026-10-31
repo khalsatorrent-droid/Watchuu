@@ -147,75 +147,69 @@ class TaboodaddyProvider : MainAPI() {
         val html = fetch(data) ?: return false
         val doc = Jsoup.parse(html)
 
-        // 1. the video the page declares about itself
-        val contentUrl = doc.selectFirst("meta[itemprop=contentUrl]")?.attr("content")
+        // The video url can be in three places, in order of reliability.
+        val candidates = LinkedHashSet<String>()
+
+        // 1. what the page declares about itself
+        doc.selectFirst("meta[itemprop=contentUrl]")?.attr("content")
             ?.replace("&amp;", "&")?.trim()
             ?.takeIf { it.startsWith("http") }
+            ?.let { candidates.add(it) }
 
-        var found = false
-        if (contentUrl != null) {
+        // 2. the player iframe's payload. Posts without a contentUrl still carry the same url
+        //    inside it: q is base64url of "post_id=…&tag=<video…><source src='…m3u8'>…".
+        doc.select("iframe[src]").forEach { frame ->
+            val src = frame.attr("src").replace("&amp;", "&")
+            Regex("[?&]q=([^&]+)").find(src)?.groupValues?.get(1)?.let { q ->
+                decodePlayerTag(q)?.let { candidates.add(it) }
+            }
+        }
+
+        // 3. anything else that is literally a playlist or file in the page
+        Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""")
+            .findAll(html).map { it.value.replace("&amp;", "&") }
+            .filter { !isAdHost(it) }
+            .forEach { candidates.add(it) }
+
+        val links = candidates.filter { it.startsWith("http") && !isAdHost(it) }
+        if (links.isEmpty()) return false
+
+        links.forEachIndexed { index, url ->
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name = "$name (HLS)",
-                    url = contentUrl,
-                    type = if (contentUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    name = if (index == 0) "$name (HLS)" else "$name (${index + 1})",
+                    url = url,
+                    type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = "$mainUrl/"
+                    // The capture is specific about this: the browser sent video.twimg.com an
+                    // Origin and no Referer at all, and the CDN echoed the Origin back. A foreign
+                    // Referer is what gets a 403 here.
+                    this.referer = ""
                     this.quality = Qualities.Unknown.value
                     this.headers = mapOf(
-                        "Referer" to "$mainUrl/",
-                        "User-Agent" to userAgent()
+                        "User-Agent" to userAgent(),
+                        "Origin" to mainUrl,
+                        "Accept" to "*/*"
                     )
                 }
             )
-            found = true
         }
-
-        // 2. any other playlist or file sitting in the page
-        Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""")
-            .findAll(html).map { it.value.replace("&amp;", "&") }
-            .filter { it != contentUrl && !isAdHost(it) }
-            .distinct()
-            .forEach { url ->
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = url,
-                        type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Referer" to "$mainUrl/",
-                            "User-Agent" to userAgent()
-                        )
-                    }
-                )
-                found = true
-            }
-
-        // 3. the site's own player wrapper, for a post with no contentUrl of its own
-        if (!found) {
-            doc.select("iframe[src]")
-                .map { it.attr("src").replace("&amp;", "&").trim() }
-                .filter { it.startsWith("http") && !isAdHost(it) }
-                .distinct()
-                .forEach { embed ->
-                    val viaExtractor = mutableListOf<ExtractorLink>()
-                    runCatching {
-                        loadExtractor(embed, "$mainUrl/", subtitleCallback) { viaExtractor.add(it) }
-                    }
-                    if (viaExtractor.isNotEmpty()) {
-                        viaExtractor.forEach { callback.invoke(it) }
-                        found = true
-                    }
-                }
-        }
-
-        return found
+        return true
     }
+
+    /** Pulls the media url out of the player iframe's base64 "q" payload. */
+    private fun decodePlayerTag(q: String): String? = runCatching {
+        val raw = android.util.Base64.decode(
+            q.replace('-', '+').replace('_', '/'),
+            android.util.Base64.NO_WRAP
+        )
+        val text = String(raw, Charsets.UTF_8)
+        val tag = java.net.URLDecoder.decode(text, "UTF-8")
+        Regex("""src=["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
+            .find(tag)?.groupValues?.get(1)
+            ?.replace("&amp;", "&")
+    }.getOrNull()
 
     private fun isAdHost(url: String): Boolean {
         val u = url.lowercase()

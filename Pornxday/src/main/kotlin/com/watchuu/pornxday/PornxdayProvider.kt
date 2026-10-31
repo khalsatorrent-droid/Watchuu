@@ -130,22 +130,23 @@ class PornxdayProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = fetch(data) ?: return false
-        val doc = Jsoup.parse(html)
+        var html = fetch(data) ?: return false
+        var doc = Jsoup.parse(html)
+        var embeds = embedsIn(doc, html)
 
-        val fromDom = doc.select("iframe[src]")
-            .map { it.attr("src").replace("&amp;", "&").trim() }
-            .filter { it.startsWith("http") && !it.contains("pornxday") }
-
-        // Players are sometimes injected by JS, so the embed urls are also taken from the raw
-        // source, where the slashes may be escaped.
-        val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulust|lulucdn|luluvdo|luluvido)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
+        // The player iframes are injected by the site's JavaScript, so the raw HTML can contain
+        // none of them (the capture's detail page renders six). Fall back to the rendered DOM.
+        if (embeds.isEmpty()) {
+            val rendered = PornxdayBrowser.renderedHtml(data, "$mainUrl/")
+            if (rendered != null && rendered.length > 500) {
+                html = rendered
+                doc = Jsoup.parse(rendered)
+                embeds = embedsIn(doc, rendered)
+            }
+        }
 
         var found = false
-        for (embed in (fromDom + fromSource).distinct()) {
+        for (embed in embeds) {
             if (isAdHost(embed)) continue
 
             val playlists = resolveEmbed(embed)
@@ -219,6 +220,36 @@ class PornxdayProvider : MainAPI() {
     /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
     private fun cleanUrl(url: String): String =
         url.trim().replace("&amp;", "&").replace("\\/", "/")
+
+    /**
+     * Every player url on a page: iframes, data-src/data-embed attributes, and embed urls sitting
+     * in the raw source (where slashes may be escaped).
+     */
+    private fun embedsIn(doc: org.jsoup.nodes.Document, html: String): List<String> {
+        val fromDom = ArrayList<String>()
+        doc.select("iframe[src], iframe[data-src], [data-embed], [data-player]").forEach { el ->
+            for (attr in listOf("src", "data-src", "data-embed", "data-player")) {
+                val v = el.attr(attr).replace("&amp;", "&").trim()
+                if (v.startsWith("http")) fromDom.add(v)
+            }
+        }
+
+        val fromSource = Regex(
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulust|lulucdn|luluvdo|luluvido|playhubconnect)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
+
+        // Anything else that looks like an embed code path, whatever the host.
+        val generic = Regex(
+            """https?://[a-z0-9.\-]+/(?:e|embed|v|video)/[A-Za-z0-9]{6,}""",
+            RegexOption.IGNORE_CASE
+        ).findAll(html).map { it.value }
+
+        return (fromDom + fromSource + generic)
+            .map { it.replace("&amp;", "&") }
+            .filter { it.startsWith("http") && !it.contains("pornxday") && !isAdHost(it) }
+            .distinct()
+    }
 
     private fun originOf(url: String): String =
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"

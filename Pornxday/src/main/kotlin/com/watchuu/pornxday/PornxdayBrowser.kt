@@ -111,6 +111,14 @@ object PornxdayBrowser {
         }
     }
 
+    /**
+     * The page as a browser renders it, not as the server sends it. Needed where the player
+     * iframes are injected by the site's own JavaScript - the raw HTML contains none of them.
+     */
+    suspend fun renderedHtml(url: String, referer: String): String? = domLock.withLock {
+        dom(url, referer) ?: http(url, referer)
+    }
+
     /** The solver is only opened when the user allows it, and opens the url that actually failed. */
     private suspend fun solveIfAllowed(url: String): Boolean {
         if (!PornxdaySettings.autoPrompt) return false

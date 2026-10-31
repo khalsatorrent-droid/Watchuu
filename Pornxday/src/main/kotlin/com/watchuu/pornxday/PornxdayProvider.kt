@@ -150,9 +150,32 @@ class PornxdayProvider : MainAPI() {
             if (isAdHost(embed)) continue
 
             // Cloudstream's own LuluStream extractor first; our unpacker only as a fallback.
+            // The extractor's url can arrive html-escaped (&amp; instead of &), which renames every
+            // query parameter after the first and makes the link unplayable. Collect what it emits
+            // and re-emit with a cleaned url, so nothing reaches the player in that state.
+            val fromExtractor = mutableListOf<ExtractorLink>()
             val viaExtractor = runCatching {
-                loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+                loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
             }.getOrDefault(false)
+
+            if (fromExtractor.isNotEmpty()) {
+                fromExtractor.forEach { link ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = link.source ?: name,
+                            name = link.name,
+                            url = cleanUrl(link.url),
+                            type = link.type
+                        ) {
+                            this.referer = refererFor(link.url, link.referer)
+                            this.quality = link.quality
+                            this.headers = link.headers
+                        }
+                    )
+                }
+                found = true
+                continue
+            }
             if (viaExtractor) {
                 found = true
                 continue
@@ -258,6 +281,23 @@ class PornxdayProvider : MainAPI() {
             .map { it.replace("&amp;", "&") }
             .filter { it.startsWith("http") && !it.contains("pornxday") && !isAdHost(it) }
             .distinct()
+    }
+
+    /**
+     * The referer each host actually checks. Streamtape's get_video links are issued to one ip and
+     * expire quickly, and its player always sends its own site as referer - a link handed to a
+     * player with the wrong referer comes back as a 403 even while the token is still valid.
+     */
+    private fun refererFor(url: String, fallback: String?): String {
+        val u = url.lowercase()
+        return when {
+            u.contains("streamtape") -> "https://streamtape.com/"
+            u.contains("dood") || u.contains("ds2play") -> "https://dood.to/"
+            u.contains("mixdrop") -> "https://mixdrop.co/"
+            u.contains("voe") -> "https://voe.sx/"
+            !fallback.isNullOrBlank() -> fallback
+            else -> "$mainUrl/"
+        }
     }
 
     private fun originOf(url: String): String =

@@ -141,9 +141,32 @@ class LatestPornVideoProvider : MainAPI() {
             // Cloudstream ships a LuluStream extractor and keeps it up to date with the host's
             // changes, so the embed is handed over first. Only if it declines do we unpack the
             // player config ourselves, which is the part that breaks when the packer changes.
+            // The extractor's url can arrive html-escaped (&amp; instead of &), which renames every
+            // query parameter after the first and makes the link unplayable. Collect what it emits
+            // and re-emit with a cleaned url, so nothing reaches the player in that state.
+            val fromExtractor = mutableListOf<ExtractorLink>()
             val viaExtractor = runCatching {
-                loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+                loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
             }.getOrDefault(false)
+
+            if (fromExtractor.isNotEmpty()) {
+                fromExtractor.forEach { link ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = link.source ?: name,
+                            name = link.name,
+                            url = cleanUrl(link.url),
+                            type = link.type
+                        ) {
+                            this.referer = refererFor(link.url, link.referer)
+                            this.quality = link.quality
+                            this.headers = link.headers
+                        }
+                    )
+                }
+                found = true
+                continue
+            }
             if (viaExtractor) {
                 found = true
                 continue
@@ -223,6 +246,23 @@ class LatestPornVideoProvider : MainAPI() {
     /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
     private fun cleanUrl(url: String): String =
         url.trim().replace("&amp;", "&").replace("\\/", "/")
+
+    /**
+     * The referer each host actually checks. Streamtape's get_video links are issued to one ip and
+     * expire quickly, and its player always sends its own site as referer - a link handed to a
+     * player with the wrong referer comes back as a 403 even while the token is still valid.
+     */
+    private fun refererFor(url: String, fallback: String?): String {
+        val u = url.lowercase()
+        return when {
+            u.contains("streamtape") -> "https://streamtape.com/"
+            u.contains("dood") || u.contains("ds2play") -> "https://dood.to/"
+            u.contains("mixdrop") -> "https://mixdrop.co/"
+            u.contains("voe") -> "https://voe.sx/"
+            !fallback.isNullOrBlank() -> fallback
+            else -> "$mainUrl/"
+        }
+    }
 
     private fun originOf(url: String): String =
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"

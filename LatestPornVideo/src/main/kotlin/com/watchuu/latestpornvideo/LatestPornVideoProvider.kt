@@ -176,7 +176,7 @@ class LatestPornVideoProvider : MainAPI() {
                             url = cleanUrl(link.url),
                             type = link.type
                         ) {
-                            this.referer = refererFor(link.url, link.referer)
+                            this.referer = link.referer.ifBlank { "$mainUrl/" }
                             this.quality = link.quality
                             this.headers = link.headers
                         }
@@ -268,23 +268,6 @@ class LatestPornVideoProvider : MainAPI() {
     /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
     private fun cleanUrl(url: String): String =
         url.trim().replace("&amp;", "&").replace("\\/", "/")
-
-    /**
-     * The referer each host actually checks. Streamtape's get_video links are issued to one ip and
-     * expire quickly, and its player always sends its own site as referer - a link handed to a
-     * player with the wrong referer comes back as a 403 even while the token is still valid.
-     */
-    private fun refererFor(url: String, fallback: String?): String {
-        val u = url.lowercase()
-        return when {
-            u.contains("streamtape") -> "https://streamtape.com/"
-            u.contains("dood") || u.contains("ds2play") -> "https://dood.to/"
-            u.contains("mixdrop") -> "https://mixdrop.co/"
-            u.contains("voe") -> "https://voe.sx/"
-            !fallback.isNullOrBlank() -> fallback
-            else -> "$mainUrl/"
-        }
-    }
 
     private fun originOf(url: String): String =
         Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"

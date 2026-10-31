@@ -58,6 +58,16 @@ object LatestPornVideoBrowser {
         fallback
     }
 
+    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
+    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
+        val headers = mapOf(
+            "User-Agent" to LatestPornVideoSettings.userAgent.ifBlank { UA },
+            "Referer" to referer
+        )
+        val body = app.get(url, headers = headers, interceptor = killer, timeout = 25L).text
+        if (isChallenge(body)) null else body
+    }.getOrNull()
+
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()
         headers["User-Agent"] = LatestPornVideoSettings.userAgent.ifBlank { UA }

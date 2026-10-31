@@ -61,6 +61,43 @@ object EightKPornerBrowser {
         afterBody(fallback, url, referer)
     }
 
+    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
+    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
+        val headers = mapOf(
+            "User-Agent" to EightKPornerSettings.userAgent.ifBlank { UA },
+            "Referer" to referer,
+            "Cookie" to EightKPornerSettings.cookie + "; " + consentCookies() + cookiesFor(url)
+        )
+        val body = app.get(url, headers = headers, interceptor = killer, timeout = 25L).text
+        if (isChallenge(body)) null else body
+    }.getOrNull()
+
+    /**
+     * The 18+ gate is server side: the site calls GET /aj/main/yes_18?hash=<40 hex> and only then
+     * do the listing pages render cards. Setting pop_up_18 alone is not enough.
+     */
+    private suspend fun afterBody(body: String, url: String, referer: String): String {
+        if (consentDone || body.contains("keep-padding")) return body
+        val hash = Regex("[0-9a-f]{40}").find(body)?.value ?: return body
+
+        val accepted = runCatching {
+            app.get(
+                "https://8kporner.com/aj/main/yes_18?hash=$hash",
+                headers = mapOf(
+                    "User-Agent" to EightKPornerSettings.userAgent.ifBlank { UA },
+                    "Referer" to referer,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Cookie" to EightKPornerSettings.cookie + "; " + consentCookies() + cookiesFor(url)
+                ),
+                timeout = 15L
+            ).code in 200..299
+        }.getOrDefault(false)
+
+        if (!accepted) return body
+        consentDone = true
+        return http(url, referer) ?: body
+    }
+
     // ── rung 1 ─────────────────────────────────────────────────────────────────
 
     private suspend fun http(url: String, referer: String): String? {

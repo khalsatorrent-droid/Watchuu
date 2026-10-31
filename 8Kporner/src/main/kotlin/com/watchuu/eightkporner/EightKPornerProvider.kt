@@ -71,8 +71,26 @@ class EightKPornerProvider : MainAPI() {
             .mapNotNull { it.toSearchResult() }.distinctBy { it.url }
     }
 
-    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("div.keep-padding").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> {
+        val primary = doc.select("div.keep-padding").mapNotNull { it.toSearchResult() }
+        if (primary.isNotEmpty()) return primary.distinctBy { it.url }
+
+        // Second chance: build straight from the watch links, whatever the container class is.
+        return doc.select("a[href*=/watch/]").mapNotNull { a ->
+            val href = a.attr("href").trim().ifBlank { null } ?: return@mapNotNull null
+            val title = a.attr("title").trim().ifBlank { null }
+                ?: a.selectFirst("h4, h3, .title")?.text()?.trim()?.ifBlank { null }
+                ?: a.selectFirst("img[alt]")?.attr("alt")?.trim()?.ifBlank { null }
+                ?: return@mapNotNull null
+            val poster = a.selectFirst("img[src], img[data-src]")
+                ?.let { it.attr("data-src").ifBlank { it.attr("src") } }
+                ?.takeIf { it.isNotBlank() }
+                ?.let { if (it.startsWith("http")) it else "$mainUrl$it" }
+            newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
+                this.posterUrl = poster
+            }
+        }.distinctBy { it.url }
+    }
 
     private fun Element.toSearchResult(): SearchResponse? {
         val titleEl = selectFirst("h4") ?: selectFirst("h3, .title, [class*=title]") ?: return null

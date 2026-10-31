@@ -6,6 +6,7 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -42,10 +43,20 @@ object LatestPornVideoBrowser {
         if (ctx == null) ctx = context.applicationContext
     }
 
+    private val killer by lazy { CloudflareKiller() }
+
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
-        http(url, referer)?.let { return@withLock it }
-        dom(url, referer)
+        http(url, referer)
+            ?: viaKiller(url, referer)
+            ?: dom(url, referer)
     }
+
+    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
+    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
+        val headers = mapOf("User-Agent" to UA, "Referer" to referer)
+        val body = app.get(url, headers = headers, interceptor = killer, timeout = 25L).text
+        if (isChallenge(body)) null else body
+    }.getOrNull()
 
     private suspend fun http(url: String, referer: String): String? {
         val headers = HashMap<String, String>()

@@ -6,6 +6,7 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -44,10 +45,49 @@ object EightKPornerBrowser {
         if (ctx == null) ctx = context.applicationContext
     }
 
+    private val killer by lazy { CloudflareKiller() }
+    @Volatile private var consentDone = false
+
     suspend fun html(url: String, referer: String): String? = domLock.withLock {
-        http(url, referer)?.let { return@withLock it }
-        dom(url, referer)
+        var body = http(url, referer) ?: viaKiller(url, referer) ?: dom(url, referer)
+        if (body == null) return@withLock null
+
+        // The 18+ gate is server side: the site calls GET /aj/main/yes_18?hash=<40 hex> and only
+        // then do the listing pages render cards. Setting pop_up_18 is not enough on its own.
+        if (!consentDone && !body.contains("keep-padding")) {
+            val hash = Regex("[0-9a-f]{40}").find(body)?.value
+            if (hash != null) {
+                val accepted = runCatching {
+                    app.get(
+                        "https://8kporner.com/aj/main/yes_18?hash=$hash",
+                        headers = mapOf(
+                            "User-Agent" to UA,
+                            "Referer" to referer,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Cookie" to consentCookies() + cookiesFor(url)
+                        ),
+                        timeout = 15L
+                    ).code in 200..299
+                }.getOrDefault(false)
+                if (accepted) {
+                    consentDone = true
+                    http(url, referer)?.let { body = it }
+                }
+            }
+        }
+        body
     }
+
+    /** Cloudstream's own challenge solver - purpose built for Cloudflare, worth one try. */
+    private suspend fun viaKiller(url: String, referer: String): String? = runCatching {
+        val body = app.get(
+            url,
+            headers = mapOf("User-Agent" to UA, "Referer" to referer, "Cookie" to consentCookies() + cookiesFor(url)),
+            interceptor = killer,
+            timeout = 25L
+        ).text
+        if (isChallenge(body)) null else body
+    }.getOrNull()
 
     // ── rung 1 ─────────────────────────────────────────────────────────────────
 

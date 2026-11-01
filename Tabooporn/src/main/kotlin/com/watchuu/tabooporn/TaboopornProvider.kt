@@ -149,22 +149,33 @@ class TaboopornProvider : MainAPI() {
     ): Boolean {
         val html = fetch(data) ?: return false
 
-        // ONLY the video this page is about. The page is full of /get_file/ urls, but those
-        // belong to the hover previews of the related videos further down, which is why listing
-        // them all produced dozens of links that played somebody else's clip. The VideoObject's
-        // contentUrl is the one that names this post's own file.
-        val own = jsonValue(html, "contentUrl")
-            ?.replace("&amp;", "&")
-            ?.takeIf { it.startsWith("http") && (it.contains(".mp4") || it.contains(".m3u8")) }
+        // The player is configured by a flashvars object in the page:
+        //   video_url:      '…/get_file/0/<token>.mp4/?v-acctoken=<token>'   (480p)
+        //   video_alt_url:  '…'                                              (720p)
+        //   video_alt_url2: '…'                                              (1080p)
+        // The token is the whole point. The same file without ?v-acctoken= is what the
+        // VideoObject's contentUrl points at, and it does not play - the site refuses it. So the
+        // flashvars urls are the only genuine links, and they are per-post, which also means the
+        // hover previews of the related videos further down never get in.
+        val qualities = listOf(
+            Triple("video_alt_url2", "video_alt_url2_text", "1080p"),
+            Triple("video_alt_url", "video_alt_url_text", "720p"),
+            Triple("video_url", "video_url_text", "480p")
+        )
+        val links = qualities.mapNotNull { (urlKey, textKey, fallback) ->
+            val url = flashValue(html, urlKey) ?: return@mapNotNull null
+            if (!url.startsWith("http")) return@mapNotNull null
+            val label = flashValue(html, textKey) ?: fallback
+            url to label
+        }.distinctBy { it.first }
 
-        val links = listOfNotNull(own)
         if (links.isEmpty()) return false
 
-        links.forEachIndexed { index, url ->
+        links.forEach { (url, label) ->
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name = name,
+                    name = "$name ($label)",
                     url = url,
                     type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
@@ -179,6 +190,15 @@ class TaboopornProvider : MainAPI() {
         }
         return true
     }
+
+    /** Reads a single-quoted flashvars value, e.g. video_url: 'https://…'. */
+    private fun flashValue(html: String, key: String): String? =
+        Regex("""\b$key\s*:\s*'([^']+)'""")
+            .find(html)?.groupValues?.get(1)
+            ?.replace("\\/", "/")
+            ?.replace("&amp;", "&")
+            ?.trim()
+            ?.ifBlank { null }
 
     /** Pull a string field out of the page's JSON-LD without a JSON parser. */
     private fun jsonValue(html: String, field: String): String? =

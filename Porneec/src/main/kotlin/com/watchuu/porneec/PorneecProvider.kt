@@ -54,20 +54,17 @@ class PorneecProvider : MainAPI() {
     }
 
     /**
-     * A challenge page is still html with a 200, and it contains no player, so returning it
-     * meant the extension parsed an interstitial and found nothing. Anything that does not look
-     * like the real page goes to the CloudflareKiller rung instead.
+     * A page is good when it actually contains the site's own markup. Deciding by "does it look
+     * like a challenge" does not work: Cloudflare puts challenge-platform and cf_chl in the html
+     * of perfectly normal pages as part of its bot detection, so a blocklist of those markers
+     * rejected the real home page and left the extension with nothing. Asking for the content we
+     * are about to parse is the only test that holds in both directions.
      */
-    private fun looksLikePage(html: String): Boolean {
-        if (!html.contains("<html", true)) return false
-        val blocked = listOf(
-            "Just a moment", "cf_chl", "challenge-platform", "Checking your browser",
-            "Enable JavaScript and cookies", "cf-browser-verification", "Attention Required"
-        )
-        if (blocked.any { html.contains(it, true) }) return false
-        return html.contains("player-x.php") || html.contains("thumb-block") ||
-            html.contains("wp-content") || html.contains("<iframe")
-    }
+    private fun looksLikePage(html: String): Boolean =
+        html.contains("<html", true) && (
+            html.contains("thumb-block") || html.contains("player-x.php") ||
+                html.contains("wp-content") || html.contains("<iframe")
+            )
 
     private fun pageUrl(page: Int, query: String? = null): String {
         val base = if (page > 1) "$mainUrl/page/$page/" else "$mainUrl/"

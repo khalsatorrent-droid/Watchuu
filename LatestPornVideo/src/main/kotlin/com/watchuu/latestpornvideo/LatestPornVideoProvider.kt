@@ -329,8 +329,12 @@ class LatestPornVideoProvider : MainAPI() {
      * Substitutes each table word back into the payload, which is where the playlist url lives.
      */
     private fun unpackJs(source: String): String {
+        // Dean Edwards packer. The parameter names and the tail after .split('|') differ between
+        // hosts - luluvido uses (p,a,c,k,e,d), lulustream and others rename them and append ,0,{}
+        // - so nothing here depends on the exact spelling: any six parameters, and the split is
+        // the only thing matched after the dictionary.
         val match = Regex(
-            """eval\(function\(p,a,c,k,e,d\)\{.*?}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""",
+            """eval\s*\(\s*function\s*\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*\)\s*\{.*?}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\s*\.split\(\s*'\|'\s*\)""",
             RegexOption.DOT_MATCHES_ALL
         ).find(source) ?: return source
 

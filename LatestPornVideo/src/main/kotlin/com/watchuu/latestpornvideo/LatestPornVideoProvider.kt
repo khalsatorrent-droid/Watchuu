@@ -1,27 +1,30 @@
 package com.watchuu.latestpornvideo
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 /**
- * latestpornvideo.com — rebuilt from the capture of 2026-10-30 22:47.
+ * latestpornvideo.com — WordPress site confirmed from network log (2026-10-30).
  *
- * Structure, all confirmed in that capture:
- *   listing cards  article.loop-video.thumb-block, <a href="/1200033/" title="…">, img src webp
- *   paging         path: /page/2/ , and for search /page/2/?s=…
- *   detail         /{id}/  (numeric post id), two iframes
- *   iframe         https://luluvdo.com/e/<code>  or  https://luluvido.com/e/<code>
- *   embed page     a <script> with the classic packed player config:
- *                    eval(function(p,a,c,k,e,d){…}('…',62,N,'word|table'.split('|'),0,{}))
- *                  which unpacks to  sources:[{file:"https://…/master.m3u8?t=…"}]
- *                  (hanerix-style pages instead carry links = {"hls2":"…","hls3":"…"})
- *   streams        HLS on cdn*.cdn-tnmr.org, absolute urls with a token, Referer = the embed host
+ * Structure (from log analysis):
+ *  - Listing cards: article.loop-video.thumb-block  (20 per page)
+ *  - Pagination:    /page/N/  (path-based)
+ *  - Search:        /?s=<query>  →  same article card grid
+ *  - Detail page:   /<post_id>/
+ *      · title    : h1
+ *      · poster   : meta[property=og:image]
+ *      · plot     : [class*=description]  or  meta[property=og:description]
+ *      · tags     : [class*=categor] a
+ *      · iframes  : luluvido.com/e/<code>  and  hanerix.com/e/<code>
  *
- * So playback needs the packer unpacked, not a regex for a literal .m3u8 — the url simply is not
- * in the page until it is unpacked.
+ *  Video delivery (from log):
+ *      luluvido.com/e/<code>  →  JW Player  →  m3u8 on tnmr.org CDN
+ *      hanerix.com/e/<code>   →  player     →  m3u8 on cdn-centaurus.com
+ *
+ *  Cloudflare is present (cf_clearance cookie observed), so CloudflareKiller is used.
  */
 class LatestPornVideoProvider : MainAPI() {
     override var mainUrl = "https://latestpornvideo.com"
@@ -29,81 +32,90 @@ class LatestPornVideoProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
+    override val vpnStatus = VPNStatus.MightBeNeeded
 
+    private val cf = CloudflareKiller()
+    private val ua =
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+    // Home sections observed in the log: Latest, Porn Movie, JAV, Webcam
     override val mainPage = mainPageOf(
-        "" to "Latest",
-        "category/porn-movie/" to "Porn Movie",
-        "category/jav/" to "JAV",
-        "category/webcam/" to "Webcam"
+        ""                       to "Latest",
+        "category/porn-movie/"   to "Porn Movie",
+        "category/jav/"          to "JAV",
+        "category/webcam/"       to "Webcam",
     )
 
-    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? =
-        LatestPornVideoBrowser.html(url, referer)
+    // -------------------------------------------------------------------------
+    // Helpers
 
-    // ── Listings ───────────────────────────────────────────────────────────────
+    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String =
+        app.get(url, referer = referer, interceptor = cf, headers = mapOf("User-Agent" to ua)).text
+
+    /** Extract cards from a listing page HTML. */
+    private fun parseCards(html: String): List<SearchResponse> {
+        val doc = org.jsoup.Jsoup.parse(html)
+        return doc.select("article.loop-video.thumb-block").mapNotNull { it.toSearchResult() }
+            .distinctBy { it.url }
+    }
+
+    /** Does this listing page have a next page? */
+    private fun hasNext(html: String): Boolean {
+        val doc = org.jsoup.Jsoup.parse(html)
+        return doc.selectFirst(
+            "link[rel=next], .nav-links a.next, a.next.page-numbers, a[rel=next]"
+        ) != null
+    }
+
+    // -------------------------------------------------------------------------
+    // Main page / category listings
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = mainUrl.trimEnd('/') + "/" +
             request.data.trim('/').let { if (it.isEmpty()) "" else "$it/" }
         val url = if (page > 1) "${base}page/$page/" else base
 
-        val doc = fetch(url)?.let { Jsoup.parse(it) }
-            ?: return newHomePageResponse(request.name, emptyList(), false)
-        val items = cards(doc)
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        val html = fetch(url)
+        val items = parseCards(html)
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty() && hasNext(html))
     }
+
+    // -------------------------------------------------------------------------
+    // Search
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        if (q.isBlank()) return emptyList()
-
-        val first = fetch("$mainUrl/?s=$q")?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
-        if (first.isEmpty()) return first
-        val second = fetch("$mainUrl/page/2/?s=$q")?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
-        return (first + second).distinctBy { it.url }
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val html = fetch("$mainUrl/?s=$q")
+        return parseCards(html)
     }
 
-    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("article.loop-video, article.thumb-block")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
+    // -------------------------------------------------------------------------
+    // Detail (load)
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val a = selectFirst("a[href]") ?: return null
-        val href = a.attr("href").trim()
-        // Only numeric post urls; this drops tags, categories, dates and pagination links.
-        if (!Regex("""/\d{4,}/?$""").containsMatchIn(href)) return null
+    override suspend fun load(url: String): LoadResponse {
+        val html = fetch(url)
+        val doc = org.jsoup.Jsoup.parse(html)
 
-        val title = a.attr("title").trim().ifBlank { null }
-            ?: selectFirst("h2, h3, .entry-title")?.text()?.trim()?.ifBlank { null }
-            ?: selectFirst("img[alt]")?.attr("alt")?.trim()?.ifBlank { null }
-            ?: return null
+        val title = (
+            doc.selectFirst("h1.entry-title, h1")?.text()
+                ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+                ?: "Video"
+        ).trim()
 
-        val poster = selectFirst("img[src], img[data-src]")
-            ?.let { it.attr("data-src").ifBlank { it.attr("src") } }
-            ?.takeIf { it.isNotBlank() }
-            ?.let { if (it.startsWith("http")) it else "$mainUrl$it" }
+        val poster = fixUrlNull(
+            doc.selectFirst("meta[property=og:image]")?.attr("content")
+        )
 
-        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
-            this.posterUrl = poster
-        }
-    }
+        val plot = (
+            doc.selectFirst("[class*=description] p, [class*=description]")?.text()
+                ?: doc.selectFirst("meta[property=og:description]")?.attr("content")
+                ?: doc.selectFirst("meta[name=description]")?.attr("content")
+        )?.trim()
 
-    // ── Detail ─────────────────────────────────────────────────────────────────
-
-    override suspend fun load(url: String): LoadResponse? {
-        val html = fetch(url) ?: return null
-        val doc = Jsoup.parse(html)
-
-        val title = doc.selectFirst("h1")?.text()?.trim()?.ifBlank { null }
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: "Video"
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
-            ?: doc.selectFirst("article img[src]")?.attr("src")
-        val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")?.ifBlank { null }
-            ?: doc.selectFirst("meta[name=description]")?.attr("content")
-        val tags = doc.select("a[rel=tag], a[href*=/tag/]").map { it.text().trim() }
-            .filter { it.isNotBlank() }.distinct().take(12)
+        val tags = doc.select("[class*=categor] a")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
@@ -112,7 +124,8 @@ class LatestPornVideoProvider : MainAPI() {
         }
     }
 
-    // ── Streams ────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Links (loadLinks)
 
     override suspend fun loadLinks(
         data: String,
@@ -120,251 +133,187 @@ class LatestPornVideoProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val report = StringBuilder()
-        report.append("page: ").append(data).append('\n')
-
-        var html = fetch(data)
-        if (html == null) {
-            report.append("fetch: FAILED (page never arrived - see Test connection for the host)")
-            LatestPornVideoSettings.lastLinkReport = report.toString()
-            return false
-        }
-        report.append("fetch: ok, ").append(html.length).append(" chars\n")
-        var doc = Jsoup.parse(html)
-        var embeds = embedsIn(doc, html)
-
-        // The player iframes are injected by the site's JavaScript, so the raw HTML often contains
-        // none of them - the capture's detail page renders eleven. Fall back to the rendered DOM.
-        if (embeds.isEmpty()) {
-            val rendered = LatestPornVideoBrowser.renderedHtml(data, "$mainUrl/")
-            if (rendered != null && rendered.length > 500) {
-                html = rendered
-                doc = Jsoup.parse(rendered)
-                embeds = embedsIn(doc, rendered)
-            }
-        }
-
-        report.append("embeds: ").append(embeds.size)
-            .append(if (embeds.isEmpty()) " (none found on the page)" else " " + embeds.joinToString())
-            .append('\n')
-
+        val html = fetch(data)
         var found = false
-        for (embed in embeds) {
-            if (isAdHost(embed)) continue
 
-            // Cloudstream ships extractors for these hosts - lulustream, streamtape, earnvids,
-            // dood, mixdrop - and they are maintained as the hosts change. They run for every
-            // embed, not only when our own parsing fails: a packed player that half-parses used
-            // to skip them entirely, which is how a page with a perfectly good streamtape embed
-            // on it ended up offering nothing that played.
-            val fromExtractor = mutableListOf<ExtractorLink>()
-            runCatching {
-                loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
-            }
-            report.append("    extractor links: ").append(fromExtractor.size).append('\n')
-            if (fromExtractor.isNotEmpty()) {
-                fromExtractor.forEach { link ->
-                    callback.invoke(
-                        newExtractorLink(
-                            source = link.source ?: name,
-                            name = link.name,
-                            url = cleanUrl(link.url),
-                            type = link.type
-                        ) {
-                            this.referer = link.referer.ifBlank { "$mainUrl/" }
-                            this.quality = link.quality
-                            this.headers = link.headers
-                        }
-                    )
+        // ---- 1. Collect iframe src values from the page ----
+        val iframeSrcRe = Regex(
+            """<iframe[^>]+\bsrc=["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+        val embedUrls = iframeSrcRe.findAll(html)
+            .map { it.groupValues[1].replace("&amp;", "&").trim() }
+            .filter { it.startsWith("http") && !it.contains("latestpornvideo") }
+            .distinct()
+            .toList()
+
+        // ---- 2. Handle known embed hosts: luluvido & hanerix ----
+        for (embedUrl in embedUrls) {
+            val host = embedUrl.lowercase()
+            when {
+                "luluvido.com" in host -> {
+                    // luluvido.com/e/<code> → packed JS contains sources[{file: "...master.m3u8"}]
+                    val m3u8 = resolveLuluvido(embedUrl, data)
+                    if (m3u8 != null) {
+                        callback.invoke(
+                            newExtractorLink(name, "$name [luluvido]", m3u8, ExtractorLinkType.M3U8) {
+                                this.referer = "https://luluvido.com/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        found = true
+                        continue
+                    }
                 }
-                found = true
-            }
-
-            // Then our own unpacking, so a page that serves a packed player also yields its
-            // playlist even if no extractor knows the host.
-            report.append("    unpacking the player config...\n")
-            val playlists = resolveEmbed(embed).ifEmpty {
-                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
-            }
-            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
-
-            if (playlists.isNotEmpty()) {
-                val referer = originOf(embed)
-                val headers = mapOf(
-                    "Referer" to referer,
-                    "Origin" to referer.trimEnd('/'),
-                    "User-Agent" to PLAYER_UA,
-                    "Accept" to "*/*"
-                )
-                playlists.forEachIndexed { index, url ->
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
-                            url = cleanUrl(url),
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = referer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = headers
-                        }
-                    )
+                "hanerix.com" in host || "hgcloud.to" in host -> {
+                    // hanerix.com/e/<code> → JS source object with m3u8 on cdn-centaurus.com
+                    val m3u8 = resolveHanerix(embedUrl, data)
+                    if (m3u8 != null) {
+                        callback.invoke(
+                            newExtractorLink(name, "$name [hanerix]", m3u8, ExtractorLinkType.M3U8) {
+                                this.referer = "https://hanerix.com/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        found = true
+                        continue
+                    }
                 }
-                found = true
+            }
+            // ---- 3. Fallback: hand unknown iframes to CloudStream's built-in extractors ----
+            if (!found) {
+                runCatching {
+                    if (loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)) found = true
+                }
             }
         }
 
+        // ---- 4. If no iframes found, scan for raw m3u8 in the page source ----
         if (!found) {
-            val direct = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""")
-                .findAll(html).map { it.value }
-                .filter { !isAdHost(it) }
-                .distinct()
-            for (url in direct) {
+            val m3u8Re = Regex("""https?://[^\s"'\\<>]+\.m3u8[^\s"'\\<>]*""", RegexOption.IGNORE_CASE)
+            m3u8Re.findAll(html).map { it.value }.distinct().forEach { m3u8 ->
                 callback.invoke(
-                    newExtractorLink(
-                        name,
-                        name,
-                        cleanUrl(url),
-                        if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
+                    newExtractorLink(name, name, m3u8, ExtractorLinkType.M3U8) {
                         this.referer = "$mainUrl/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Referer" to "$mainUrl/",
-                            "User-Agent" to PLAYER_UA
-                        )
                     }
                 )
                 found = true
             }
         }
-        report.append("result: ").append(if (found) "links emitted" else "NO LINKS")
-        LatestPornVideoSettings.lastLinkReport = report.toString()
+
         return found
     }
 
-    /** luluvdo.com/e/<code> ↔ luluvido.com/e/<code> — the same code on the other host. */
-    private fun mirrorEmbed(embedUrl: String): String? {
-        val code = Regex("/e/([A-Za-z0-9]+)").find(embedUrl)?.groupValues?.get(1) ?: return null
-        return when {
-            embedUrl.contains("luluvdo.com") -> "https://luluvido.com/e/$code"
-            embedUrl.contains("luluvido.com") -> "https://luluvdo.com/e/$code"
-            else -> null
-        }
-    }
+    // -------------------------------------------------------------------------
+    // luluvido resolver
+    //
+    // luluvido.com/e/<code> serves a page with a packed JS (eval/p,a,c,k,e,d obfuscation).
+    // After unpacking the source array contains  {file:"https://.../master.m3u8?t=..."}
+    // We look for the m3u8 URL directly (packed strings are split('|') and indexed),
+    // and fall back to a regex over the raw (still obfuscated) page if unpacking isn't needed.
 
-    /** Urls from the page are occasionally html-escaped; a stray &amp; breaks every request. */
-    private fun cleanUrl(url: String): String =
-        url.trim().replace("&amp;", "&").replace("\\/", "/")
+    private suspend fun resolveLuluvido(embedUrl: String, pageRef: String): String? = runCatching {
+        val html = app.get(
+            embedUrl,
+            referer = pageRef,
+            interceptor = cf,
+            headers = mapOf("User-Agent" to ua)
+        ).text
 
-    /**
-     * Every player url on a page: iframes, data-src/data-embed/data-player attributes, embed urls
-     * in the raw source (slashes may be escaped), and anything else that looks like an embed code
-     * path whatever the host. The generic pass is what catches players that are neither an iframe
-     * nor one of the hosts below.
-     */
-    private fun embedsIn(doc: org.jsoup.nodes.Document, html: String): List<String> {
-        val fromDom = ArrayList<String>()
-        doc.select("iframe[src], iframe[data-src], [data-embed], [data-player]").forEach { el ->
-            for (attr in listOf("src", "data-src", "data-embed", "data-player")) {
-                val v = el.attr(attr).replace("&amp;", "&").trim()
-                if (v.startsWith("http")) fromDom.add(v)
-            }
-        }
+        // The packed script ultimately contains master.m3u8 urls; they appear in the |split table
+        // or become visible once we look at the raw obfuscated source (the CDN token parameter
+        // is still split across the base64-looking strings). A simpler approach: run the packed
+        // JS through a regex for anything that looks like a CDN m3u8 link after splitting the
+        // string table.  The split table (after 'split('|')') is the last single-quoted string
+        // before '))'  in the eval(...) call.
 
-        val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|hanerix|hgcloud|streamtape|earnvids|earnvid)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+        // Try direct regex first (works if the URL survives as a literal in the script):
+        val directM3u8 = Regex(
+            """["'](https?://[^"']+\.m3u8[^"']*)["']""",
             RegexOption.IGNORE_CASE
-        ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
+        ).find(html)?.groupValues?.get(1)
+        if (directM3u8 != null) return@runCatching directM3u8
 
-        val generic = Regex(
-            """https?://[a-z0-9.\-]+/(?:e|embed|v|video)/[A-Za-z0-9]{6,}""",
+        // Unpack p,a,c,k,e,d: extract word table from last split('|') argument
+        val packed = Regex(
+            """eval\(function\(p,a,c,k,e,d\)\{.*?'([\w|]+)'\)""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        ).find(html)?.groupValues?.get(1)?.split("|") ?: return@runCatching null
+
+        // Look for an m3u8 fragment in the word table (CDN path parts live there)
+        val cdnFrag = packed.firstOrNull { it.contains("m3u8") || it.contains("master") }
+        if (cdnFrag != null && cdnFrag.startsWith("http")) return@runCatching cdnFrag
+
+        // Reconstruct: find index of a CDN keyword and piece together the URL
+        val hls2Idx = packed.indexOf("hls2")
+        if (hls2Idx >= 0) {
+            // Walk back from hls2 to find the host segment, forward to find the file code & token
+            // This is heuristic — the actual structure depends on the obfuscation round.
+            val hostIdx = packed.indexOfFirst { it.contains(".org") || it.contains(".net") || it.contains(".com") && it.length > 10 }
+            val tokenIdx = packed.indexOfFirst { Regex("[A-Za-z0-9_-]{20,}").matches(it) && it != packed[hls2Idx] }
+            if (hostIdx >= 0 && tokenIdx >= 0) {
+                return@runCatching "https://${packed[hostIdx]}/${packed[hls2Idx]}/master.m3u8?t=${packed[tokenIdx]}"
+            }
+        }
+        null
+    }.getOrNull()
+
+    // -------------------------------------------------------------------------
+    // hanerix resolver
+    //
+    // hanerix.com/e/<code> embeds a JW/video.js player. The source file URL appears
+    // as a literal string in the script or in a JSON sources array.
+
+    private suspend fun resolveHanerix(embedUrl: String, pageRef: String): String? = runCatching {
+        val html = app.get(
+            embedUrl,
+            referer = pageRef,
+            interceptor = cf,
+            headers = mapOf("User-Agent" to ua)
+        ).text
+
+        // Direct m3u8 URL literal in script
+        val directM3u8 = Regex(
+            """["'](https?://[^"']+\.m3u8[^"']*)["']""",
             RegexOption.IGNORE_CASE
-        ).findAll(html).map { it.value }
+        ).find(html)?.groupValues?.get(1)
+        if (directM3u8 != null) return@runCatching directM3u8
 
-        return (fromDom + fromSource + generic)
-            .map { it.replace("&amp;", "&") }
-            .filter { it.startsWith("http") && !it.contains("latestpornvideo") && !isAdHost(it) }
-            .distinct()
-    }
+        // JSON sources array: {"file":"..."}
+        Regex(
+            """"file"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.get(1)
+    }.getOrNull()
 
-    private fun originOf(url: String): String =
-        Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1)?.plus("/") ?: "$mainUrl/"
+    // -------------------------------------------------------------------------
+    // Card parser
 
-    private fun isAdHost(url: String): Boolean {
-        val u = url.lowercase()
-        return listOf(
-            "a-ads.com", "nucankaktop", "spleniidizzy", "doubleclick", "googlesyndication",
-            "onclickads", "popads", "exoclick", "juicyads", "google-analytics", "cloudflareinsights",
-            "69search.com", "magsrv.com"
-        ).any { u.contains(it) }
-    }
+    private fun Element.toSearchResult(): SearchResponse? {
+        // Link wraps the thumbnail; title attribute or aria-label carries the name
+        val a = selectFirst("a[href]") ?: return null
+        val href = a.attr("href").takeIf { it.isNotBlank() } ?: return null
 
-    /** Unpack the player config, then read the playlist urls out of it. */
-    private suspend fun resolveEmbed(embedUrl: String): List<String> {
-        val html = fetch(embedUrl, "$mainUrl/") ?: return emptyList()
-        val js = unpackJs(html)
-        val out = LinkedHashSet<String>()
+        val title = (
+            selectFirst(".entry-title, h3, h2")?.text()?.trim()
+                ?: a.attr("title").trim()
+                ?: a.attr("aria-label").trim()
+                ?: "Video ${href.trimEnd('/').substringAfterLast('/')}"
+        ).ifBlank { return null }
 
-        // luluvido / luluvdo: sources:[{file:"https://…/master.m3u8?t=…"}]
-        Regex("""sources\s*:\s*\[[^]]*?file\s*:\s*["'](https?://[^"']+)["']""", RegexOption.DOT_MATCHES_ALL)
-            .find(js)?.groupValues?.get(1)?.let { out.add(it) }
+        // Thumbnail: prefer data-src (lazy load), fall back to src; skip data-URIs and logos
+        val poster = fixUrlNull(
+            selectFirst("img[data-src]")?.attr("data-src")?.takeIf { isRealImage(it) }
+                ?: selectFirst("img[src]")?.attr("src")?.takeIf { isRealImage(it) }
+        )
 
-        // hanerix style: links = {"hls2":"…m3u8", "hls3":"…"} — hls2 is the real playlist.
-        listOf("hls2", "hls4", "hls3").forEach { key ->
-            val value = Regex(""""$key"\s*:\s*"([^"]+)"""").find(js)?.groupValues?.get(1) ?: return@forEach
-            if (value.contains(".m3u8") || key == "hls2") out.add(value)
+        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
+            this.posterUrl = poster
         }
-
-        Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(js).forEach { out.add(it.value) }
-
-        return out.filter { it.startsWith("http") }.distinct()
     }
 
-    /**
-     * Dean Edwards packer: eval(function(p,a,c,k,e,d){…}('payload',62,N,'word|table'.split('|'),0,{}))
-     * Substitutes each table word back into the payload, which is where the playlist url lives.
-     */
-    private fun unpackJs(source: String): String {
-        // Dean Edwards packer. The parameter names and the tail after .split('|') differ between
-        // hosts - luluvido uses (p,a,c,k,e,d), lulustream and others rename them and append ,0,{}
-        // - so nothing here depends on the exact spelling: any six parameters, and the split is
-        // the only thing matched after the dictionary.
-        val match = Regex(
-            """eval\s*\(\s*function\s*\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*\)\s*\{.*?}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\s*\.split\(\s*'\|'\s*\)""",
-            RegexOption.DOT_MATCHES_ALL
-        ).find(source) ?: return source
-
-        var payload = match.groupValues[1]
-        val base = match.groupValues[2].toIntOrNull() ?: return source
-        var count = match.groupValues[3].toIntOrNull() ?: return source
-        val words = match.groupValues[4].split("|")
-        if (base < 2) return source
-
-        fun encode(number: Int): String {
-            val digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            var n = number
-            val sb = StringBuilder()
-            while (true) {
-                sb.insert(0, digits[n % base])
-                n /= base
-                if (n == 0) return sb.toString()
-            }
-        }
-
-        while (count-- > 0) {
-            if (count < words.size && words[count].isNotEmpty()) {
-                val word = words[count]
-                payload = Regex("\\b" + Regex.escape(encode(count)) + "\\b")
-                    .replace(payload) { word }
-            }
-        }
-        return payload
-    }
-
-    private companion object {
-        /** What the site's player sends the CDN on playlist and segment requests. */
-        const val PLAYER_UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
-    }
+    private fun isRealImage(url: String): Boolean =
+        url.isNotBlank() && !url.startsWith("data:") &&
+            !url.contains("favicon") && !url.contains("logo") && !url.contains("cropped-")
 }

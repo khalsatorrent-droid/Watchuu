@@ -1,9 +1,8 @@
-// use an integer for version numbers
-version = 24
+version = 25
 
 cloudstream {
     language = "en"
-    description = "Videos from latestpornvideo.com - latest, categories and search"
+    description = "Latest free porn videos from latestpornvideo.com — streaming via luluvido / hanerix embeds"
     authors = listOf("khalsatorrent-droid")
 
     status = 1

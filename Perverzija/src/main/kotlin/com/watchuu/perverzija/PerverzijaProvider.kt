@@ -103,7 +103,7 @@ class PerverzijaProvider : MainAPI() {
     }
 
     private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("div.item-thumbnail, div.video-item")
+        doc.select("div.item-thumbnail, div.video-item, div.xs-related-item")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -190,13 +190,43 @@ class PerverzijaProvider : MainAPI() {
                 found = true
             }
 
-        // 2. the player iframes, handed to Cloudstream's extractors. This is the only route to
-        //    an xtremestream video, and it works whenever one of them learns the host.
-        doc.select("iframe[src]")
+        // 2. the player pages themselves. The xtremestream player builds its video in javascript,
+        //    so today this finds nothing - but if any post ever serves a plain source, or the
+        //    player starts exposing one, this picks it up with no further change.
+        val embeds = doc.select("iframe[src]")
             .map { it.attr("src").replace("&amp;", "&").trim() }
             .filter { it.startsWith("http") && !isAdHost(it) }
             .distinct()
-            .forEach { embed ->
+
+        embeds.forEach { embed ->
+            val playerHtml = fetch(embed, "$mainUrl/") ?: return@forEach
+            Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""")
+                .findAll(playerHtml).map { it.value.replace("&amp;", "&") }
+                .filter { !isAdHost(it) }
+                .distinct()
+                .forEach { url ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name (player)",
+                            url = url,
+                            type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = embed
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf(
+                                "Referer" to embed,
+                                "User-Agent" to userAgent()
+                            )
+                        }
+                    )
+                    found = true
+                }
+        }
+
+        // 3. the embeds, handed to Cloudstream's extractors. This is the route that works the day
+        //    one of them learns xtremestream, and it already covers any non-xtremestream host.
+        embeds.forEach { embed ->
                 val got = mutableListOf<ExtractorLink>()
                 runCatching {
                     loadExtractor(embed, "$mainUrl/", subtitleCallback) { got.add(it) }
@@ -214,7 +244,7 @@ class PerverzijaProvider : MainAPI() {
         val u = url.lowercase()
         return listOf(
             "discord.com", "doubleclick", "googlesyndication", "exoclick", "juicyads",
-            "popads", "onclickads", "addtoany", "cloudflareinsights", "clips4sale",
+            "popads", "onclickads", "addtoany", "cloudflareinsights",
             "hydrax.net", "duckduckgo"
         ).any { u.contains(it) }
     }

@@ -273,7 +273,7 @@ class LatestPornVideoProvider : MainAPI() {
         }
 
         val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|hanerix|hgcloud)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|hanerix|hgcloud|streamtape|earnvids|earnvid)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
             RegexOption.IGNORE_CASE
         ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
 

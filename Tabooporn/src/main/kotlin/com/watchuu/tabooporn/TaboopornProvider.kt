@@ -149,25 +149,22 @@ class TaboopornProvider : MainAPI() {
     ): Boolean {
         val html = fetch(data) ?: return false
 
-        val candidates = LinkedHashSet<String>()
+        // ONLY the video this page is about. The page is full of /get_file/ urls, but those
+        // belong to the hover previews of the related videos further down, which is why listing
+        // them all produced dozens of links that played somebody else's clip. The VideoObject's
+        // contentUrl is the one that names this post's own file.
+        val own = jsonValue(html, "contentUrl")
+            ?.replace("&amp;", "&")
+            ?.takeIf { it.startsWith("http") && (it.contains(".mp4") || it.contains(".m3u8")) }
 
-        // the declared video first
-        jsonValue(html, "contentUrl")?.takeIf { it.startsWith("http") }?.let { candidates.add(it) }
-
-        // then any other file url the player mentions (the quality options)
-        Regex("""https?://[^\s"'<>\\]+/get_file/[^\s"'<>\\]+""")
-            .findAll(html).map { it.value }
-            .filter { it.contains(".mp4") || it.contains(".m3u8") }
-            .forEach { candidates.add(it) }
-
-        val links = candidates.filter { it.startsWith("http") }.distinct()
+        val links = listOfNotNull(own)
         if (links.isEmpty()) return false
 
         links.forEachIndexed { index, url ->
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name = if (index == 0) name else "$name (${index + 1})",
+                    name = name,
                     url = url,
                     type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {

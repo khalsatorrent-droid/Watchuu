@@ -46,12 +46,27 @@ class PorneecProvider : MainAPI() {
             "Referer" to referer
         )
         val plain = runCatching { app.get(url, headers = headers, timeout = 25L).text }.getOrNull()
-        if (plain != null && plain.contains("<html", true) && !plain.contains("Just a moment", true)) {
-            return plain
-        }
+        if (plain != null && looksLikePage(plain)) return plain
+
         return runCatching {
             app.get(url, headers = headers, interceptor = CloudflareKiller(), timeout = 40L).text
-        }.getOrNull()
+        }.getOrNull()?.takeIf { looksLikePage(it) }
+    }
+
+    /**
+     * A challenge page is still html with a 200, and it contains no player, so returning it
+     * meant the extension parsed an interstitial and found nothing. Anything that does not look
+     * like the real page goes to the CloudflareKiller rung instead.
+     */
+    private fun looksLikePage(html: String): Boolean {
+        if (!html.contains("<html", true)) return false
+        val blocked = listOf(
+            "Just a moment", "cf_chl", "challenge-platform", "Checking your browser",
+            "Enable JavaScript and cookies", "cf-browser-verification", "Attention Required"
+        )
+        if (blocked.any { html.contains(it, true) }) return false
+        return html.contains("player-x.php") || html.contains("thumb-block") ||
+            html.contains("wp-content") || html.contains("<iframe")
     }
 
     private fun pageUrl(page: Int, query: String? = null): String {
@@ -161,8 +176,25 @@ class PorneecProvider : MainAPI() {
                 .forEach { candidates.add(it) }
         }
 
-        val links = candidates.filter { it.startsWith("http") && !isAdHost(it) }.distinct()
-        if (links.isEmpty()) return false
+        var links = candidates.filter { it.startsWith("http") && !isAdHost(it) }.distinct()
+
+        // Nothing decoded: the wrapper may be resolvable by Cloudstream itself.
+        if (links.isEmpty()) {
+            doc.select("iframe[src]").forEach { frame ->
+                val embed = frame.attr("src").replace("&amp;", "&").trim()
+                if (embed.startsWith("http")) {
+                    val got = mutableListOf<ExtractorLink>()
+                    runCatching {
+                        loadExtractor(embed, "$mainUrl/", subtitleCallback) { got.add(it) }
+                    }
+                    if (got.isNotEmpty()) {
+                        got.forEach { callback.invoke(it) }
+                        links = got.map { it.url }
+                    }
+                }
+            }
+            if (links.isEmpty()) return false
+        }
 
         links.forEachIndexed { index, url ->
             callback.invoke(
@@ -184,12 +216,22 @@ class PorneecProvider : MainAPI() {
         return true
     }
 
-    /** Pulls the media url out of the clean-tube-player base64 "q" payload. */
-    private fun decodePlayerTag(q: String): String? = runCatching {
-        val raw = android.util.Base64.decode(
-            q.replace('-', '+').replace('_', '/'),
-            android.util.Base64.NO_WRAP
-        )
+    /**
+     * Pulls the media url out of the clean-tube-player base64 "q" payload.
+     *
+     * The value is url-encoded base64url, so it has to be decoded in that order: percent-decode,
+     * map -_ back to +/, restore the padding the url may have eaten, base64-decode, then
+     * percent-decode the html that comes out. Skipping the first step is what made this return
+     * nothing - %3D padding left the decoder with a length it refused.
+     */
+    private fun decodePlayerTag(qRaw: String): String? = runCatching {
+        val q = java.net.URLDecoder.decode(qRaw, "UTF-8")
+            .replace(' ', '+')
+            .replace('-', '+')
+            .replace('_', '/')
+            .trimEnd('=')
+        val padded = q + "=".repeat((4 - q.length % 4) % 4)
+        val raw = android.util.Base64.decode(padded, android.util.Base64.NO_WRAP)
         val text = String(raw, Charsets.UTF_8)
         val tag = java.net.URLDecoder.decode(text, "UTF-8")
         Regex("""src=["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")

@@ -124,6 +124,32 @@ class PornxdayProvider : MainAPI() {
 
     // ── Streams ────────────────────────────────────────────────────────────────
 
+    /**
+     * The "Download / Stream Links" block on every detail page: a run of
+     *   <p><strong>Host</strong><br /><a href="url">title</a></p>
+     * so the host is named in the markup and its url follows. This is the list the page itself
+     * publishes, and it beats guessing at iframes: lulustream appears here as lulust.com/<id>
+     * with no /e/ path, and earnvids as smoothpre.com/file/<id> - neither matches an iframe or an
+     * /e/ pattern, which is why they were being missed.
+     */
+    private fun labelledLinks(html: String): List<Pair<String, String>> =
+        Regex("""<strong>\s*([^<]{2,30})\s*</strong>\s*<br\s*/?>\s*<a[^>]*href=["']([^"']+)["']""")
+            .findAll(html)
+            .map { it.groupValues[1].trim() to it.groupValues[2].replace("&amp;", "&").trim() }
+            .filter { it.second.startsWith("http") }
+            .distinctBy { it.second }
+            .toList()
+
+    /** Hosts Cloudstream ships an extractor for. File lockers are deliberately absent. */
+    private fun isStreamHost(url: String): Boolean {
+        val u = url.lowercase()
+        return listOf(
+            "streamtape", "lulust", "luluvdo", "luluvido", "lulucdn",
+            "smoothpre", "earnvids", "dood", "ds2play", "mixdrop",
+            "voe.sx", "upstream", "filemoon", "vidhide", "streamhub"
+        ).any { u.contains(it) }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -159,6 +185,22 @@ class PornxdayProvider : MainAPI() {
             .append('\n')
 
         var found = false
+
+        // The page's own Download / Stream Links block comes first: it names each host, so every
+        // url can go straight to the extractor that knows it.
+        labelledLinks(html)
+            .filter { (_, url) -> isStreamHost(url) }
+            .forEach { (host, url) ->
+                report.append("    ").append(host).append(" -> ").append(url.take(70)).append('\n')
+                val got = mutableListOf<ExtractorLink>()
+                runCatching {
+                    loadExtractor(url, "$mainUrl/", subtitleCallback) { got.add(it) }
+                }
+                if (got.isNotEmpty()) {
+                    got.forEach { callback.invoke(it) }
+                    found = true
+                }
+            }
         for (embed in embeds) {
             if (isAdHost(embed)) continue
 

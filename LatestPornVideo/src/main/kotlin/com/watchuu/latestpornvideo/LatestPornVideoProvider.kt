@@ -152,47 +152,11 @@ class LatestPornVideoProvider : MainAPI() {
         for (embed in embeds) {
             if (isAdHost(embed)) continue
 
-            // Our own unpacker runs FIRST. That is the order this extension worked in up to v7:
-            // the packed jwplayer config is what these hosts actually serve, and handing the
-            // embed to an extractor first let a "handled" result swallow it and emit nothing.
-            report.append("    unpacking the player config...\n")
-            val playlists = resolveEmbed(embed).ifEmpty {
-                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
-            }
-            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
-
-            if (playlists.isNotEmpty()) {
-                // The CDN is sent Referer, Origin and a browser UA by the real player, and
-                // Cloudstream reuses a link's headers for the segments too.
-                val referer = originOf(embed)
-                val origin = referer.trimEnd('/')
-                val headers = mapOf(
-                    "Referer" to referer,
-                    "Origin" to origin,
-                    "User-Agent" to PLAYER_UA,
-                    "Accept" to "*/*"
-                )
-
-                playlists.forEachIndexed { index, url ->
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
-                            url = cleanUrl(url),
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = referer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = headers
-                        }
-                    )
-                }
-                found = true
-                continue
-            }
-
-            // Unknown host, or nothing unpacked: hand it to Cloudstream's extractors, which is
-            // what covers streamtape and the other hosts that do not use a packed player.
+            // Cloudstream ships extractors for these hosts - lulustream, streamtape, earnvids,
+            // dood, mixdrop - and they are maintained as the hosts change. They run for every
+            // embed, not only when our own parsing fails: a packed player that half-parses used
+            // to skip them entirely, which is how a page with a perfectly good streamtape embed
+            // on it ended up offering nothing that played.
             val fromExtractor = mutableListOf<ExtractorLink>()
             runCatching {
                 loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
@@ -210,6 +174,39 @@ class LatestPornVideoProvider : MainAPI() {
                             this.referer = link.referer.ifBlank { "$mainUrl/" }
                             this.quality = link.quality
                             this.headers = link.headers
+                        }
+                    )
+                }
+                found = true
+            }
+
+            // Then our own unpacking, so a page that serves a packed player also yields its
+            // playlist even if no extractor knows the host.
+            report.append("    unpacking the player config...\n")
+            val playlists = resolveEmbed(embed).ifEmpty {
+                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
+            }
+            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
+
+            if (playlists.isNotEmpty()) {
+                val referer = originOf(embed)
+                val headers = mapOf(
+                    "Referer" to referer,
+                    "Origin" to referer.trimEnd('/'),
+                    "User-Agent" to PLAYER_UA,
+                    "Accept" to "*/*"
+                )
+                playlists.forEachIndexed { index, url ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
+                            url = cleanUrl(url),
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = referer
+                            this.quality = Qualities.Unknown.value
+                            this.headers = headers
                         }
                     )
                 }

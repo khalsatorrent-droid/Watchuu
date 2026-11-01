@@ -124,32 +124,6 @@ class PornxdayProvider : MainAPI() {
 
     // ── Streams ────────────────────────────────────────────────────────────────
 
-    /**
-     * The "Download / Stream Links" block on every detail page: a run of
-     *   <p><strong>Host</strong><br /><a href="url">title</a></p>
-     * so the host is named in the markup and its url follows. This is the list the page itself
-     * publishes, and it beats guessing at iframes: lulustream appears here as lulust.com/<id>
-     * with no /e/ path, and earnvids as smoothpre.com/file/<id> - neither matches an iframe or an
-     * /e/ pattern, which is why they were being missed.
-     */
-    private fun labelledLinks(html: String): List<Pair<String, String>> =
-        Regex("""<strong>\s*([^<]{2,30})\s*</strong>\s*<br\s*/?>\s*<a[^>]*href=["']([^"']+)["']""")
-            .findAll(html)
-            .map { it.groupValues[1].trim() to it.groupValues[2].replace("&amp;", "&").trim() }
-            .filter { it.second.startsWith("http") }
-            .distinctBy { it.second }
-            .toList()
-
-    /** Hosts Cloudstream ships an extractor for. File lockers are deliberately absent. */
-    private fun isStreamHost(url: String): Boolean {
-        val u = url.lowercase()
-        return listOf(
-            "streamtape", "lulust", "luluvdo", "luluvido", "lulucdn",
-            "smoothpre", "earnvids", "dood", "ds2play", "mixdrop",
-            "voe.sx", "upstream", "filemoon", "vidhide", "streamhub"
-        ).any { u.contains(it) }
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -185,35 +159,22 @@ class PornxdayProvider : MainAPI() {
             .append('\n')
 
         var found = false
-
-        // The page's own Download / Stream Links block comes first: it names each host, so every
-        // url can go straight to the extractor that knows it.
-        labelledLinks(html)
-            .filter { (_, url) -> isStreamHost(url) }
-            .forEach { (host, url) ->
-                report.append("    ").append(host).append(" -> ").append(url.take(70)).append('\n')
-                val got = mutableListOf<ExtractorLink>()
-                runCatching {
-                    loadExtractor(url, "$mainUrl/", subtitleCallback) { got.add(it) }
-                }
-                if (got.isNotEmpty()) {
-                    got.forEach { callback.invoke(it) }
-                    found = true
-                }
-            }
         for (embed in embeds) {
             if (isAdHost(embed)) continue
 
-            // Cloudstream ships extractors for these hosts - lulustream, streamtape, earnvids,
-            // dood, mixdrop - and they are maintained as the hosts change. They run for every
-            // embed, not only when our own parsing fails: a packed player that half-parses used
-            // to skip them entirely, which is how a page with a perfectly good streamtape embed
-            // on it ended up offering nothing that played.
+            // Cloudstream's own LuluStream extractor first; our unpacker only as a fallback.
+            // The extractor's url can arrive html-escaped (&amp; instead of &), which renames every
+            // query parameter after the first and makes the link unplayable. Collect what it emits
+            // and re-emit with a cleaned url, so nothing reaches the player in that state.
             val fromExtractor = mutableListOf<ExtractorLink>()
-            runCatching {
+            val viaExtractor = runCatching {
                 loadExtractor(embed, "$mainUrl/", subtitleCallback) { fromExtractor.add(it) }
-            }
-            report.append("    extractor links: ").append(fromExtractor.size).append('\n')
+            }.getOrDefault(false)
+
+            report.append("  ").append(embed).append(" -> extractor ")
+                .append(if (fromExtractor.isNotEmpty()) "${fromExtractor.size} link(s)" else "no")
+                .append('\n')
+
             if (fromExtractor.isNotEmpty()) {
                 fromExtractor.forEach { link ->
                     callback.invoke(
@@ -230,40 +191,44 @@ class PornxdayProvider : MainAPI() {
                     )
                 }
                 found = true
+                continue
             }
-
-            // Then our own unpacking, so a page that serves a packed player also yields its
-            // playlist even if no extractor knows the host.
-            report.append("    unpacking the player config...\n")
-            val playlists = resolveEmbed(embed).ifEmpty {
-                mirrorEmbed(embed)?.let { resolveEmbed(it) }.orEmpty()
-            }
-            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
-
-            if (playlists.isNotEmpty()) {
-                val referer = originOf(embed)
-                val headers = mapOf(
-                    "Referer" to referer,
-                    "Origin" to referer.trimEnd('/'),
-                    "User-Agent" to PLAYER_UA,
-                    "Accept" to "*/*"
-                )
-                playlists.forEachIndexed { index, url ->
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
-                            url = cleanUrl(url),
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = referer
-                            this.quality = Qualities.Unknown.value
-                            this.headers = headers
-                        }
-                    )
-                }
+            if (viaExtractor) {
                 found = true
+                continue
             }
+
+            report.append("    unpacking the player config...\n")
+            val playlists = resolveEmbed(embed)
+            report.append("    unpacked playlists: ").append(playlists.size).append('\n')
+            if (playlists.isEmpty()) continue
+
+            // The CDN gets Referer, Origin and a browser UA from the real player; Cloudstream
+            // reuses these headers for the segments too, so all three go on the link.
+            val referer = originOf(embed)
+            val origin = referer.trimEnd('/')
+            val linkHeaders = mapOf(
+                "Referer" to referer,
+                "Origin" to origin,
+                "User-Agent" to PLAYER_UA,
+                "Accept" to "*/*"
+            )
+
+            playlists.forEachIndexed { index, url ->
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = if (index == 0) "$name (HLS)" else "$name (HLS ${index + 1})",
+                        url = cleanUrl(url),
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = referer
+                        this.quality = Qualities.Unknown.value
+                        this.headers = linkHeaders
+                    }
+                )
+            }
+            found = true
         }
 
         if (!found) {
@@ -323,7 +288,7 @@ class PornxdayProvider : MainAPI() {
         }
 
         val fromSource = Regex(
-            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|playhubconnect|streamtape|earnvids|earnvid)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
+            """(?:https?:)?(?:(?:\\?/){2})([a-z0-9.\-]*(?:lulustream|lulust|lulucdn|luluvdo|luluvido|playhubconnect)[a-z0-9.\-]*)(?:\\?/)(?:e|embed|video)(?:\\?/)([A-Za-z0-9]{6,})""",
             RegexOption.IGNORE_CASE
         ).findAll(html).map { m -> "https://${m.groupValues[1]}/e/${m.groupValues[2]}" }
 
@@ -337,16 +302,6 @@ class PornxdayProvider : MainAPI() {
             .map { it.replace("&amp;", "&") }
             .filter { it.startsWith("http") && !it.contains("pornxday") && !isAdHost(it) }
             .distinct()
-    }
-
-    /** luluvdo.com/e/<code> <-> luluvido.com/e/<code> — the same code on the other host. */
-    private fun mirrorEmbed(embedUrl: String): String? {
-        val code = Regex("/e/([A-Za-z0-9]+)").find(embedUrl)?.groupValues?.get(1) ?: return null
-        return when {
-            embedUrl.contains("luluvdo.com") -> "https://luluvido.com/e/$code"
-            embedUrl.contains("luluvido.com") -> "https://luluvdo.com/e/$code"
-            else -> null
-        }
     }
 
     private fun originOf(url: String): String =
@@ -386,12 +341,8 @@ class PornxdayProvider : MainAPI() {
      * Substitutes each table word back into the payload, which is where the playlist url lives.
      */
     private fun unpackJs(source: String): String {
-        // Dean Edwards packer. The parameter names and the tail after .split('|') differ between
-        // hosts - luluvido uses (p,a,c,k,e,d), lulustream and others rename them and append ,0,{}
-        // - so nothing here depends on the exact spelling: any six parameters, and the split is
-        // the only thing matched after the dictionary.
         val match = Regex(
-            """eval\s*\(\s*function\s*\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s*\)\s*\{.*?}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\s*\.split\(\s*'\|'\s*\)""",
+            """eval\(function\(p,a,c,k,e,d\)\{.*?}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""",
             RegexOption.DOT_MATCHES_ALL
         ).find(source) ?: return source
 

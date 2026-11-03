@@ -1,12 +1,11 @@
-// use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
     language = "en"
-    description = "Movies, series and anime from Flix Vision - TMDB catalogue with vidsrc, vixsrc and vsembed sources"
+    description = "Movies & series from the Flix Vision app: TMDB catalogue with its FVStream sources (Dexter, AllMovieLand multi-audio incl. Hindi, VixSrc, Cloudnestra)"
     authors = listOf("khalsatorrent-droid")
 
     status = 1
-    tvTypes = listOf("Movie", "TvSeries", "Anime")
+    tvTypes = listOf("Movie", "TvSeries")
     iconUrl = "https://www.google.com/s2/favicons?domain=flixvision.tv&sz=%size%"
 }

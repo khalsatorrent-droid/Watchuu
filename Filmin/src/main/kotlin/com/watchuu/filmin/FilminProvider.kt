@@ -45,6 +45,8 @@ class FilminProvider : MainAPI() {
             (1..22).map { chars.random() }.joinToString("")
         }
         private var token: String = ""
+        private var apiBase: String = "https://filmin.ajfysu.com"
+        private val fallbackDomains = mutableListOf<String>()
         private var initDone = false
     }
 
@@ -89,25 +91,51 @@ class FilminProvider : MainAPI() {
     /** POSTs a form to /api/{path} and returns the decrypted "result" JSON (or null). */
     private suspend fun api(path: String, form: Map<String, String> = emptyMap()): String? {
         ensureInit()
-        return rawApi(path, form)
+        return runCatching { rawApi(apiBase, path, form) }.getOrNull()
+            ?: run {
+                // same recovery as the app's RetryWithDelay: walk api_conf, then ask error.png
+                for (d in fallbackDomains) {
+                    val r = runCatching { rawApi(d, path, form) }.getOrNull()
+                    if (r != null) { apiBase = d; return r }
+                }
+                remoteDomain()?.takeIf { it != apiBase }?.let { d ->
+                    runCatching { rawApi(d, path, form) }.getOrNull()?.also { apiBase = d }
+                }
+            }
     }
 
-    private suspend fun rawApi(path: String, form: Map<String, String>): String? {
+    /** Success is code 10000 (BaseResponse.isOk). */
+    private suspend fun rawApi(base: String, path: String, form: Map<String, String>): String? {
         val time = System.currentTimeMillis().toString()
-        val res = app.post("$mainUrl/api/$path", headers = headers(time), data = form)
-        val json = decrypt(res.text)
-        val base = tryParseJson<Base>(json) ?: return null
-        if (base.code != 200 && base.code != 0 && base.code != 1) return null
-        return base.result?.toJson()
+        val res = app.post("${base.trimEnd('/')}/api/$path", headers = headers(time), data = form)
+        val base0 = tryParseJson<Base>(decrypt(res.text)) ?: return null
+        if (base0.code != 10000) return null
+        return base0.result?.toJson()
     }
+
+    /** The app's last-resort domain lookup: a plain-text body holding the live API domain. */
+    private suspend fun remoteDomain(): String? = runCatching {
+        app.get("https://filmin.h3x2.com/error.png").text.trim()
+            .takeIf { it.startsWith("http") && !it.contains('<') && !it.contains(' ') }
+    }.getOrNull()
 
     private suspend fun ensureInit() {
         if (initDone) return
         initDone = true
-        runCatching {
-            rawApi("public/init", mapOf("is_install" to "1"))?.let { tryParseJson<InitResult>(it) }
-                ?.userInfo?.token?.takeIf { it.isNotBlank() }?.let { token = it }
+        val form = mapOf("is_install" to "1")
+        var res = runCatching { rawApi(apiBase, "public/init", form) }.getOrNull()
+        if (res == null) {
+            remoteDomain()?.let { d ->
+                res = runCatching { rawApi(d, "public/init", form) }.getOrNull()
+                if (res != null) apiBase = d
+            }
         }
+        val init = res?.let { tryParseJson<InitResult>(it) } ?: return
+        init.userInfo?.token?.takeIf { it.isNotBlank() }?.let { token = it }
+        init.sysConf?.apiConf.orEmpty().filter { it.isOpen == 1 && !it.api.isNullOrBlank() }
+            .forEach { fallbackDomains += it.api!! }
+        // after init the app moves every call to sys_conf.api_url2
+        init.sysConf?.apiUrl2?.takeIf { it.startsWith("http") }?.let { apiBase = it }
     }
 
     // ─── Home ───────────────────────────────────────────────────────────────
@@ -284,7 +312,18 @@ class FilminProvider : MainAPI() {
         @JsonProperty("result") val result: Any? = null,
     )
 
-    data class InitResult(@JsonProperty("user_info") val userInfo: UserInfo? = null)
+    data class InitResult(
+        @JsonProperty("user_info") val userInfo: UserInfo? = null,
+        @JsonProperty("sys_conf") val sysConf: SysConf? = null,
+    )
+    data class SysConf(
+        @JsonProperty("api_url2") val apiUrl2: String? = null,
+        @JsonProperty("api_conf") val apiConf: List<ApiConf>? = null,
+    )
+    data class ApiConf(
+        @JsonProperty("api") val api: String? = null,
+        @JsonProperty("is_open") val isOpen: Int? = null,
+    )
     data class UserInfo(@JsonProperty("token") val token: String? = null)
 
     data class Ref(

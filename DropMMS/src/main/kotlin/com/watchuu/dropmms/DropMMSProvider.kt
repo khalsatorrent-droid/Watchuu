@@ -215,9 +215,11 @@ class DropMMSProvider : MainAPI() {
         // plain-text URLs that the editor didn't auto-link
         Regex("""https?://[^\s"'<>]+""").findAll(op.text()).forEach { links += it.value }
 
-        val targets = links.map { it.trim().trimEnd('.', ',', ')') }
+        // the same link often appears twice (auto-linked text + %-encoded href): dedupe on the decoded form
+        val targets = links.map { it.trim().trimEnd('.', ',') }
             .filter { it.startsWith("http") && isStreamCandidate(it) }
-            .distinct()
+            .map { normalizeMirror(it) }
+            .distinctBy { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it).trimEnd('/') }
 
         var found = false
         val cb: (ExtractorLink) -> Unit = { found = true; callback(it) }
@@ -225,13 +227,15 @@ class DropMMSProvider : MainAPI() {
             targets.map { link ->
                 async {
                     runCatching {
-                        when {
-                            link.substringBefore('?').let { it.endsWith(".mp4") || it.endsWith(".m3u8") } ->
-                                cb(newExtractorLink(name, "$name Direct", link,
-                                    if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                                    referer = data
-                                })
-                            else -> loadExtractor(normalizeMirror(link), data, subtitleCallback, cb)
+                        // hoster pages can end in ".mp4" too (streamtape /v/{id}/name.mp4), so the
+                        // extractors get first go and only unmatched media URLs are played directly
+                        val handled = loadExtractor(link, data, subtitleCallback, cb)
+                        val path = link.substringBefore('?').lowercase()
+                        if (!handled && (path.endsWith(".mp4") || path.endsWith(".m3u8"))) {
+                            cb(newExtractorLink(name, "$name Direct", link,
+                                if (path.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                                referer = data
+                            })
                         }
                     }
                 }
@@ -241,17 +245,17 @@ class DropMMSProvider : MainAPI() {
     }
 
     /**
-     * Posts use LuluStream mirror domains (lulust.com, luluvido.com, luluvid.com) that the
-     * built-in LuluStream extractor doesn't list; the file id is the same on every mirror, so
-     * rewrite to lulustream.com/e/{id} and let Cloudstream's extractor handle it.
+     * Posts use LuluStream mirrors (lulust.com, luluvid.com, luluvido.com, /e/ or /d/ paths).
+     * They all serve the same file code, so point them at luluvido.com/{code}, which the plugin
+     * registers as a mirror domain of Cloudstream's built-in LuluStream extractor.
      */
     private fun normalizeMirror(url: String): String {
         val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return url
         val host = uri.host?.lowercase() ?: return url
-        if (!host.contains("lulu") || host == "lulustream.com") return url
+        if (!host.contains("lulu")) return url
         val id = uri.path.split('/').filter { it.isNotBlank() && it != "e" && it != "d" }.lastOrNull()
             ?: return url
-        return "https://lulustream.com/e/$id"
+        return "https://luluvido.com/$id"
     }
 
     private fun isStreamCandidate(url: String): Boolean {

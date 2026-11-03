@@ -11,7 +11,8 @@ import org.jsoup.nodes.Element
 
 /**
  * DropMMS — an Invision Community forum. Every topic is one video post: the opening post (OP)
- * carries the poster image and the hoster links (LuluStream, StreamTape, DoodStream, …).
+ * carries the poster image and the hoster links (LuluStream, StreamTape, DoodStream, …),
+ * resolved with Cloudstream's built-in extractors.
  *
  *  - Home rows are forum sections, paged as /forum/{id}-{slug}/page/{n}/
  *  - Topic cards come from the "tthumb" gallery plugin: poster in [data-background-src]
@@ -230,17 +231,27 @@ class DropMMSProvider : MainAPI() {
                                     if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                                     referer = data
                                 })
-                            LuluStream.handles(link) -> LuluStream.extract(link, subtitleCallback, cb)
-                            else -> {
-                                val ok = loadExtractor(link, data, subtitleCallback, cb)
-                                if (!ok) LuluStream.extractGeneric(link, data, subtitleCallback, cb)
-                            }
+                            else -> loadExtractor(normalizeMirror(link), data, subtitleCallback, cb)
                         }
                     }
                 }
             }.awaitAll()
         }
         return found
+    }
+
+    /**
+     * Posts use LuluStream mirror domains (lulust.com, luluvido.com, luluvid.com) that the
+     * built-in LuluStream extractor doesn't list; the file id is the same on every mirror, so
+     * rewrite to lulustream.com/e/{id} and let Cloudstream's extractor handle it.
+     */
+    private fun normalizeMirror(url: String): String {
+        val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return url
+        val host = uri.host?.lowercase() ?: return url
+        if (!host.contains("lulu") || host == "lulustream.com") return url
+        val id = uri.path.split('/').filter { it.isNotBlank() && it != "e" && it != "d" }.lastOrNull()
+            ?: return url
+        return "https://lulustream.com/e/$id"
     }
 
     private fun isStreamCandidate(url: String): Boolean {

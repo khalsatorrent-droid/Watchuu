@@ -273,7 +273,15 @@ class FlixVisionProvider : MainAPI() {
             listOf(
                 async { safe { dexter(ld, emit) } },
                 async { safe { allMovieLand(ld, emit) } },
-                async { safe { vixSrc(ld, emit) } },
+                // VixSrc (current token format), NetMirror, Vidrock, PrimeSrc, Rivestream
+                async {
+                    safe {
+                        ExtraSources.all(
+                            ld.tmdbId, if (ld.type == "movie") null else ld.season,
+                            if (ld.type == "movie") null else ld.episode, subtitleCallback, emit
+                        )
+                    }
+                },
                 async { safe { cloudnestra(ld, emit) } },
             ).awaitAll()
         }

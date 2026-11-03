@@ -247,8 +247,15 @@ class TeaTVProvider : MainAPI() {
         }
         coroutineScope {
             listOf(
-                async { safe { primeSrc(ld, subtitleCallback, emit) } },
-                async { safe { rivestream(ld, emit) } },
+                // PrimeSrc + Rivestream (current calling conventions) plus NetMirror, VixSrc, Vidrock
+                async {
+                    safe {
+                        ExtraSources.all(
+                            ld.tmdbId, if (ld.type == "movie") null else ld.season,
+                            if (ld.type == "movie") null else ld.episode, subtitleCallback, emit
+                        )
+                    }
+                },
                 async { safe { vidsrcVip(ld, emit) } },
                 async { safe { autoEmbed(ld, emit) } },
             ).awaitAll()

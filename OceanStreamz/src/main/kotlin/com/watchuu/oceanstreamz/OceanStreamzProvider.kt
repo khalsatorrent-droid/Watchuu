@@ -348,11 +348,6 @@ class OceanStreamzProvider : MainAPI() {
 
         val ld = parseJson<LinkData>(data)
         val isMovie = ld.type == "movie"
-        val count = runCatching {
-            parseJson<Api<ScrapperCount>>(apiGet(if (isMovie) "/movies/scrapper/count" else "/tv-shows/scrapper/count"))
-                .data?.count
-        }.getOrNull()?.coerceIn(1, 40) ?: 12
-
         val seen = HashSet<String>()
         var found = false
         val emit: (ExtractorLink) -> Unit = { link ->
@@ -360,27 +355,42 @@ class OceanStreamzProvider : MainAPI() {
             if (fresh) { found = true; callback(link) }
         }
 
-        // scraper numbers are 0- or 1-based depending on the backend build: ask 0..count
+        // current public TMDB sources run alongside the app's own backend scrapers
         coroutineScope {
-            (0..count).map { n ->
-                async {
-                    try {
-                        val path = if (isMovie)
-                            "/movies/links/$n?title=${enc(ld.title)}&tmdbId=${ld.tmdbId}&imdbId=${enc(ld.imdbId)}&year=${enc(ld.year)}"
-                        else
-                            "/tv-shows/links/$n?id=${ld.tmdbId}&year=${enc(ld.year)}&title=${enc(ld.title)}" +
-                                "&season=${ld.season}&episode=${ld.episode}&epName=${enc(ld.epName)}&lastEpName=${enc(ld.lastEpName)}"
-                        val res = parseJson<Api<PlayableLinks>>(apiGet(path)).data ?: return@async
-                        val server = res.scrapperName?.takeIf { it.isNotBlank() } ?: "Server $n"
-                        res.url.orEmpty().map { it.trim() }.filter { it.startsWith("http") }.distinct().forEach { u ->
-                            emitUrl(u, server, subtitleCallback, emit)
+            val extra = async {
+                ExtraSources.all(
+                    ld.tmdbId, if (isMovie) null else ld.season, if (isMovie) null else ld.episode,
+                    subtitleCallback, emit
+                )
+            }
+            val count = runCatching {
+                parseJson<Api<ScrapperCount>>(apiGet(if (isMovie) "/movies/scrapper/count" else "/tv-shows/scrapper/count"))
+                    .data?.count
+            }.getOrNull()?.coerceIn(1, 40) ?: 12
+
+            // scraper numbers are 0- or 1-based depending on the backend build: ask 0..count
+            coroutineScope {
+                (0..count).map { n ->
+                    async {
+                        try {
+                            val path = if (isMovie)
+                                "/movies/links/$n?title=${enc(ld.title)}&tmdbId=${ld.tmdbId}&imdbId=${enc(ld.imdbId)}&year=${enc(ld.year)}"
+                            else
+                                "/tv-shows/links/$n?id=${ld.tmdbId}&year=${enc(ld.year)}&title=${enc(ld.title)}" +
+                                    "&season=${ld.season}&episode=${ld.episode}&epName=${enc(ld.epName)}&lastEpName=${enc(ld.lastEpName)}"
+                            val res = parseJson<Api<PlayableLinks>>(apiGet(path)).data ?: return@async
+                            val server = res.scrapperName?.takeIf { it.isNotBlank() } ?: "Server $n"
+                            res.url.orEmpty().map { it.trim() }.filter { it.startsWith("http") }.distinct().forEach { u ->
+                                emitUrl(u, server, subtitleCallback, emit)
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
                         }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
+            extra.await()
         }
         return found
     }

@@ -164,7 +164,7 @@ object ExtraSources {
         callback(
             newExtractorLink("VixSrc", "VixSrc", stream, ExtractorLinkType.M3U8) {
                 referer = "https://vixsrc.to/"; quality = Qualities.P1080.value
-                headers = h("https://vixsrc.to/", buildMap {
+                this.headers = h("https://vixsrc.to/", buildMap {
                     put("Origin", "https://vixsrc.to"); if (cookie.isNotBlank()) put("Cookie", cookie)
                 })
             }
@@ -288,7 +288,7 @@ object ExtraSources {
                                     referer = ref
                                     quality = Regex("""(\d{3,4})""").find(s.optString("quality"))?.groupValues?.get(1)?.toIntOrNull()
                                         ?.let { qualityOf(it) } ?: Qualities.P1080.value
-                                    headers = buildMap {
+                                    this.headers = buildMap {
                                         put("User-Agent", UA)
                                         if (ref.isNotBlank()) put("Referer", ref)
                                         if (origin.isNotBlank()) put("Origin", origin)

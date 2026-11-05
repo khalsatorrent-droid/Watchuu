@@ -230,11 +230,23 @@ class GoPlayProvider : MainAPI() {
         if (cookie.isNotBlank()) headers["Cookie"] = cookie
 
         val isDash = streamUrl.contains(".mpd", true)
+
+        // the manifest declares ContentProtection on every track, which ExoPlayer refuses; the
+        // proxy strips that and routes the segments back through itself with the site's headers
+        val playUrl = if (isDash) {
+            runCatching {
+                GoPlayProxy.setHeaders(data, cookie.ifBlank { null })
+                GoPlayProxy.proxiedMpd(streamUrl)
+            }.getOrDefault(streamUrl)
+        } else {
+            streamUrl
+        }
+
         callback.invoke(
             newExtractorLink(
                 source = name,
                 name = if (isDash) "$name (DASH)" else "$name (HLS)",
-                url = streamUrl,
+                url = playUrl,
                 type = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
             ) {
                 this.referer = data

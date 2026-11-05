@@ -48,27 +48,54 @@ class GoPlayProvider : MainAPI() {
 
     private fun userAgent(): String = UA
 
-    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? =
-        runCatching {
-            app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to userAgent(),
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language" to "en-US,en;q=0.9",
-                    "Referer" to referer
-                ),
-                timeout = 25L
-            ).text
-        }.getOrNull()?.takeIf { it.contains("<html", true) }
+    /**
+     * The site answers 404 to a first, cookieless request - the capture's very first hit on "/"
+     * is a 404 with a 1 KB body, while the same url a moment later returns 167 KB of cards. It
+     * sets d/locl/GL_UI4 on that first exchange, so a second try with the jar now populated is
+     * what actually works. Retrying here is the difference between an empty home page and a full
+     * one.
+     */
+    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? {
+        repeat(2) {
+            val body = runCatching {
+                app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to userAgent(),
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language" to "en-US,en;q=0.9",
+                        "Referer" to referer
+                    ),
+                    timeout = 25L
+                ).text
+            }.getOrNull()
+            if (body != null && body.contains("<html", true) && looksLikePage(body)) return body
+        }
+        return null
+    }
+
+    /** A real page carries one of these; a 404 shell or an interstitial carries none. */
+    private fun looksLikePage(body: String): Boolean =
+        body.contains("indexepisodes", true) || body.contains("indexsearchepisodes", true) ||
+            body.contains("episodesodd", true) || body.contains("infotitle", true)
 
     // ── Listings ───────────────────────────────────────────────────────────────
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page > 1) "$mainUrl/?page=$page" else "$mainUrl/"
-        val html = fetch(url) ?: return newHomePageResponse(request.name, emptyList(), false)
-        val items = cards(Jsoup.parse(html))
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        // the capture pages through /browse?page=N&type=1; "/" is the same listing without the query
+        val urls = if (page > 1) {
+            listOf("$mainUrl/browse?page=$page&type=1")
+        } else {
+            listOf("$mainUrl/", "$mainUrl/browse?type=1")
+        }
+        for (url in urls) {
+            val html = fetch(url) ?: continue
+            val items = cards(Jsoup.parse(html))
+            if (items.isNotEmpty()) {
+                return newHomePageResponse(request.name, items, hasNext = true)
+            }
+        }
+        return newHomePageResponse(request.name, emptyList(), false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -82,7 +109,7 @@ class GoPlayProvider : MainAPI() {
     }
 
     private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("div#indexepisodes")
+        doc.select("div#indexepisodes, div.indexsearchepisodes")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 

@@ -141,6 +141,46 @@ class KatMovieHDProvider : MainAPI() {
                 }
             }
 
+    /**
+     * A pack or file page on links.kmhd.me is a SvelteKit app, so its links are not in the html.
+     * They come from its own endpoint, one call per host:
+     *
+     *   POST https://links.kmhd.me/api/touchme/<id>?c=hubdrive_res
+     *   -> {"status":"Done","linkId":"https://hubcloud.ist/drive/o84zjxgfokf5tgd"}
+     *
+     * with c one of hubcloud_res / hubdrive_res / gdflix_res / ffast_res, and
+     * {"status":"Error","linkId":"None"} when that host has nothing for the file. This is what the
+     * page's own javascript does when you press a host button, and it is the only way in - fetching
+     * the page and reading anchors yields nothing, which is why the packs produced no playable link.
+     */
+    private suspend fun resolvePack(pageUrl: String): List<String> {
+        val id = Regex("""/(?:file|pack)/([A-Za-z0-9_\-]+)""").find(pageUrl)?.groupValues?.get(1)
+            ?: return emptyList()
+
+        val out = ArrayList<String>()
+        listOf("hubcloud_res", "hubdrive_res", "gdflix_res", "ffast_res").forEach { host ->
+            val body = runCatching {
+                app.post(
+                    "https://links.kmhd.me/api/touchme/$id?c=$host",
+                    headers = mapOf(
+                        "User-Agent" to UA,
+                        "Accept" to "*/*",
+                        "Origin" to "https://links.kmhd.me",
+                        "Referer" to pageUrl
+                    ),
+                    timeout = 25L
+                ).text
+            }.getOrNull() ?: return@forEach
+
+            val link = Regex("\"linkId\"\\s*:\\s*\"([^\"]+)\"")
+                .find(body)?.groupValues?.get(1)?.replace("&amp;", "&")
+            if (!link.isNullOrBlank() && link != "None" && link.startsWith("http")) {
+                out.add(link)
+            }
+        }
+        return out.distinct()
+    }
+
     /** The pack anchors on a post, in page order, labelled by their own text. */
     private fun packLinks(html: String): List<Pair<String, String>> =
         labelledAnchors(html).filter { (u, label) ->
@@ -353,14 +393,10 @@ class KatMovieHDProvider : MainAPI() {
                 labelledAnchors(section).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
             }
             selector.startsWith("p") -> {
-                // pack style: every pack, plus whatever each pack page lists
+                // pack style: ask the pack page's own endpoint which hosts it holds
                 packLinks(html).forEach { (packUrl, label) ->
-                    if (!candidates.containsKey(packUrl)) candidates[packUrl] = label
-                    val packHtml = runCatching { app.get(packUrl, referer = "$mainUrl/").text }.getOrNull()
-                    if (packHtml != null) {
-                        labelledAnchors(packHtml).forEach { (u, l) ->
-                            if (!candidates.containsKey(u)) candidates[u] = l.ifBlank { label }
-                        }
+                    resolvePack(packUrl).forEach { hostLink ->
+                        if (!candidates.containsKey(hostLink)) candidates[hostLink] = label
                     }
                 }
             }

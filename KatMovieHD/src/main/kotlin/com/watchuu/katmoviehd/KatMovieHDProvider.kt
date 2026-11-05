@@ -122,6 +122,47 @@ class KatMovieHDProvider : MainAPI() {
         return out to (page < totalPages)
     }
 
+    /**
+     * Series posts group their links per episode:
+     *
+     *   Episode 1 -
+     *     1080p // 720p // 480p
+     *     720p 10bit // 1080p 10bit
+     *     2160p HDR/DV // 2160p SDR
+     *   Episode 2 -
+     *     ...
+     *
+     * so the post is cut at each "Episode N -" marker and each piece keeps only its own links.
+     * A post with no such markers is a single film and comes back as one section under 0.
+     */
+    private fun episodeSections(html: String): List<Pair<Int, String>> {
+        val markers = Regex("""Episode\s*(\d{1,3})\s*[-–—]""", RegexOption.IGNORE_CASE).findAll(html).toList()
+        if (markers.isEmpty()) return listOf(0 to html)
+
+        val out = ArrayList<Pair<Int, String>>()
+        markers.forEachIndexed { i, m ->
+            val number = m.groupValues[1].toIntOrNull() ?: (i + 1)
+            val start = m.range.last + 1
+            val end = markers.getOrNull(i + 1)?.range?.first ?: html.length
+            if (start < end) out.add(number to html.substring(start, end))
+        }
+        return out.ifEmpty { listOf(0 to html) }
+    }
+
+    /** Anchors in a section, with the link text as the label ("2160p HDR/DV", "720p 10bit"). */
+    private fun labelledAnchors(section: String): List<Pair<String, String>> =
+        Regex("""<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(section)
+            .map { m ->
+                val url = m.groupValues[1].replace("&amp;", "&").trim()
+                val label = m.groupValues[2].replace(Regex("<[^>]+>"), " ")
+                    .replace("&amp;", "&").replace(Regex("\\s+"), " ").trim()
+                url to label
+            }
+            .filter { it.first.startsWith("http") }
+            .distinctBy { it.first }
+            .toList()
+
     // ── Detail ─────────────────────────────────────────────────────────────────
 
     override suspend fun load(url: String): LoadResponse? {
@@ -152,6 +193,23 @@ class KatMovieHDProvider : MainAPI() {
             .find(html)?.groupValues?.get(1)
             ?.replace(Regex("<[^>]+>"), "")?.trim()?.ifBlank { null }
 
+        // a post with "Episode N -" sections is a series; each episode carries its own links
+        val sections = episodeSections(html)
+        if (sections.size > 1 || sections.first().first != 0) {
+            val episodes = sections.map { (number, section) ->
+                newEpisode("$slug|$number") {
+                    this.name = "Episode $number"
+                    this.season = 1
+                    this.episode = number
+                    this.posterUrl = poster
+                }
+            }
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = plot
+            }
+        }
+
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = plot
@@ -166,7 +224,10 @@ class KatMovieHDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val slug = data.trimEnd('/').substringAfterLast('/')
+        // data is "<slug>" for a film, or "<slug>|<episode>" for one episode of a series
+        val slug = data.substringBefore('|').trimEnd('/').substringAfterLast('/')
+        val wantedEpisode = data.substringAfter('|', "").toIntOrNull()
+
         val body = dataJson("/$slug/__data.json") ?: return false
         val arr = chunks(body).firstOrNull() ?: return false
 
@@ -180,19 +241,16 @@ class KatMovieHDProvider : MainAPI() {
         }
         if (html.isBlank()) return false
 
-        // every link in the post, in page order, with its nearest quality label
-        val candidates = LinkedHashMap<String, String>() // url -> quality
-        var quality = ""
-        Regex("""\b(2160p|4k|1440p|1080p|720p|480p)\b|href="([^"]+)"""", RegexOption.IGNORE_CASE)
-            .findAll(html)
-            .forEach { m ->
-                if (m.groupValues[1].isNotBlank()) {
-                    quality = m.groupValues[1].lowercase()
-                } else if (m.groupValues[2].isNotBlank()) {
-                    val u = m.groupValues[2].replace("&amp;", "&")
-                    if (u.startsWith("http") && !candidates.containsKey(u)) candidates[u] = quality
-                }
-            }
+        // take the section for the episode asked for; the link text is the label
+        val sections = episodeSections(html)
+        val section = if (wantedEpisode != null) {
+            sections.firstOrNull { it.first == wantedEpisode }?.second
+                ?: sections.firstOrNull()?.second.orEmpty()
+        } else {
+            sections.joinToString("\n") { it.second }
+        }
+        val candidates = LinkedHashMap<String, String>() // url -> label
+        labelledAnchors(section).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
 
         var found = false
         candidates.forEach { (rawUrl, label) ->
@@ -210,7 +268,7 @@ class KatMovieHDProvider : MainAPI() {
                     callback.invoke(
                         newExtractorLink(
                             source = link.source ?: name,
-                            name = if (label.isBlank()) link.name else "${link.name} · $label",
+                            name = if (label.isBlank()) link.name else "$label · ${link.name}",
                             url = link.url,
                             type = link.type
                         ) {

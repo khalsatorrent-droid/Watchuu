@@ -129,6 +129,27 @@ class KatMovieHDProvider : MainAPI() {
         return out to (page < totalPages)
     }
 
+    /** "black-doves-s2-hindi" -> "Black Doves S2 Hindi" */
+    private fun prettySlug(slug: String): String =
+        slug.split('-', '_')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { part ->
+                when {
+                    Regex("""^s\\d{1,2}$""", RegexOption.IGNORE_CASE).matches(part) -> part.uppercase()
+                    part.all { it.isDigit() } -> part
+                    else -> part.replaceFirstChar { it.uppercase() }
+                }
+            }
+
+    /** The pack anchors on a post, in page order, labelled by their own text. */
+    private fun packLinks(html: String): List<Pair<String, String>> =
+        labelledAnchors(html).filter { (u, label) ->
+            (u.contains("kmhd.me") || u.contains("gdflix") || u.contains("hubcloud") ||
+                u.contains("hubdrive")) &&
+                label.isNotBlank() &&
+                Regex("""\d{3,4}p|pack|links""", RegexOption.IGNORE_CASE).containsMatchIn(label)
+        }
+
     /**
      * Series posts group their links per episode:
      *
@@ -212,15 +233,40 @@ class KatMovieHDProvider : MainAPI() {
         }
 
         val html = content.orEmpty()
-        val title = Regex("""<h[1-3][^>]*>(.*?)</h[1-3]>""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.groupValues?.get(1)
-            ?.replace(Regex("<[^>]+>"), "")?.trim()?.ifBlank { null }
-            ?: slug.replace('-', ' ').replaceFirstChar { it.uppercase() }
-        val poster = Regex("""<img[^>]+src="([^"]+)"""")
-            .find(html)?.groupValues?.get(1)?.ifBlank { null }
-        val plot = Regex("""Movie Plot:?</b>(.{20,400}?)</p>""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.groupValues?.get(1)
-            ?.replace(Regex("<[^>]+>"), "")?.trim()?.ifBlank { null }
+
+        // the payload carries the real post title and thumbnail; the html's first heading is
+        // often a logo or a studio line, which is how "Black Doves | Netflix" ended up as a title
+        var postTitle: String? = null
+        var postThumb: String? = null
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (o.has("post_title")) {
+                postTitle = arr.str(o.optInt("post_title", -1))
+                    ?.replace("&amp;", "&")?.replace("&#8217;", "'")?.trim()?.ifBlank { null }
+                postThumb = arr.str(o.optInt("thumbnail_image", -1))?.ifBlank { null }
+                break
+            }
+        }
+
+        // the payload's own title when it carries one, else the document title, else the slug.
+        // The html headings are not usable: the first <h3> on these posts is a Google knowledge
+        // panel line ("Black Doves | Netflix"), which is what ended up as the title before.
+        val title = postTitle
+            ?: Regex("""<title[^>]*>(.*?)</title>""", RegexOption.DOT_MATCHES_ALL)
+                .find(html)?.groupValues?.get(1)
+                ?.replace("&amp;", "&")?.replace(Regex("\\s+"), " ")?.trim()?.ifBlank { null }
+            ?: prettySlug(slug)
+
+        val poster = postThumb
+            ?: Regex("""<img[^>]+src="([^"]+)"""")
+                .find(html)?.groupValues?.get(1)?.ifBlank { null }
+
+        // a plot is the first paragraph with real prose in it, whatever the template calls it
+        val plot = Regex("""<p[^>]*>(.*?)</p>""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(html)
+            .map { it.groupValues[1].replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim() }
+            .firstOrNull { it.length > 80 && !it.contains("Download", true) && !it.contains("TeleGram", true) }
+            ?.ifBlank { null }
 
         // series, in either of the two shapes the site uses
         val sections = episodeSections(html)
@@ -240,25 +286,20 @@ class KatMovieHDProvider : MainAPI() {
                     )
                 }
             } else {
-                // pack style: one entry per pack / per quality group, named by its own label
-                labelledAnchors(html)
-                    .filter { (u, label) ->
-                        (u.contains("kmhd.me") || u.contains("gdflix") || u.contains("hubcloud") ||
-                            u.contains("hubdrive")) &&
-                            label.isNotBlank() &&
-                            Regex("""\d{3,4}p|pack|links""", RegexOption.IGNORE_CASE).containsMatchIn(label)
-                    }
-                    .forEachIndexed { index, (packUrl, label) ->
-                        episodes.add(
-                            newEpisode("$slug|p$index") {
-                                this.name = label
-                                this.season = 1
-                                this.episode = index + 1
-                                this.posterUrl = poster
-                                this.description = packUrl
-                            }
-                        )
-                    }
+                // pack style: the page offers season packs, not episodes, so this is one entry
+                // whose link list is the packs, each labelled by quality. Listing a pack as an
+                // "episode" and printing its url underneath is what made this page unreadable.
+                val packs = packLinks(html)
+                if (packs.isNotEmpty()) {
+                    episodes.add(
+                        newEpisode("$slug|pall") {
+                            this.name = "All episodes"
+                            this.season = 1
+                            this.episode = 1
+                            this.posterUrl = poster
+                        }
+                    )
+                }
             }
 
             if (episodes.isNotEmpty()) {
@@ -312,21 +353,14 @@ class KatMovieHDProvider : MainAPI() {
                 labelledAnchors(section).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
             }
             selector.startsWith("p") -> {
-                // a pack: follow the pack page and take the links it lists
-                val index = selector.drop(1).toIntOrNull() ?: 0
-                val packs = labelledAnchors(html)
-                    .filter { (u, label) ->
-                        (u.contains("kmhd.me") || u.contains("gdflix") || u.contains("hubcloud") ||
-                            u.contains("hubdrive")) && label.isNotBlank() &&
-                            Regex("""\d{3,4}p|pack|links""", RegexOption.IGNORE_CASE).containsMatchIn(label)
-                    }
-                val pack = packs.getOrNull(index)
-                if (pack != null) {
-                    candidates[pack.first] = pack.second
-                    // the pack page itself may list further hosts
-                    val packHtml = runCatching { app.get(pack.first, referer = "$mainUrl/").text }.getOrNull()
+                // pack style: every pack, plus whatever each pack page lists
+                packLinks(html).forEach { (packUrl, label) ->
+                    if (!candidates.containsKey(packUrl)) candidates[packUrl] = label
+                    val packHtml = runCatching { app.get(packUrl, referer = "$mainUrl/").text }.getOrNull()
                     if (packHtml != null) {
-                        labelledAnchors(packHtml).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
+                        labelledAnchors(packHtml).forEach { (u, l) ->
+                            if (!candidates.containsKey(u)) candidates[u] = l.ifBlank { label }
+                        }
                     }
                 }
             }

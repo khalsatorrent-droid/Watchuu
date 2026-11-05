@@ -1,6 +1,7 @@
 package com.watchuu.goplay
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
@@ -55,22 +56,60 @@ class GoPlayProvider : MainAPI() {
      * what actually works. Retrying here is the difference between an empty home page and a full
      * one.
      */
-    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? {
-        repeat(2) {
-            val body = runCatching {
-                app.get(
-                    url,
-                    headers = mapOf(
-                        "User-Agent" to userAgent(),
-                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language" to "en-US,en;q=0.9",
-                        "Referer" to referer
-                    ),
-                    timeout = 25L
-                ).text
-            }.getOrNull()
-            if (body != null && body.contains("<html", true) && looksLikePage(body)) return body
+    private fun cookiesFor(url: String): String? = runCatching {
+        android.webkit.CookieManager.getInstance().getCookie(url)
+    }.getOrNull()?.ifBlank { null }
+
+    private fun headersFor(referer: String, url: String): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = userAgent()
+        h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        h["Accept-Language"] = "en-US,en;q=0.9"
+        h["Referer"] = referer
+        cookiesFor(url)?.let { h["Cookie"] = it }
+        return h
+    }
+
+    private suspend fun plain(url: String, referer: String): String? = runCatching {
+        app.get(url, headers = headersFor(referer, url), timeout = 25L).text
+    }.getOrNull()
+
+    /**
+     * The site sits behind a Cloudflare Turnstile gate. The capture's first hit on "/" is a 404
+     * whose body loads challenges.cloudflare.com/turnstile and posts a token form - the browser
+     * solves it, is handed d / locl / GL_UI4, and the very next request returns the full page.
+     *
+     * So when a request comes back without the site's own markup, the site is opened once in a
+     * WebView to let that happen for real, and the cookies it earns are used from then on. That
+     * is the same WebView machinery the stream link already uses, and it is what the capture
+     * shows the browser doing.
+     */
+    private suspend fun passChallenge() {
+        runCatching {
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""(?i)^https?://goplay\.su/?$"""),
+                userAgent = userAgent(),
+                useOkhttp = false,
+                timeout = 25_000L
+            )
+            app.get("$mainUrl/", interceptor = resolver)
         }
+        runCatching { android.webkit.CookieManager.getInstance().flush() }
+    }
+
+    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? {
+        // 1. plain, carrying whatever cookies the app already holds
+        plain(url, referer)?.let { if (looksLikePage(it)) return it }
+
+        // 2. Cloudstream's own bypass, in case it is a plain JS challenge
+        runCatching {
+            app.get(url, headers = headersFor(referer, url), interceptor = CloudflareKiller(), timeout = 40L).text
+        }.getOrNull()?.let { if (looksLikePage(it)) return it }
+
+        // 3. solve the Turnstile gate in a WebView, then retry with the cookies it set
+        passChallenge()
+        plain(url, referer)?.let { if (looksLikePage(it)) return it }
+
         return null
     }
 

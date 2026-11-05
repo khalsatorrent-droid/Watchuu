@@ -113,9 +113,16 @@ class KatMovieHDProvider : MainAPI() {
             val slug = arr.str(o.optInt("slug", -1)) ?: continue
             val thumb = arr.str(o.optInt("thumbnail_image", -1))
 
+            val target = "$mainUrl/$slug"
             out.add(
-                newMovieSearchResponse(title, "$mainUrl/$slug", TvType.Movie) {
-                    this.posterUrl = thumb
+                if (isSeriesTitle(title)) {
+                    newTvSeriesSearchResponse(title, target, TvType.TvSeries) {
+                        this.posterUrl = thumb
+                    }
+                } else {
+                    newMovieSearchResponse(title, target, TvType.Movie) {
+                        this.posterUrl = thumb
+                    }
                 }
             )
         }
@@ -163,6 +170,28 @@ class KatMovieHDProvider : MainAPI() {
             .distinctBy { it.first }
             .toList()
 
+    /** Series are marked in the title: "Season 2", "S01", "All Episodes", "TV Series". */
+    private fun isSeriesTitle(title: String): Boolean =
+        Regex(
+            """\b(season\s*\d+|s\d{2}\b|all episodes|episodes?\b|tv series|web series|complete)\b""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(title)
+
+    /**
+     * Series come in two shapes, and your two captures show both:
+     *
+     *   per-episode   "Episode 1 -" then 1080p // 720p // 480p // 2160p HDR-DV ...
+     *   pack          "Single Episodes Link:" then "480p x264 Links" -> links.kmhd.me/pack/<id>
+     *                 and "720p Pack [1.6GB]" -> links.kmhd.me/file/<id>
+     *
+     * A film has neither. The per-episode shape gives real episodes; the pack shape gives one
+     * entry per pack, which is what the page actually offers.
+     */
+    private fun isSeriesContent(html: String): Boolean =
+        Regex("""Episode\s*\d{1,3}\s*[-–—]""", RegexOption.IGNORE_CASE).containsMatchIn(html) ||
+            html.contains("Episodes Link", true) || html.contains("Pack [", true) ||
+            html.contains("x264 Links", true)
+
     // ── Detail ─────────────────────────────────────────────────────────────────
 
     override suspend fun load(url: String): LoadResponse? {
@@ -193,20 +222,50 @@ class KatMovieHDProvider : MainAPI() {
             .find(html)?.groupValues?.get(1)
             ?.replace(Regex("<[^>]+>"), "")?.trim()?.ifBlank { null }
 
-        // a post with "Episode N -" sections is a series; each episode carries its own links
+        // series, in either of the two shapes the site uses
         val sections = episodeSections(html)
-        if (sections.size > 1 || sections.first().first != 0) {
-            val episodes = sections.map { (number, section) ->
-                newEpisode("$slug|$number") {
-                    this.name = "Episode $number"
-                    this.season = 1
-                    this.episode = number
-                    this.posterUrl = poster
+        val hasEpisodeMarkers = sections.size > 1 || sections.first().first != 0
+        if (hasEpisodeMarkers || isSeriesContent(html) || isSeriesTitle(title)) {
+            val episodes = ArrayList<Episode>()
+
+            if (hasEpisodeMarkers) {
+                sections.forEach { (number, _) ->
+                    episodes.add(
+                        newEpisode("$slug|e$number") {
+                            this.name = "Episode $number"
+                            this.season = 1
+                            this.episode = number
+                            this.posterUrl = poster
+                        }
+                    )
                 }
+            } else {
+                // pack style: one entry per pack / per quality group, named by its own label
+                labelledAnchors(html)
+                    .filter { (u, label) ->
+                        (u.contains("kmhd.me") || u.contains("gdflix") || u.contains("hubcloud") ||
+                            u.contains("hubdrive")) &&
+                            label.isNotBlank() &&
+                            Regex("""\d{3,4}p|pack|links""", RegexOption.IGNORE_CASE).containsMatchIn(label)
+                    }
+                    .forEachIndexed { index, (packUrl, label) ->
+                        episodes.add(
+                            newEpisode("$slug|p$index") {
+                                this.name = label
+                                this.season = 1
+                                this.episode = index + 1
+                                this.posterUrl = poster
+                                this.description = packUrl
+                            }
+                        )
+                    }
             }
-            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.plot = plot
+
+            if (episodes.isNotEmpty()) {
+                return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                }
             }
         }
 
@@ -224,9 +283,9 @@ class KatMovieHDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data is "<slug>" for a film, or "<slug>|<episode>" for one episode of a series
+        // data is "<slug>" for a film, "<slug>|e<n>" for an episode, "<slug>|p<n>" for a pack
         val slug = data.substringBefore('|').trimEnd('/').substringAfterLast('/')
-        val wantedEpisode = data.substringAfter('|', "").toIntOrNull()
+        val selector = data.substringAfter('|', "")
 
         val body = dataJson("/$slug/__data.json") ?: return false
         val arr = chunks(body).firstOrNull() ?: return false
@@ -241,16 +300,41 @@ class KatMovieHDProvider : MainAPI() {
         }
         if (html.isBlank()) return false
 
-        // take the section for the episode asked for; the link text is the label
-        val sections = episodeSections(html)
-        val section = if (wantedEpisode != null) {
-            sections.firstOrNull { it.first == wantedEpisode }?.second
-                ?: sections.firstOrNull()?.second.orEmpty()
-        } else {
-            sections.joinToString("\n") { it.second }
-        }
         val candidates = LinkedHashMap<String, String>() // url -> label
-        labelledAnchors(section).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
+
+        when {
+            selector.startsWith("e") -> {
+                // one episode of a per-episode post: only that section's links
+                val number = selector.drop(1).toIntOrNull()
+                val sections = episodeSections(html)
+                val section = sections.firstOrNull { it.first == number }?.second
+                    ?: sections.firstOrNull()?.second.orEmpty()
+                labelledAnchors(section).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
+            }
+            selector.startsWith("p") -> {
+                // a pack: follow the pack page and take the links it lists
+                val index = selector.drop(1).toIntOrNull() ?: 0
+                val packs = labelledAnchors(html)
+                    .filter { (u, label) ->
+                        (u.contains("kmhd.me") || u.contains("gdflix") || u.contains("hubcloud") ||
+                            u.contains("hubdrive")) && label.isNotBlank() &&
+                            Regex("""\d{3,4}p|pack|links""", RegexOption.IGNORE_CASE).containsMatchIn(label)
+                    }
+                val pack = packs.getOrNull(index)
+                if (pack != null) {
+                    candidates[pack.first] = pack.second
+                    // the pack page itself may list further hosts
+                    val packHtml = runCatching { app.get(pack.first, referer = "$mainUrl/").text }.getOrNull()
+                    if (packHtml != null) {
+                        labelledAnchors(packHtml).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
+                    }
+                }
+            }
+            else -> {
+                // a film: every link on the post
+                labelledAnchors(html).forEach { (u, label) -> if (!candidates.containsKey(u)) candidates[u] = label }
+            }
+        }
 
         var found = false
         candidates.forEach { (rawUrl, label) ->

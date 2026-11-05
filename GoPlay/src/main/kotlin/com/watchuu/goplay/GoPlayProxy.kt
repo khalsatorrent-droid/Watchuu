@@ -72,7 +72,10 @@ object GoPlayProxy {
 
     fun proxiedMpd(upstream: String): String {
         val p = ensureStarted()
-        return "http://127.0.0.1:$p/mpd?u=" + URLEncoder.encode(upstream, "UTF-8")
+        // the suffix matters: ExoPlayer decides which media source to build from the uri's
+        // extension, so a bare "/mpd?u=..." is not recognised as DASH at all and is handed to the
+        // progressive parser, which then fails. "/stream.mpd" is what makes it a DASH stream.
+        return "http://127.0.0.1:$p/stream.mpd?u=" + URLEncoder.encode(upstream, "UTF-8")
     }
 
     // ── server ─────────────────────────────────────────────────────────────────
@@ -112,7 +115,7 @@ object GoPlayProxy {
                 return
             }
 
-            if (path.startsWith("/mpd")) {
+            if (path.startsWith("/stream.mpd") || path.startsWith("/mpd")) {
                 val body = fetch(upstream, null)
                 if (body == null) { writeText(out, 502, "text/plain", "manifest unavailable"); return }
                 val rewritten = rewriteManifest(String(body, Charsets.UTF_8))

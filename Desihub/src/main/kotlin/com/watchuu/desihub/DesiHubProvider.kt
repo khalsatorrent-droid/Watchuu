@@ -3,150 +3,81 @@ package com.watchuu.desihub
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import java.net.URLDecoder
 import java.net.URLEncoder
 import org.jsoup.nodes.Element
 
 /**
- * desihub.skin — Indian adult content (Next.js). Rewritten from the capture of 2026-11-06 22:11.
+ * desihub.sh - Indian adult content site (Next.js, server-rendered).
  *
- * The site moved since the desihub.sh version this module replaced: new domain, new cdn, and a
- * json api for search. What the capture shows:
- *
- *   listing   article.group.flex > a[href=/video/<slug>] > img, title from the link's aria-label
- *             sections: / (latest), /latest-videos, /feature-video
- *   paging    path: /page/<n>, /latest-videos/page/<n>, /feature-video/page/<n>
- *   search    https://edge.desihub.skin/api/user/search?q=<q>&page=<n>
- *             -> {success, query, page, videos:{items:[{title, slug, thumbnail, views, …}]}}
- *   detail    /video/<slug>
- *   stream    https://cdn.desixprime.com/videos/<slug>/video.mp4   (Referer: the video page)
- *
- * The stream url is deterministic from the slug - all three videos in the capture follow it - so
- * it is built directly rather than scraped, and any cdn.desixprime.com url actually present on the
- * page is added on top in case a title ever diverges from the pattern.
+ * Built from a captured network log (CS3 Extension Builder):
+ *  - listing cards : a.transform.overflow-hidden -> href /post/{slug}; title from img[alt]
+ *                    ("Featured image for <title>"); poster is a /_next/image?url=<encoded> proxy
+ *  - home (Latest) : / then /page/{n}
+ *  - explore       : /explore/{n}
+ *  - feed          : /feed
+ *  - search        : /x/{query}  (and /x/{query}/{n})
+ *  - detail        : /post/{slug} -> og:title / og:image, <source> mp4 in the page
+ *  - streams       : direct mp4 from video.downloaddirect.xyz/{uuid}.mp4 (Referer downloaddirect.xyz)
  */
 class DesiHubProvider : MainAPI() {
-    override var mainUrl = "https://desihub.skin"
+    override var mainUrl = "https://desihub.sh"
     override var name = "Desihub"
     override var lang = "en"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    private val api = "https://edge.desihub.skin/api/user"
-    private val cdn = "https://cdn.desixprime.com/videos"
+    private val streamReferer = "https://downloaddirect.xyz/"
     private val cf = CloudflareKiller()
 
     override val mainPage = mainPageOf(
         "" to "Latest",
-        "latest-videos" to "Latest Videos",
-        "feature-video" to "Featured"
+        "explore" to "Explore",
+        "feed" to "Feed",
     )
 
-    private fun userAgent(): String = UA
-
-    private fun pageUrl(path: String, page: Int): String {
-        val base = path.trim('/')
-        return when {
-            page <= 1 && base.isEmpty() -> "$mainUrl/"
-            page <= 1 -> "$mainUrl/$base"
-            base.isEmpty() -> "$mainUrl/page/$page"
-            else -> "$mainUrl/$base/page/$page"
-        }
-    }
-
-    private suspend fun fetch(url: String): String? =
-        runCatching {
-            app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to userAgent(),
-                    "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
-                    "Referer" to "$mainUrl/"
-                ),
-                interceptor = cf,
-                timeout = 25L
-            ).text
-        }.getOrNull()
-
-    // ── Listings ───────────────────────────────────────────────────────────────
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val html = fetch(pageUrl(request.data, page))
-            ?: return newHomePageResponse(request.name, emptyList(), false)
-        val items = cards(org.jsoup.Jsoup.parse(html))
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        val url = when (request.data) {
+            "" -> if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page"
+            "explore" -> "$mainUrl/explore/$page"
+            "feed" -> "$mainUrl/feed"
+            else -> "$mainUrl/${request.data.trim('/')}"
+        }
+        val items = app.get(url, referer = "$mainUrl/", interceptor = cf).document
+            .select("a.transform.overflow-hidden").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+
+        // /feed isn't paged; Latest and Explore keep loading the next page
+        val hasNext = items.isNotEmpty() && request.data != "feed"
+        return newHomePageResponse(request.name, items, hasNext = hasNext)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query.trim(), "UTF-8")
-        if (q.isBlank()) return emptyList()
-
-        // the api answers clean json: {success, query, page, videos:{items:[{title, slug, thumbnail}]}}
-        val out = ArrayList<SearchResponse>()
-        for (page in 1..2) {
-            val body = runCatching {
-                app.get("$api/search?q=$q&page=$page", headers = mapOf("User-Agent" to userAgent()), timeout = 25L).text
-            }.getOrNull() ?: continue
-
-            val items = runCatching {
-                org.json.JSONObject(body).optJSONObject("videos")?.optJSONArray("items")
-            }.getOrNull() ?: continue
-
-            for (i in 0 until items.length()) {
-                val o = items.optJSONObject(i) ?: continue
-                val slug = o.optString("slug").ifBlank { continue }
-                val title = o.optString("title").replace("&amp;", "&").ifBlank { slug.replace('-', ' ') }
-                val thumb = o.optString("thumbnail").ifBlank { null }
-
-                out.add(
-                    newMovieSearchResponse(title, "$mainUrl/video/$slug", TvType.NSFW) {
-                        this.posterUrl = thumb
-                    }
-                )
-            }
+        val q = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
+        val out = LinkedHashMap<String, SearchResponse>()
+        for (p in 1..3) {
+            val url = if (p == 1) "$mainUrl/x/$q" else "$mainUrl/x/$q/$p"
+            val found = runCatching {
+                app.get(url, referer = "$mainUrl/", interceptor = cf).document
+                    .select("a.transform.overflow-hidden").mapNotNull { it.toSearchResult() }
+            }.getOrNull().orEmpty()
+            val fresh = found.filter { out[it.url] == null }
+            if (fresh.isEmpty()) break
+            fresh.forEach { out.putIfAbsent(it.url, it) }
         }
-        return out.distinctBy { it.url }
+        return out.values.toList()
     }
 
-    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
-        doc.select("article.group, article")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
-
-    private fun Element.toSearchResult(): SearchResponse? {
-        val a = selectFirst("a[href*=/video/]") ?: return null
-        val href = a.attr("href").trim()
-        if (href.isBlank()) return null
-
-        val img = selectFirst("img")
-        val title = a.attr("aria-label").removePrefix("Watch ").trim().ifBlank { null }
-            ?: selectFirst("h2, h3")?.text()?.trim()?.ifBlank { null }
-            ?: img?.attr("alt")?.trim()?.ifBlank { null }
-            ?: return null
-
-        val poster = img?.let { it.attr("src").ifBlank { it.attr("data-src") } }
-            ?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
-            ?.let { if (it.startsWith("http")) it else "$mainUrl$it" }
-
-        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
-            this.posterUrl = poster
-        }
-    }
-
-    // ── Detail ─────────────────────────────────────────────────────────────────
-
-    override suspend fun load(url: String): LoadResponse? {
-        val html = fetch(url) ?: return null
-        val doc = org.jsoup.Jsoup.parse(html)
-
-        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
-            ?: doc.selectFirst("h1")?.text()?.trim()?.ifBlank { null }
-            ?: doc.selectFirst("title")?.text()?.substringBefore('|')?.trim()
-            ?: url.substringAfterLast('/').replace('-', ' ')
-
+    override suspend fun load(url: String): LoadResponse {
+        val doc = app.get(url, referer = "$mainUrl/", interceptor = cf).document
+        val title = (doc.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: doc.selectFirst("h1")?.text()
+            ?: doc.selectFirst("h2")?.text()
+            ?: doc.title().substringBefore(" - ")).trim().ifBlank { "Video" }
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
-        val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()?.ifBlank { null }
-        val tags = doc.select("a[href*=/category/], a[href*=/tag/]")
-            .map { it.text().trim() }.filter { it.isNotBlank() && it.length < 30 }.distinct().take(10)
+            ?: realImage(doc.selectFirst("img[alt]")?.attr("src"))
+        val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
+            ?: doc.selectFirst("meta[name=description]")?.attr("content")
+        val tags = doc.select("a[href*=/category/]").map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
@@ -155,53 +86,48 @@ class DesiHubProvider : MainAPI() {
         }
     }
 
-    // ── Streams ────────────────────────────────────────────────────────────────
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val slug = data.trimEnd('/').substringAfterLast('/')
-        if (slug.isBlank()) return false
-
-        val links = LinkedHashSet<String>()
-
-        // deterministic from the slug, and what every video in the capture used
-        links.add("$cdn/$slug/video.mp4")
-
-        // plus anything the page itself points at, in case a title ever differs
-        runCatching { fetch(data) }.getOrNull()?.let { html ->
-            Regex("""https?://cdn\.desixprime\.com/videos/[^\s"'<>\\]+\.mp4""")
-                .findAll(html).map { it.value }.forEach { links.add(it) }
-        }
-
+        val html = app.get(data, referer = "$mainUrl/", interceptor = cf).text
         var found = false
-        links.forEach { link ->
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = link,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = data
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "Referer" to data,
-                        "User-Agent" to userAgent(),
-                        "Accept" to "*/*"
-                    )
-                }
-            )
-            found = true
-        }
+        Regex("""https?://video\.downloaddirect\.xyz/[a-z0-9\-]+\.mp4""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.value }.distinct().forEach { link ->
+                callback.invoke(
+                    newExtractorLink(name, name, link, ExtractorLinkType.VIDEO) {
+                        this.referer = streamReferer
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                found = true
+            }
         return found
     }
 
-    private companion object {
-        const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
+    /** A card's image is a Next.js proxy: /_next/image?url=<encoded real url>&w=..&q=.. */
+    private fun realImage(src: String?): String? {
+        if (src.isNullOrBlank()) return null
+        if (src.contains("/_next/image")) {
+            Regex("""[?&]url=([^&]+)""").find(src)?.groupValues?.get(1)?.let { enc ->
+                runCatching { URLDecoder.decode(enc, "UTF-8") }.getOrNull()?.takeIf { it.startsWith("http") }?.let { return it }
+            }
+        }
+        return fixUrlNull(src)
+    }
+
+    private fun Element.toSearchResult(): SearchResponse? {
+        val href = attr("href").takeIf { it.contains("/post/") } ?: return null
+        val url = fixUrl(href)
+        // the featured <img> carries alt="Featured image for <title>" and the proxied poster src
+        val featured = select("img").firstOrNull { it.attr("alt").isNotBlank() } ?: selectFirst("img")
+        val title = featured?.attr("alt")?.trim().orEmpty()
+            .removePrefix("Featured image for").trim()
+            .ifBlank { href.substringAfterLast("/").substringBeforeLast("-").replace("-", " ").trim() }
+            .ifBlank { href.substringAfterLast("/").replace("-", " ") }
+        val poster = realImage(featured?.attr("src"))
+        return newMovieSearchResponse(title, url, TvType.NSFW) { this.posterUrl = poster }
     }
 }

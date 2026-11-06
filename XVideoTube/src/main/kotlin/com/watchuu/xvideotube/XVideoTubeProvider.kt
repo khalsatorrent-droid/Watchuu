@@ -1,4 +1,4 @@
-package com.watchuu.xvideo
+package com.watchuu.xvideotube
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
@@ -32,9 +32,9 @@ import org.jsoup.nodes.Element
  * written from the KVS pattern rather than from a page in the log. If a title comes back with no
  * link, the detail page's player config is the thing to capture next.
  */
-class XVideoProvider : MainAPI() {
+class XVideoTubeProvider : MainAPI() {
     override var mainUrl = "https://x-video.tube"
-    override var name = "XVideo"
+    override var name = "XVideoTube"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW, TvType.Movie)
 

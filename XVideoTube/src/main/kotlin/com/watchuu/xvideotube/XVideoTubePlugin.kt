@@ -1,12 +1,12 @@
-package com.watchuu.xvideo
+package com.watchuu.xvideotube
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
-class XVideoPlugin : Plugin() {
+class XVideoTubePlugin : Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(XVideoProvider())
+        registerMainAPI(XVideoTubeProvider())
     }
 }

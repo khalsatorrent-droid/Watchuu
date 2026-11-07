@@ -144,7 +144,9 @@ object XVideoTubeBrowser {
         if (combined.isNotBlank()) headers["Cookie"] = combined
 
         return runCatching {
-            val body = app.get(url, headers = headers, timeout = 20L).text
+            val res = app.get(url, headers = headers, timeout = 20L)
+            harvest(res.cookies)
+            val body = res.text
             if (isChallenge(body)) null else body
         }.getOrNull()
     }
@@ -512,6 +514,20 @@ object XVideoTubeBrowser {
             cm.flush()
         }
     }
+
+    /**
+     * Cookies the site has handed back to THIS session, harvested from Set-Cookie on every
+     * response. They live in Okhttp's jar, not in the WebView's CookieManager, so reading
+     * CookieManager alone misses them - and kt_acctoken is one of them.
+     */
+    private val harvested = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun harvest(cookies: Map<String, String>) {
+        cookies.forEach { (k, v) -> if (k.isNotBlank()) harvested[k] = v }
+    }
+
+    fun sessionCookies(): String =
+        harvested.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
     private fun isChallenge(body: String?): Boolean {
         if (body == null || body.length < 600) return true

@@ -251,6 +251,7 @@ class XVideoTubeProvider : MainAPI() {
         val res = runCatching {
             app.get(url, headers = headers, allowRedirects = true, timeout = 25L)
         }.getOrNull() ?: return null
+        runCatching { XVideoTubeBrowser.harvest(res.cookies) }
 
         if (res.code !in 200..299) return null
 
@@ -266,7 +267,10 @@ class XVideoTubeProvider : MainAPI() {
         val jar = runCatching {
             android.webkit.CookieManager.getInstance().getCookie("$mainUrl/")
         }.getOrNull().orEmpty()
-        return listOf(manual, jar).filter { it.isNotBlank() }
+        // the session's own Set-Cookie harvest - kt_acctoken arrives this way, never through
+        // the WebView jar and never from a script
+        val session = runCatching { XVideoTubeBrowser.sessionCookies() }.getOrNull().orEmpty()
+        return listOf(manual, session, jar).filter { it.isNotBlank() }
             .joinToString("; ").ifBlank { null }
     }
 

@@ -180,13 +180,24 @@ class XVideoTubeProvider : MainAPI() {
         if (fromConfig.isEmpty()) return false
 
         val referer = data
+        // ask each link for its first byte; prefer what answered, but never end up with nothing
+        // just because the check itself was refused
+        val verified = ArrayList<Pair<String, String>>()
+        val unverified = ArrayList<Pair<String, String>>()
         fromConfig.forEach { (url, label) ->
             val clean = url.replace("&amp;", "&")
+            val playable = resolvePlayable(clean, referer)
+            if (playable != null) verified.add(playable to label) else unverified.add(clean to label)
+        }
+        val toEmit = if (verified.isNotEmpty()) verified else unverified
+        var emitted = false
+
+        toEmit.forEach { (playable, label) ->
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = "$name · $label",
-                    url = clean,
+                    url = playable,
                     type = ExtractorLinkType.VIDEO
                 ) {
                     this.referer = referer
@@ -200,8 +211,9 @@ class XVideoTubeProvider : MainAPI() {
                     this.headers = h
                 }
             )
+            emitted = true
         }
-        return true
+        return emitted
     }
 
     /** Reads `key: 'value'` (or "value") out of the page's player config. */
@@ -217,6 +229,38 @@ class XVideoTubeProvider : MainAPI() {
      * not, so a link could be resolved and then be refused when the player asked for the bytes.
      * kt_acctoken is the part that matters - it is what makes ?v-acctoken= on the file url valid.
      */
+    /**
+     * Asks for the first byte of a link, following redirects, and returns the url that actually
+     * serves the file - or null if the site refuses it.
+     *
+     * This matters because a KVS file url is not the file. It 302s to remote_control.php with a
+     * per-request token, which 302s again to the real object, and any of those hops can refuse a
+     * request that lacks the referer or the session cookie. Handing the player the final url, and
+     * only when it answered, means a link in the list is one that has been shown to work rather
+     * than one that merely looked right.
+     */
+    private suspend fun resolvePlayable(url: String, referer: String): String? {
+        val headers = LinkedHashMap<String, String>()
+        headers["Referer"] = referer
+        headers["Origin"] = mainUrl
+        headers["User-Agent"] = userAgent()
+        headers["Accept"] = "*/*"
+        headers["Range"] = "bytes=0-0"
+        cookieHeader()?.let { headers["Cookie"] = it }
+
+        val res = runCatching {
+            app.get(url, headers = headers, allowRedirects = true, timeout = 25L)
+        }.getOrNull() ?: return null
+
+        if (res.code !in 200..299) return null
+
+        val type = res.headers["content-type"].orEmpty().lowercase()
+        val finalUrl = res.url
+        val looksMedia = type.startsWith("video/") || type.startsWith("audio/") ||
+            type.contains("octet-stream") || finalUrl.contains(".mp4", true)
+        return if (looksMedia) finalUrl else null
+    }
+
     private fun cookieHeader(): String? {
         val manual = XVideoTubeSettings.cookie
         val jar = runCatching {

@@ -99,6 +99,43 @@ class SsrmoviesProvider : MainAPI() {
         return (first + second).distinctBy { it.url }
     }
 
+    /**
+     * The listing theme lazy-loads posters in an unusual way: src is a 1x1 base64 gif and the real
+     * image sits in the inline style as a background:
+     *
+     *   <img src="data:image/gif;base64,R0lGODlhAQABAIAA..." 
+     *        style="background:url('https://imgurworld.top/images/2026/10/03/....jpg') no-repeat center center">
+     *
+     * Reading src alone therefore yields a placeholder, which is why posters came up blank. The
+     * background url is tried first, then the usual lazy attributes, then srcset, and only then src
+     * - and never a data: placeholder.
+     */
+    private fun imageUrl(img: Element?): String? {
+        if (img == null) return null
+
+        val candidates = ArrayList<String>()
+        Regex("""url\(\s*['"]?([^'")]+)['"]?\s*\)""")
+            .find(img.attr("style"))?.groupValues?.get(1)?.let { candidates.add(it) }
+        candidates.add(img.attr("data-src"))
+        candidates.add(img.attr("data-lazy-src"))
+        candidates.add(img.attr("data-original"))
+        candidates.add(img.attr("data-poster"))
+        img.attr("srcset").split(',').firstOrNull()?.trim()?.substringBefore(' ')
+            ?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+        candidates.add(img.attr("src"))
+
+        return candidates.firstOrNull { url ->
+            url.isNotBlank() && !url.startsWith("data:") && !url.startsWith("about:") &&
+                !url.contains("nobg.png") && !url.contains("blank.gif")
+        }?.let { url ->
+            when {
+                url.startsWith("//") -> "https:$url"
+                url.startsWith("http") -> url
+                else -> fixUrl(url)
+            }
+        }
+    }
+
     private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
         doc.select("article.latestPost, article.excerpt, article")
             .mapNotNull { it.toSearchResult() }
@@ -116,9 +153,7 @@ class SsrmoviesProvider : MainAPI() {
             ?: selectFirst("img")?.attr("alt")?.trim()?.ifBlank { null }
             ?: return null
 
-        val poster = selectFirst("img")?.let { img ->
-            img.attr("src").ifBlank { img.attr("data-src") }.ifBlank { img.attr("data-lazy-src") }
-        }?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
+        val poster = imageUrl(selectFirst("img"))
 
         val isSeries = Regex("""-s\d{2}|season|complete|series|episode""", RegexOption.IGNORE_CASE)
             .containsMatchIn("$href $title")
@@ -139,7 +174,8 @@ class SsrmoviesProvider : MainAPI() {
         val title = doc.selectFirst("h1")?.text()?.trim()?.ifBlank { null }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
             ?: url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
-        val poster = doc.selectFirst(".poster img")?.attr("src")?.ifBlank { null }
+        val poster = imageUrl(doc.selectFirst(".poster img"))
+            ?: imageUrl(doc.selectFirst("article img, .entry-content img"))
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
         val plot = doc.select(".entry-content p").map { it.text().trim() }
             .filter { it.length > 60 }.take(2).joinToString("\n\n").ifBlank { null }

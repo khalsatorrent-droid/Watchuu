@@ -239,7 +239,7 @@ class XVideoTubeProvider : MainAPI() {
      * only when it answered, means a link in the list is one that has been shown to work rather
      * than one that merely looked right.
      */
-    private suspend fun resolvePlayable(url: String, referer: String): String? {
+    private suspend fun resolvePlayable(url: String, referer: String, depth: Int = 0): String? {
         val headers = LinkedHashMap<String, String>()
         headers["Referer"] = referer
         headers["Origin"] = mainUrl
@@ -257,9 +257,32 @@ class XVideoTubeProvider : MainAPI() {
 
         val type = res.headers["content-type"].orEmpty().lowercase()
         val finalUrl = res.url
-        val looksMedia = type.startsWith("video/") || type.startsWith("audio/") ||
+        val isMedia = type.startsWith("video/") || type.startsWith("audio/") ||
             type.contains("octet-stream") || finalUrl.contains(".mp4", true)
-        return if (looksMedia) finalUrl else null
+
+        if (isMedia) return finalUrl
+
+        /**
+         * The chain does not end in a file. It ends in this, 745 bytes of html:
+         *
+         *   <video controls autoplay name="media" crossorigin="anonymous">
+         *     <source src="https://st7.x-video.tube/remote_control.php?file=<...>.mp4&acctoken=<...>"
+         *             type="video/mp4"></video>
+         *
+         * so a player that follows get_file itself receives html and reports
+         * PARSING_CONTAINER_UNSUPPORTED. The <source> inside it is the real file, and it carries
+         * acctoken= rather than v-acctoken= - a different parameter on the same handler.
+         */
+        if (type.contains("html") && depth < 3) {
+            val src = Regex("<source[^>]+src=[\"']([^\"']+)[\"']")
+                .find(res.text)?.groupValues?.get(1)
+                ?.replace("&amp;", "&")
+                ?.trim()
+            if (!src.isNullOrBlank() && src.startsWith("http")) {
+                return resolvePlayable(src, referer, depth + 1)
+            }
+        }
+        return null
     }
 
     private fun cookieHeader(): String? {

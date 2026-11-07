@@ -191,11 +191,13 @@ class XVideoTubeProvider : MainAPI() {
                 ) {
                     this.referer = referer
                     this.quality = qualityOf(label)
-                    this.headers = mapOf(
-                        "Referer" to referer,
-                        "Origin" to mainUrl,
-                        "User-Agent" to userAgent()
-                    )
+                    val h = LinkedHashMap<String, String>()
+                    h["Referer"] = referer
+                    h["Origin"] = mainUrl
+                    h["User-Agent"] = userAgent()
+                    h["Accept"] = "*/*"
+                    cookieHeader()?.let { h["Cookie"] = it }
+                    this.headers = h
                 }
             )
         }
@@ -206,6 +208,23 @@ class XVideoTubeProvider : MainAPI() {
     private fun flashValue(html: String, key: String): String? =
         Regex("""$key\s*:\s*['"]([^'"]+)['"]""")
             .find(html)?.groupValues?.get(1)?.replace("\\/", "/")?.trim()?.ifBlank { null }
+
+    /**
+     * The cookie the file request needs, built exactly as the browser builds it for pages:
+     * whatever was pasted in settings, plus anything the app's jar holds for the site.
+     *
+     * This was missing: the page requests carried the cookie but the emitted stream links did
+     * not, so a link could be resolved and then be refused when the player asked for the bytes.
+     * kt_acctoken is the part that matters - it is what makes ?v-acctoken= on the file url valid.
+     */
+    private fun cookieHeader(): String? {
+        val manual = XVideoTubeSettings.cookie
+        val jar = runCatching {
+            android.webkit.CookieManager.getInstance().getCookie("$mainUrl/")
+        }.getOrNull().orEmpty()
+        return listOf(manual, jar).filter { it.isNotBlank() }
+            .joinToString("; ").ifBlank { null }
+    }
 
     private fun qualityFromName(url: String): String = when {
         url.contains("2160", true) || url.contains("4k", true) -> "2160p"

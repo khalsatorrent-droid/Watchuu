@@ -222,6 +222,7 @@ object XVideoTubeBrowser {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun create(context: Context): WebView {
+        applyManualCookie()
         val wv = WebView(context)
         wv.settings.apply {
             javaScriptEnabled = true
@@ -382,6 +383,7 @@ object XVideoTubeBrowser {
         dialog.setOnDismissListener { finish(hasClearance(startUrl)) }
 
         dialog.show()
+        applyManualCookie()
         wv.loadUrl(startUrl)
 
         // A tick can pass without a new page load, so poll for the cookie as well.
@@ -492,6 +494,25 @@ object XVideoTubeBrowser {
      * "challenge-platform" as a challenge rejected every page and left the extension with nothing.
      * The site has no interstitial at all: the capture of it has zero "Just a moment".
      */
+    /**
+     * Pushes the pasted cookie into the WebView's jar. Without this the hidden browser and the
+     * solver window loaded the site with no session at all, so they saw a logged-out page no
+     * matter what was pasted in settings.
+     */
+    private fun applyManualCookie() {
+        val manual = XVideoTubeSettings.cookie
+        if (manual.isBlank()) return
+        runCatching {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            manual.split(';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { pair ->
+                cm.setCookie(SITE, "$pair; path=/")
+                cm.setCookie("$SITE/", "$pair; path=/")
+            }
+            cm.flush()
+        }
+    }
+
     private fun isChallenge(body: String?): Boolean {
         if (body == null || body.length < 600) return true
         if (!body.contains("<html", ignoreCase = true)) return true

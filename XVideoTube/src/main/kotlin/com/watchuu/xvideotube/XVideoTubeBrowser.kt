@@ -485,14 +485,28 @@ object XVideoTubeBrowser {
         null
     }
 
+    /**
+     * A page is judged by what it CONTAINS, not by Cloudflare's fingerprints. Every real page on
+     * this site carries /cdn-cgi/challenge-platform/scripts/jsd/main.js - that is Cloudflare's
+     * passive js detection, injected into ordinary responses - so treating the string
+     * "challenge-platform" as a challenge rejected every page and left the extension with nothing.
+     * The site has no interstitial at all: the capture of it has zero "Just a moment".
+     */
     private fun isChallenge(body: String?): Boolean {
         if (body == null || body.length < 600) return true
+        if (!body.contains("<html", ignoreCase = true)) return true
+
+        // real content wins, whatever else is in the page
+        val hasContent = body.contains("kt_player", ignoreCase = true) ||
+            body.contains("video_url", ignoreCase = true) ||
+            body.contains("item thumb", ignoreCase = true) ||
+            body.contains("get_file", ignoreCase = true)
+        if (hasContent) return false
+
         val head = body.take(6000)
         return head.contains("Just a moment", ignoreCase = true) ||
-            head.contains("challenge-platform") ||
             head.contains("cf_chl_opt") ||
-            head.contains("Performing security verification", ignoreCase = true) ||
-            !head.contains("<html", ignoreCase = true)
+            head.contains("Performing security verification", ignoreCase = true)
     }
 
     private fun decodeJsString(raw: String?): String? {

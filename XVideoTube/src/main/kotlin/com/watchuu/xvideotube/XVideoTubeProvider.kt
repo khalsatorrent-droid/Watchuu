@@ -46,19 +46,15 @@ class XVideoTubeProvider : MainAPI() {
 
     private fun userAgent(): String = UA
 
+    /**
+     * Every page goes through XVideoTubeBrowser, which owns the Cloudflare ladder and the settings
+     * screen. The capture's detail fetch carried cf_clearance, so the site does challenge - a
+     * plain request from a fresh install gets an interstitial with no player config in it, which
+     * is exactly why the link list came back empty.
+     */
     private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? {
-        val headers = mapOf(
-            "User-Agent" to userAgent(),
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.9",
-            "Referer" to referer
-        )
-        val plain = runCatching { app.get(url, headers = headers, timeout = 25L).text }.getOrNull()
-        if (plain != null && plain.contains("<html", true) && looksLikePage(plain)) return plain
-
-        return runCatching {
-            app.get(url, headers = headers, interceptor = CloudflareKiller(), timeout = 40L).text
-        }.getOrNull()?.takeIf { looksLikePage(it) }
+        val body = XVideoTubeBrowser.html(url, referer) ?: return null
+        return if (looksLikePage(body)) body else null
     }
 
     private fun looksLikePage(body: String): Boolean =
@@ -151,24 +147,34 @@ class XVideoTubeProvider : MainAPI() {
     ): Boolean {
         val html = fetch(data) ?: return false
 
-        // 1. the player config: video_url / video_alt_url / video_alt_url2, each with its label
+        // 1. the player config, as the capture shows it:
+        //    video_url:        .../get_file/11/<hash>/<id>/<id>_single_hd_vertical.mp4/?v-acctoken=...
+        //    event_reporting2: .../get_file/11/<hash>/<id>/<id>.mp4/?v-acctoken=...   (the original)
+        //    postfix / video_url_fhd describe the variant, so they label it
         val fromConfig = LinkedHashMap<String, String>()
-        listOf(
-            Triple("video_alt_url2", "video_alt_url2_text", "2160p"),
-            Triple("video_alt_url", "video_alt_url_text", "720p"),
-            Triple("video_url", "video_url_text", "480p")
-        ).forEach { (urlKey, textKey, fallback) ->
-            val url = flashValue(html, urlKey) ?: return@forEach
-            if (!url.startsWith("http")) return@forEach
-            val label = flashValue(html, textKey) ?: fallback
+
+        val variant = flashValue(html, "postfix")
+            ?.removePrefix("_")?.removeSuffix(".mp4")?.replace('_', ' ')?.trim()
+            ?.ifBlank { null }
+        val isFhd = flashValue(html, "video_url_fhd") == "1"
+
+        flashValue(html, "video_url")?.takeIf { it.startsWith("http") }?.let { url ->
+            val label = when {
+                isFhd -> "FHD"
+                variant != null -> variant
+                else -> "HD"
+            }
             if (!fromConfig.containsKey(url)) fromConfig[url] = label
         }
+
+        flashValue(html, "event_reporting2")?.takeIf { it.startsWith("http") && it.contains("/get_file/") }
+            ?.let { url -> if (!fromConfig.containsKey(url)) fromConfig[url] = "original" }
 
         // 2. any other file url on the page, never a hover preview
         Regex("""https?://[^\s"'<>\\]+/get_file/[^\s"'<>\\]*?\.mp4/?[^\s"'<>\\]*""")
             .findAll(html)
             .map { it.value }
-            .filter { !it.contains("_preview_", true) }
+            .filter { !it.contains("_preview", true) && !it.contains("/preview", true) }
             .forEach { url -> if (!fromConfig.containsKey(url)) fromConfig[url] = qualityFromName(url) }
 
         if (fromConfig.isEmpty()) return false

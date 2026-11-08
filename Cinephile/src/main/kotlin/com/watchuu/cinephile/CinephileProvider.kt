@@ -53,21 +53,16 @@ class CinephileProvider : MainAPI() {
 
     private fun userAgent(): String = UA
 
-    private suspend fun apiJson(query: String): JSONObject? = runCatching {
-        JSONObject(
-            app.get(
-                "$api?$query",
-                headers = mapOf(
-                    "User-Agent" to userAgent(),
-                    "Accept" to "application/json, text/plain, */*",
-                    "Origin" to mainUrl,
-                    "Referer" to "$mainUrl/"
-                ),
-                interceptor = cf,
-                timeout = 30L
-            ).text
-        )
-    }.getOrNull()
+    /**
+     * Everything goes through CinephileBrowser, which owns the challenge ladder and the settings
+     * screen. The site throws a challenge of its own before it will hand over a file, and a hidden
+     * WebView is the only thing that clears it, so the api is read through the same transport the
+     * player path uses rather than a bare http call.
+     */
+    private suspend fun apiJson(query: String): JSONObject? {
+        val body = CinephileBrowser.html("$api?$query", "$mainUrl/") ?: return null
+        return runCatching { JSONObject(body) }.getOrNull()
+    }
 
     // ── Listings ───────────────────────────────────────────────────────────────
 
@@ -353,12 +348,13 @@ class CinephileProvider : MainAPI() {
                 ) {
                     this.referer = pageUrl
                     this.quality = if (resolution > 0) resolution else Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "Referer" to "$mainUrl/",
-                        "Origin" to mainUrl,
-                        "User-Agent" to userAgent(),
-                        "Accept" to "*/*"
-                    )
+                    val h = LinkedHashMap<String, String>()
+                    h["Referer"] = "$mainUrl/"
+                    h["Origin"] = mainUrl
+                    h["User-Agent"] = userAgent()
+                    h["Accept"] = "*/*"
+                    cookieHeader()?.let { h["Cookie"] = it }
+                    this.headers = h
                 }
             )
             found = true
@@ -372,24 +368,32 @@ class CinephileProvider : MainAPI() {
      * searched for an mp4 as a last resort.
      */
     private suspend fun resolve(resourceLink: String, referer: String): String? {
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = userAgent()
+        headers["Accept"] = "*/*"
+        headers["Origin"] = mainUrl
+        headers["Referer"] = referer
+        cookieHeader()?.let { headers["Cookie"] = it }
+
         val res = runCatching {
-            app.get(
-                resourceLink,
-                headers = mapOf(
-                    "User-Agent" to userAgent(),
-                    "Accept" to "*/*",
-                    "Origin" to mainUrl,
-                    "Referer" to referer
-                ),
-                allowRedirects = true,
-                timeout = 25L
-            )
-        }.getOrNull() ?: return null
+            app.get(resourceLink, headers = headers, allowRedirects = true, timeout = 25L)
+        }.getOrNull()
 
-        val finalUrl = res.url
-        if (finalUrl != resourceLink && finalUrl.contains(".mp4", true)) return finalUrl
+        if (res != null) {
+            runCatching { CinephileBrowser.harvest(res.cookies) }
+            if (res.url != resourceLink && res.url.contains(".mp4", true)) return res.url
 
-        val text = runCatching { res.text }.getOrNull().orEmpty()
+            val text = runCatching { res.text }.getOrNull().orEmpty()
+            urlFrom(text)?.let { return it }
+        }
+
+        // a challenge instead of a file: the browser is the only way through it
+        val rendered = runCatching { CinephileBrowser.html(resourceLink, referer) }.getOrNull()
+        return urlFrom(rendered.orEmpty())
+    }
+
+    /** pulls the file url out of whatever the api answered: json, or html holding an mp4 */
+    private fun urlFrom(text: String): String? {
         if (text.isBlank()) return null
 
         runCatching {
@@ -399,6 +403,21 @@ class CinephileProvider : MainAPI() {
         }.getOrNull()?.let { if (it.startsWith("http")) return it }
 
         return Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*""").find(text)?.value
+    }
+
+    /**
+     * The cookie a file request needs: whatever was pasted in settings, plus anything the session
+     * harvested from Set-Cookie, plus the app's jar. The challenge before playback sets a cookie,
+     * and a link that resolves without it is refused when the player asks for the bytes.
+     */
+    private fun cookieHeader(): String? {
+        val manual = CinephileSettings.cookie
+        val session = runCatching { CinephileBrowser.sessionCookies() }.getOrNull().orEmpty()
+        val jar = runCatching {
+            android.webkit.CookieManager.getInstance().getCookie("$mainUrl/")
+        }.getOrNull().orEmpty()
+        return listOf(manual, session, jar).filter { it.isNotBlank() }
+            .joinToString("; ").ifBlank { null }
     }
 
     private companion object {

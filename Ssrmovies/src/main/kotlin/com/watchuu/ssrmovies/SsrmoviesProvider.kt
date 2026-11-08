@@ -136,6 +136,20 @@ class SsrmoviesProvider : MainAPI() {
         }
     }
 
+    /**
+     * The theme marks its poster with attachment-sociallyviral-featured wp-post-image, so that is
+     * asked for by name first. "first img in the article" happens to be the poster on the cards
+     * captured so far, but a label, avatar or rating icon ahead of it would silently win instead.
+     */
+    private val posterSelector =
+        "img.attachment-sociallyviral-featured, img.wp-post-image, .featured-thumbnail img, " +
+            "img[class*=featured], .post-image img"
+
+    private fun posterIn(scope: Element?): String? {
+        if (scope == null) return null
+        return imageUrl(scope.selectFirst(posterSelector)) ?: imageUrl(scope.selectFirst("img"))
+    }
+
     private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> =
         doc.select("article.latestPost, article.excerpt, article")
             .mapNotNull { it.toSearchResult() }
@@ -153,7 +167,7 @@ class SsrmoviesProvider : MainAPI() {
             ?: selectFirst("img")?.attr("alt")?.trim()?.ifBlank { null }
             ?: return null
 
-        val poster = imageUrl(selectFirst("img"))
+        val poster = posterIn(this)
 
         val isSeries = Regex("""-s\d{2}|season|complete|series|episode""", RegexOption.IGNORE_CASE)
             .containsMatchIn("$href $title")
@@ -175,7 +189,7 @@ class SsrmoviesProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
             ?: url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
         val poster = imageUrl(doc.selectFirst(".poster img"))
-            ?: imageUrl(doc.selectFirst("article img, .entry-content img"))
+            ?: posterIn(doc.selectFirst("article, .single_post, body"))
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
         val plot = doc.select(".entry-content p").map { it.text().trim() }
             .filter { it.length > 60 }.take(2).joinToString("\n\n").ifBlank { null }

@@ -105,9 +105,9 @@ class CinephileProvider : MainAPI() {
      */
     private suspend fun fromHome(subjectType: Int): List<SearchResponse> {
         val json = apiJson("action=home") ?: return emptyList()
-        val out = ArrayList<SearchResponse>()
-        collectItems(json.opt("data"), out)
-        return out.filter { subjectType == 0 || it.second == subjectType }
+        val found = ArrayList<Pair<SearchResponse, Int>>()
+        collectItems(json.opt("data"), found)
+        return found.filter { subjectType == 0 || it.second == subjectType }
             .map { it.first }
             .distinctBy { it.url }
     }
@@ -123,8 +123,9 @@ class CinephileProvider : MainAPI() {
                     val type = node.optInt("subjectType", 1)
                     toSearchResult(node)?.let { into.add(it to type) }
                 }
-                node.keys().forEach { key ->
-                    val child = node.opt(key)
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val child = node.opt(keys.next())
                     if (child is JSONArray || child is JSONObject) collectItems(child, into, depth + 1)
                 }
             }

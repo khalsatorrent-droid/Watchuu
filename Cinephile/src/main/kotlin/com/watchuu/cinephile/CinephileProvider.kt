@@ -112,23 +112,31 @@ class CinephileProvider : MainAPI() {
             .distinctBy { it.url }
     }
 
+    /**
+     * Walks whatever action=home returns and collects every object that carries a slug and a
+     * title, at any depth - the payload may be a flat list or a set of named sections, and this
+     * does not need to know which.
+     */
     private fun collectItems(node: Any?, into: MutableList<Pair<SearchResponse, Int>>, depth: Int = 0) {
         if (depth > 6 || node == null) return
-        when (node) {
-            is JSONArray -> for (i in 0 until node.length()) collectItems(node.opt(i), into, depth + 1)
-            is JSONObject -> {
-                val slug = node.optString("slug")
-                val title = node.optString("title")
-                if (slug.isNotBlank() && title.isNotBlank()) {
-                    val type = node.optInt("subjectType", 1)
-                    toSearchResult(node)?.let { into.add(it to type) }
-                }
-                val keys = node.keys()
-                while (keys.hasNext()) {
-                    val child = node.opt(keys.next())
-                    if (child is JSONArray || child is JSONObject) collectItems(child, into, depth + 1)
-                }
+
+        val array = node as? JSONArray
+        if (array != null) {
+            for (i in 0 until array.length()) {
+                collectItems(array.opt(i), into, depth + 1)
             }
+            return
+        }
+
+        val obj = node as? JSONObject ?: return
+        val slug = obj.optString("slug")
+        val title = obj.optString("title")
+        if (slug.isNotBlank() && title.isNotBlank()) {
+            toSearchResult(obj)?.let { into.add(it to obj.optInt("subjectType", 1)) }
+        }
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            collectItems(obj.opt(keys.next()), into, depth + 1)
         }
     }
 

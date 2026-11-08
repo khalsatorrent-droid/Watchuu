@@ -314,6 +314,42 @@ class CinephileProvider : MainAPI() {
         if (subjectId.isBlank()) return false
 
         val pageUrl = "$mainUrl/watch/$slug?sid=$subjectId"
+        val isSeries = ep > 0 || se > 1
+
+        // the endpoint the site's own player uses - no challenge to solve, every resolution listed
+        val streams = playStreams(subjectId, se, ep, slug, isSeries)
+        if (streams.isNotEmpty()) {
+            var emitted = false
+            streams.forEach { (fileUrl, resolution, codec) ->
+                val q = resolution.toIntOrNull() ?: 0
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = buildString {
+                            append(name)
+                            if (q > 0) append(" · ${q}p")
+                            if (codec.isNotBlank()) append(" · $codec")
+                        },
+                        url = fileUrl,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = pageUrl
+                        this.quality = if (q > 0) q else Qualities.Unknown.value
+                        val h = LinkedHashMap<String, String>()
+                        h["Referer"] = pageUrl
+                        h["Origin"] = mainUrl
+                        h["User-Agent"] = userAgent()
+                        h["Accept"] = "*/*"
+                        cookieHeader()?.let { h["Cookie"] = it }
+                        this.headers = h
+                    }
+                )
+                emitted = true
+            }
+            if (emitted) return true
+        }
+
+        // fallback: cinephile's own resource list, resolved through the api
         val json = apiJson("action=resources&id=$subjectId&se=$se&ep=$ep") ?: return false
         val arr = json.optJSONArray("data") ?: return false
 
@@ -367,6 +403,78 @@ class CinephileProvider : MainAPI() {
      * redirect, as {url: …}, or as {data:{url: …}}; all three are handled, and an html answer is
      * searched for an mp4 as a last resort.
      */
+    /**
+     * The site's player does not use cinephile's own api to get a file. It calls aoneroom's play
+     * endpoint, which is the thing that was blocking playback:
+     *
+     *   GET https://netnaija.film/wefeed-h5api-bff/subject/play
+     *       ?subjectId=<sid>&se=<se>&ep=<ep>&detailPath=<slug>
+     *   Accept: application/json
+     *   X-Client-Info: {"timezone":"Asia/Calcutta"}
+     *   Referer: https://netnaija.film/videoPlayPage/<slug>?type=/movie/detail&lang=en
+     *
+     *   -> Set-Cookie: token=<jwt>          (a guest token, handed out on the first call)
+     *   -> {"code":0,"data":{"streams":[
+     *        {"url":"https://bcdnxw.hakunaymatata.com/resource/….mp4?sign=…&t=…",
+     *         "resolutions":"480","codecName":"h264","vipLocked":false},
+     *        {"resolutions":"1080", …}]}}
+     *
+     * So there is nothing to solve in a WebView: the endpoint answers without a session, hands
+     * back the token itself, and lists every resolution with a signed url. The token is kept and
+     * sent on the retry in case a later call wants it.
+     */
+    private suspend fun playStreams(
+        subjectId: String,
+        se: Int,
+        ep: Int,
+        slug: String,
+        isSeries: Boolean
+    ): List<Triple<String, String, String>> {
+        val detailType = if (isSeries) "/tv/detail" else "/movie/detail"
+        val url = "https://netnaija.film/wefeed-h5api-bff/subject/play" +
+            "?subjectId=$subjectId&se=$se&ep=$ep&detailPath=${URLEncoder.encode(slug, "UTF-8")}"
+
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = userAgent()
+        headers["Accept"] = "application/json"
+        headers["X-Client-Info"] = """{"timezone":"Asia/Calcutta"}"""
+        headers["X-Source"] = ""
+        headers["Referer"] = "https://netnaija.film/videoPlayPage/$slug?type=$detailType&lang=en"
+
+        var body: String? = null
+        var token: String? = null
+
+        repeat(2) { attempt ->
+            val h = LinkedHashMap(headers)
+            token?.let { h["Cookie"] = "token=$it" }
+            val res = runCatching { app.get(url, headers = h, timeout = 25L) }.getOrNull()
+            if (res == null) return@repeat
+            runCatching { CinephileBrowser.harvest(res.cookies) }
+            token = res.cookies["token"] ?: token
+            val text = runCatching { res.text }.getOrNull().orEmpty()
+            if (text.contains("\"streams\"")) {
+                body = text
+                return@repeat
+            }
+        }
+
+        val text = body ?: return emptyList()
+        val out = ArrayList<Triple<String, String, String>>()
+        runCatching {
+            val json = JSONObject(text)
+            val streams = json.optJSONObject("data")?.optJSONArray("streams") ?: return@runCatching
+            for (i in 0 until streams.length()) {
+                val o = streams.optJSONObject(i) ?: continue
+                val fileUrl = o.optString("url").ifBlank { continue }
+                if (o.optBoolean("vipLocked", false)) continue
+                val resolution = o.optString("resolutions").ifBlank { "0" }
+                val codec = o.optString("codecName").ifBlank { "" }
+                out.add(Triple(fileUrl, resolution, codec))
+            }
+        }
+        return out
+    }
+
     private suspend fun resolve(resourceLink: String, referer: String): String? {
         val headers = LinkedHashMap<String, String>()
         headers["User-Agent"] = userAgent()

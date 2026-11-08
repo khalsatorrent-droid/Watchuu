@@ -132,7 +132,7 @@ class CinephileProvider : MainAPI() {
         val slug = obj.optString("slug")
         val title = obj.optString("title")
         if (slug.isNotBlank() && title.isNotBlank()) {
-            toSearchResult(obj)?.let { into.add(it to obj.optInt("subjectType", 1)) }
+            obj.toSearchResult()?.let { into.add(it to obj.optInt("subjectType", 1)) }
         }
         val keys = obj.keys()
         while (keys.hasNext()) {

@@ -72,7 +72,8 @@ class CinephileProvider : MainAPI() {
     // ── Listings ───────────────────────────────────────────────────────────────
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val filter = when (request.data.trim('/')) {
+        val section = request.data.trim('/')
+        val filter = when (section) {
             "movies" -> 1
             "series" -> 2
             "anime" -> 3
@@ -86,39 +87,59 @@ class CinephileProvider : MainAPI() {
 
         // the api did not answer: read the site's own listing page, whose posters are the
         // background-image div the app renders (div.absolute.inset-0)
-        val html = runCatching {
-            app.get(
-                "$mainUrl/${request.data.trim('/')}",
-                headers = mapOf("User-Agent" to userAgent(), "Referer" to "$mainUrl/"),
-                interceptor = cf,
-                timeout = 25L
-            ).text
-        }.getOrNull()
-        val scraped = html?.let { scrapeCards(it) }.orEmpty()
+        val scraped = scrapeListing(section)
         return newHomePageResponse(request.name, scraped, hasNext = scraped.isNotEmpty())
     }
 
     /**
-     * action=home returns the same {ok, data} shape as search, but the capture never recorded its
-     * body, so this walks whatever comes back and collects every object that carries a slug and a
-     * title - flat list or sectioned, either way.
+     * The site's own hook does exactly this, in this order: fetch ?action=home, and if that yields
+     * no sections, fetch ?action=tabcontent&tabId=0. Both answer {ok, data:{sections:[…]}}, where
+     * each section holds its own array of subjects - so the payload is walked rather than assumed,
+     * and a section-less answer falls through to the next source instead of showing an empty row.
      */
     private suspend fun fromHome(subjectType: Int): List<SearchResponse> {
-        val json = apiJson("action=home") ?: return emptyList()
-        val found = ArrayList<Pair<SearchResponse, Int>>()
-        collectItems(json.opt("data"), found)
-        return found.filter { subjectType == 0 || it.second == subjectType }
-            .map { it.first }
-            .distinctBy { it.url }
+        val sources = listOf("action=home", "action=tabcontent&tabId=0")
+
+        for (query in sources) {
+            val json = apiJson(query) ?: continue
+            val found = ArrayList<Pair<SearchResponse, Int>>()
+            collectItems(json.opt("data") ?: json, found)
+
+            val picked = found
+                .filter { subjectType == 0 || it.second == subjectType }
+                .map { it.first }
+                .distinctBy { it.url }
+
+            if (picked.isNotEmpty()) return picked
+        }
+        return emptyList()
+    }
+
+    private suspend fun scrapeListing(section: String): List<SearchResponse> {
+        val paths = if (section.isBlank()) listOf("", "movies", "series") else listOf(section)
+        val out = ArrayList<SearchResponse>()
+        for (path in paths) {
+            val html = runCatching {
+                app.get(
+                    "$mainUrl/$path",
+                    headers = mapOf("User-Agent" to userAgent(), "Referer" to "$mainUrl/"),
+                    interceptor = cf,
+                    timeout = 25L
+                ).text
+            }.getOrNull() ?: continue
+            out.addAll(scrapeCards(html))
+        }
+        return out.distinctBy { it.url }
     }
 
     /**
-     * Walks whatever action=home returns and collects every object that carries a slug and a
-     * title, at any depth - the payload may be a flat list or a set of named sections, and this
-     * does not need to know which.
+     * Walks whatever the api returns and collects every subject it can recognise, at any depth.
+     * Fields are read defensively: the listing uses title/cover, a nested subject object appears
+     * in some payloads, and name is used elsewhere - none of that should decide whether a row
+     * renders.
      */
     private fun collectItems(node: Any?, into: MutableList<Pair<SearchResponse, Int>>, depth: Int = 0) {
-        if (depth > 6 || node == null) return
+        if (depth > 8 || node == null) return
 
         val array = node as? JSONArray
         if (array != null) {
@@ -129,14 +150,36 @@ class CinephileProvider : MainAPI() {
         }
 
         val obj = node as? JSONObject ?: return
-        val slug = obj.optString("slug")
-        val title = obj.optString("title")
+        val subject = obj.optJSONObject("subject") ?: obj
+        val slug = subject.optString("slug").ifBlank { obj.optString("slug") }
+        val title = subject.optString("title")
+            .ifBlank { subject.optString("name") }
+            .ifBlank { obj.optString("title") }
+            .ifBlank { obj.optString("name") }
+
         if (slug.isNotBlank() && title.isNotBlank()) {
-            obj.toSearchResult()?.let { into.add(it to obj.optInt("subjectType", 1)) }
+            val poster = subject.optString("cover")
+                .ifBlank { subject.optString("poster_url") }
+                .ifBlank { subject.optString("poster") }
+                .ifBlank { subject.optString("image") }
+                .ifBlank { obj.optString("cover") }
+                .ifBlank { null }
+            val sid = subject.optString("subjectId").ifBlank { obj.optString("subjectId") }
+            val type = subject.optInt("subjectType", obj.optInt("subjectType", 1))
+            val url = if (sid.isNotBlank()) "$mainUrl/watch/$slug?sid=$sid" else "$mainUrl/watch/$slug"
+
+            val response: SearchResponse = when (type) {
+                2 -> newTvSeriesSearchResponse(title, url, TvType.TvSeries) { this.posterUrl = poster }
+                3 -> newTvSeriesSearchResponse(title, url, TvType.Anime) { this.posterUrl = poster }
+                else -> newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = poster }
+            }
+            into.add(response to type)
         }
+
         val keys = obj.keys()
         while (keys.hasNext()) {
-            collectItems(obj.opt(keys.next()), into, depth + 1)
+            val child = obj.opt(keys.next())
+            if (child is JSONArray || child is JSONObject) collectItems(child, into, depth + 1)
         }
     }
 

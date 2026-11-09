@@ -57,6 +57,10 @@ class MmshuntProvider : MainAPI() {
     /** cookies the site has handed to this session; the image requests need them too */
     private val sessionCookies = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    /** Invision's csrf key, taken from a form on any page - the pager's ajax calls carry it */
+    @Volatile
+    private var csrfKey: String? = null
+
     private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? = runCatching {
         val res = app.get(
             url,
@@ -70,7 +74,10 @@ class MmshuntProvider : MainAPI() {
             timeout = 30L
         )
         res.cookies.forEach { (k, v) -> if (k.isNotBlank()) sessionCookies[k] = v }
-        res.text
+        val text = res.text
+        Regex("""name=["']csrfKey["']\s+value=["']([a-f0-9]{20,})["']""", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.get(1)?.let { csrfKey = it }
+        text
     }.getOrNull()?.takeIf { body ->
         // page 2 and beyond can come back as an ajax fragment with no <html> wrapper, so the
         // check is "is this the page's content", not "is this a whole document"
@@ -83,20 +90,48 @@ class MmshuntProvider : MainAPI() {
     // ── Listings ───────────────────────────────────────────────────────────────
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // the site writes paging as /forum/<id>-<slug>/page/<n>/ - with the trailing slash, which
-        // is also the form its own pager links use
         val base = "$mainUrl/${request.data.trim('/')}"
-        val url = if (page > 1) "$base/page/$page/" else "$base/"
 
-        var html = fetch(url)
-        if (html == null && page > 1) {
-            // some sections only answer their ajax list form
-            html = fetch("$base/page/$page/?listResort=1")
+        if (page <= 1) {
+            val html = fetch("$base/") ?: return newHomePageResponse(request.name, emptyList(), false)
+            val items = cards(Jsoup.parse(html))
+            return newHomePageResponse(request.name, items, hasNext = pagesAfter(html, page, items))
         }
-        if (html == null) return newHomePageResponse(request.name, emptyList(), false)
 
-        val items = cards(Jsoup.parse(html))
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        /**
+         * Later pages are the site's own pager calls. Its ajax list form is
+         *
+         *   /forum/<id>-<slug>/page/<n>/?listResort=1&csrfKey=<key>
+         *
+         * with the key taken from a form on the first page, and that is the form the capture shows
+         * returning rows. Without the key Invision answers with the first page again, which is what
+         * made paging look like it did nothing. The plain seo url is still tried, then the ajax
+         * form without a key, and a result identical to page one is treated as a failure and the
+         * next form is tried.
+         */
+        val firstUrl = cards(Jsoup.parse(fetch("$base/").orEmpty())).firstOrNull()?.url
+
+        val attempts = ArrayList<String>()
+        csrfKey?.let { attempts.add("$base/page/$page/?listResort=1&csrfKey=$it") }
+        attempts.add("$base/page/$page/")
+        attempts.add("$base/page/$page/?listResort=1")
+
+        for (url in attempts) {
+            val html = fetch(url) ?: continue
+            val items = cards(Jsoup.parse(html))
+            if (items.isEmpty()) continue
+            if (firstUrl != null && items.first().url == firstUrl) continue
+            return newHomePageResponse(request.name, items, hasNext = pagesAfter(html, page, items))
+        }
+
+        return newHomePageResponse(request.name, emptyList(), false)
+    }
+
+    /** the pager states how many pages there are; fall back to "there were items" */
+    private fun pagesAfter(html: String, page: Int, items: List<SearchResponse>): Boolean {
+        val total = Regex("""data-ipsPagination-pages=["']?(\d+)""").find(html)
+            ?.groupValues?.get(1)?.toIntOrNull()
+        return if (total != null) page < total else items.isNotEmpty()
     }
 
     override suspend fun search(query: String): List<SearchResponse> {

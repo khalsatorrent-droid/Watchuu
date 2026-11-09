@@ -3,7 +3,12 @@ package com.watchuu.mmshunt
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
@@ -37,6 +42,12 @@ class MmshuntProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.NSFW)
 
     private val cf = CloudflareKiller()
+
+    companion object {
+        /** set by the plugin so posters can be cached on disk */
+        @Volatile
+        var appContext: android.content.Context? = null
+    }
 
     override val mainPage = mainPageOf(
         "forum/11-desi-latest-videos-hd-sd" to "Desi Latest Videos",
@@ -92,17 +103,18 @@ class MmshuntProvider : MainAPI() {
         return (first + second).distinctBy { it.url }
     }
 
-    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> {
+    private suspend fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
 
-        // forum listing rows, and search results, both link to /topic/<id>-<slug>/
-        doc.select("li.cForumRow, li.ipsDataItem, li.ipsStreamItem, .ipsDataItem").forEach { row ->
+        // plain loops rather than forEach: toSearchResult is suspend now, since it downloads the
+        // poster to a local file, and a non-suspend lambda cannot call it
+        for (row in doc.select("li.cForumRow, li.ipsDataItem, li.ipsStreamItem, .ipsDataItem")) {
             row.toSearchResult()?.let { out.add(it) }
         }
 
         // a search page may list bare topic links instead of rows
         if (out.isEmpty()) {
-            doc.select("a[href*=/topic/]").forEach { a ->
+            for (a in doc.select("a[href*=/topic/]")) {
                 a.toSearchResult()?.let { out.add(it) }
             }
         }
@@ -150,6 +162,42 @@ class MmshuntProvider : MainAPI() {
         else -> fixUrl(url)
     }
 
+    /**
+     * Posters are fetched here and handed to the app as a local file.
+     *
+     * The artwork sits behind the same Cloudflare as the pages, and whether the app's own image
+     * loader applies posterHeaders is not something an extension can rely on - so instead of
+     * pointing at a url that may be refused, the image is downloaded with the session's headers,
+     * cached by its file name, and offered as file:///…. That removes the image request from the
+     * app entirely: whatever the loader does, the bytes are already local.
+     */
+    private suspend fun posterFor(url: String?): String? = withContext(Dispatchers.IO) {
+        if (url.isNullOrBlank()) return null
+        if (!url.startsWith("http")) return url
+
+        val ctx = appContext ?: return url
+        val name = url.substringAfterLast('/').substringBefore('?')
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .ifBlank { url.hashCode().toString() }
+        val dir = File(ctx.cacheDir, "mmshunt_posters").apply { mkdirs() }
+        val file = File(dir, name)
+        if (file.exists() && file.length() > 1024) return "file://${file.absolutePath}"
+
+        return runCatching {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 20_000
+            conn.instanceFollowRedirects = true
+            posterHeaders().forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            if (conn.responseCode !in 200..299) return@runCatching url
+            val bytes = conn.inputStream.use { it.readBytes() }
+            conn.disconnect()
+            if (bytes.size < 512) return@runCatching url
+            file.writeBytes(bytes)
+            "file://${file.absolutePath}"
+        }.getOrDefault(url)
+    }
+
     private fun posterHeaders(): Map<String, String> {
         val h = LinkedHashMap<String, String>()
         h["User-Agent"] = userAgent()
@@ -168,7 +216,7 @@ class MmshuntProvider : MainAPI() {
         return h
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
+    private suspend fun Element.toSearchResult(): SearchResponse? {
         val a = selectFirst("a[href*=/topic/]") ?: return null
         val href = a.attr("href").trim()
         if (href.isBlank()) return null
@@ -179,7 +227,7 @@ class MmshuntProvider : MainAPI() {
             ?: a.text().trim().ifBlank { null }
             ?: return null
 
-        val poster = posterOf(this)
+        val poster = posterFor(posterOf(this))
 
         return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
             this.posterUrl = poster
@@ -197,7 +245,8 @@ class MmshuntProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
             ?: url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
-            ?: posterOf(doc)
+            ?.let { posterFor(it) }
+            ?: posterFor(posterOf(doc))
         val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()?.ifBlank { null }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {

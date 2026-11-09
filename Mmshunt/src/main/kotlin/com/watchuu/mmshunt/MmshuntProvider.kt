@@ -338,7 +338,7 @@ class MmshuntProvider : MainAPI() {
         Regex("""^https?://([^/]+)""").find(url)?.groupValues?.get(1)
             ?.removePrefix("www.") ?: "link"
 
-    private companion object {
+    companion object {
         /** set by the plugin so posters can be cached on disk */
         @Volatile
         var appContext: android.content.Context? = null

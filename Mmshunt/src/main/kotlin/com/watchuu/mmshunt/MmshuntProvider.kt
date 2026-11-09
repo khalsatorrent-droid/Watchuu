@@ -49,8 +49,11 @@ class MmshuntProvider : MainAPI() {
 
     private fun userAgent(): String = UA
 
+    /** cookies the site has handed to this session; the image requests need them too */
+    private val sessionCookies = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? = runCatching {
-        app.get(
+        val res = app.get(
             url,
             headers = mapOf(
                 "User-Agent" to userAgent(),
@@ -60,7 +63,9 @@ class MmshuntProvider : MainAPI() {
             ),
             interceptor = cf,
             timeout = 30L
-        ).text
+        )
+        res.cookies.forEach { (k, v) -> if (k.isNotBlank()) sessionCookies[k] = v }
+        res.text
     }.getOrNull()?.takeIf { it.contains("<html", true) }
 
     // ── Listings ───────────────────────────────────────────────────────────────
@@ -145,31 +150,21 @@ class MmshuntProvider : MainAPI() {
         else -> fixUrl(url)
     }
 
-    /**
-     * The artwork sits on the same Cloudflare-fronted host as the pages, so an image request
-     * without the user agent and referer is refused and the card renders blank - which is what
-     * happens even when the url is correct and opens fine in a browser.
-     *
-     * Set by reflection so that an app whose API does not expose posterHeaders still loads the
-     * plugin and shows plain posters rather than failing to install.
-     */
-    private fun <T : Any> T.withPosterHeaders(): T {
-        runCatching {
-            javaClass.methods.firstOrNull { m ->
-                m.name == "setPosterHeaders" && m.parameterTypes.size == 1
-            }?.invoke(this, posterHeaders())
-        }
-        return this
-    }
-
     private fun posterHeaders(): Map<String, String> {
         val h = LinkedHashMap<String, String>()
         h["User-Agent"] = userAgent()
         h["Referer"] = "$mainUrl/"
         h["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
         h["Accept-Language"] = "en-US,en;q=0.9"
-        runCatching { android.webkit.CookieManager.getInstance().getCookie(mainUrl) }
-            .getOrNull()?.ifBlank { null }?.let { h["Cookie"] = it }
+
+        // the images sit behind the same Cloudflare as the pages, so they need the session the
+        // pages earned - cf_clearance and the ips4_* cookies. Those live in the http jar, not in
+        // the WebView's CookieManager, so both are read and merged.
+        val harvested = sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        val jar = runCatching { android.webkit.CookieManager.getInstance().getCookie(mainUrl) }
+            .getOrNull().orEmpty()
+        val cookie = listOf(harvested, jar).filter { it.isNotBlank() }.joinToString("; ")
+        if (cookie.isNotBlank()) h["Cookie"] = cookie
         return h
     }
 
@@ -188,7 +183,8 @@ class MmshuntProvider : MainAPI() {
 
         return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
             this.posterUrl = poster
-        }.withPosterHeaders()
+            this.posterHeaders = posterHeaders()
+        }
     }
 
     // ── Detail ─────────────────────────────────────────────────────────────────
@@ -207,7 +203,8 @@ class MmshuntProvider : MainAPI() {
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = plot
-        }.withPosterHeaders()
+            this.posterHeaders = posterHeaders()
+        }
     }
 
     // ── Streams ────────────────────────────────────────────────────────────────

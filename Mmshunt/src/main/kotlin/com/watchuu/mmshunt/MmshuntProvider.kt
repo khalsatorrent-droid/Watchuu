@@ -43,12 +43,6 @@ class MmshuntProvider : MainAPI() {
 
     private val cf = CloudflareKiller()
 
-    companion object {
-        /** set by the plugin so posters can be cached on disk */
-        @Volatile
-        var appContext: android.content.Context? = null
-    }
-
     override val mainPage = mainPageOf(
         "forum/11-desi-latest-videos-hd-sd" to "Desi Latest Videos",
         "forum/12-desi-old-videos-hdsd" to "Desi Old Videos",
@@ -171,7 +165,7 @@ class MmshuntProvider : MainAPI() {
      * cached by its file name, and offered as file:///…. That removes the image request from the
      * app entirely: whatever the loader does, the bytes are already local.
      */
-    private suspend fun posterFor(url: String?): String? = withContext(Dispatchers.IO) {
+    private suspend fun posterFor(url: String?): String? {
         if (url.isNullOrBlank()) return null
         if (!url.startsWith("http")) return url
 
@@ -183,19 +177,22 @@ class MmshuntProvider : MainAPI() {
         val file = File(dir, name)
         if (file.exists() && file.length() > 1024) return "file://${file.absolutePath}"
 
-        return runCatching {
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 20_000
-            conn.instanceFollowRedirects = true
-            posterHeaders().forEach { (k, v) -> conn.setRequestProperty(k, v) }
-            if (conn.responseCode !in 200..299) return@runCatching url
-            val bytes = conn.inputStream.use { it.readBytes() }
-            conn.disconnect()
-            if (bytes.size < 512) return@runCatching url
-            file.writeBytes(bytes)
-            "file://${file.absolutePath}"
-        }.getOrDefault(url)
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 20_000
+                conn.instanceFollowRedirects = true
+                posterHeaders().forEach { (k, v) -> conn.setRequestProperty(k, v) }
+                val code = conn.responseCode
+                if (code !in 200..299) return@runCatching url
+                val bytes = conn.inputStream.use { it.readBytes() }
+                conn.disconnect()
+                if (bytes.size < 512) return@runCatching url
+                file.writeBytes(bytes)
+                "file://${file.absolutePath}"
+            }.getOrDefault(url)
+        }
     }
 
     private fun posterHeaders(): Map<String, String> {
@@ -342,6 +339,10 @@ class MmshuntProvider : MainAPI() {
             ?.removePrefix("www.") ?: "link"
 
     private companion object {
+        /** set by the plugin so posters can be cached on disk */
+        @Volatile
+        var appContext: android.content.Context? = null
+
         const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
     }

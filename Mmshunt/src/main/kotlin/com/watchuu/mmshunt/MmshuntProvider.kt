@@ -1,0 +1,235 @@
+package com.watchuu.mmshunt
+
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
+import com.lagradost.cloudstream3.utils.*
+import java.net.URLEncoder
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
+
+/**
+ * MMSHunt (mmshunt.net) — built from the capture of 2026-11-09 14:15.
+ *
+ * An Invision Community forum, so the layout is its own:
+ *
+ *   listing   li.cForumRow -> a[href=/topic/<id>-<slug>/], thumbnail in .tthumb_wrap
+ *   paging    path: /forum/<id>-<slug>/page/<n>
+ *   search    /search/?&q=<query>&search_and_or=or
+ *   detail    /topic/<id>-<slug>/  title from h1, poster og:image
+ *
+ * The video is never embedded. Each topic's first post is a list of links to file hosts, which is
+ * what the capture shows:
+ *
+ *   https://d.torupload.com/…            https://krakenfiles.com/view/…/file.html
+ *   https://vids.st/v/4007               https://luluvdo.com/…      (four of them)
+ *   https://vidara.to/v/…                …
+ *
+ * so every external link in the post is handed to Cloudstream's own extractors rather than parsed
+ * here - luluvdo, streamtape, vids.st and the rest each have one, and that is the only thing that
+ * can turn those pages into a stream. Links to hosts with no extractor are dropped rather than
+ * offered as dead entries, and anything that is already a direct mp4/m3u8 is taken as-is.
+ */
+class MmshuntProvider : MainAPI() {
+    override var mainUrl = "https://mmshunt.net"
+    override var name = "MMSHunt"
+    override var lang = "en"
+    override val hasMainPage = true
+    override val supportedTypes = setOf(TvType.NSFW)
+
+    private val cf = CloudflareKiller()
+
+    override val mainPage = mainPageOf(
+        "forum/11-desi-latest-videos-hd-sd" to "Desi Latest Videos",
+        "forum/12-desi-old-videos-hdsd" to "Desi Old Videos",
+        "forum/15-desi-latest-semi-nude-masked-no-face-videospics" to "Semi Nude Masked",
+        "forum/16-overseas-desi-videosphotos" to "Overseas Desi",
+        "forum/17-desi-models-webcam-girls-lust-webmovies" to "Models & Webcam",
+        "forum/18-live-streams-tango-videos" to "Live Streams & Tango"
+    )
+
+    private fun userAgent(): String = UA
+
+    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? = runCatching {
+        app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to userAgent(),
+                "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.9",
+                "Referer" to referer
+            ),
+            interceptor = cf,
+            timeout = 30L
+        ).text
+    }.getOrNull()?.takeIf { it.contains("<html", true) }
+
+    // ── Listings ───────────────────────────────────────────────────────────────
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val base = "$mainUrl/${request.data.trim('/')}"
+        val url = if (page > 1) "$base/page/$page" else base
+
+        val html = fetch(url) ?: return newHomePageResponse(request.name, emptyList(), false)
+        val items = cards(Jsoup.parse(html))
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        if (q.isBlank()) return emptyList()
+
+        // Invision's search wants a csrf key in the url it generates, but answers ?q= on its own
+        val first = fetch("$mainUrl/search/?&q=$q&search_and_or=or")
+            ?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
+        if (first.isEmpty()) return first
+        val second = fetch("$mainUrl/search/?&q=$q&search_and_or=or&page=2")
+            ?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
+        return (first + second).distinctBy { it.url }
+    }
+
+    private fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> {
+        val out = ArrayList<SearchResponse>()
+
+        // forum listing rows, and search results, both link to /topic/<id>-<slug>/
+        doc.select("li.cForumRow, li.ipsDataItem, li.ipsStreamItem, .ipsDataItem").forEach { row ->
+            row.toSearchResult()?.let { out.add(it) }
+        }
+
+        // a search page may list bare topic links instead of rows
+        if (out.isEmpty()) {
+            doc.select("a[href*=/topic/]").forEach { a ->
+                a.toSearchResult()?.let { out.add(it) }
+            }
+        }
+        return out.distinctBy { it.url }
+    }
+
+    private fun Element.toSearchResult(): SearchResponse? {
+        val a = selectFirst("a[href*=/topic/]") ?: return null
+        val href = a.attr("href").trim()
+        if (href.isBlank()) return null
+
+        val img = selectFirst("img")
+        val title = a.attr("alt").trim().ifBlank { null }
+            ?: a.attr("title").trim().ifBlank { null }
+            ?: selectFirst("h4, h3, .ipsDataItem_title")?.text()?.trim()?.ifBlank { null }
+            ?: a.text().trim().ifBlank { null }
+            ?: return null
+
+        val poster = img?.let { it.attr("data-src").ifBlank { it.attr("src") } }
+            ?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
+            ?.let { if (it.startsWith("//")) "https:$it" else if (it.startsWith("http")) it else fixUrl(it) }
+
+        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
+            this.posterUrl = poster
+        }
+    }
+
+    // ── Detail ─────────────────────────────────────────────────────────────────
+
+    override suspend fun load(url: String): LoadResponse? {
+        val html = fetch(url) ?: return null
+        val doc = Jsoup.parse(html)
+
+        val title = doc.selectFirst("h1")?.text()?.trim()?.ifBlank { null }
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
+            ?: url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+        val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()?.ifBlank { null }
+
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+            this.posterUrl = poster
+            this.plot = plot
+        }
+    }
+
+    // ── Streams ────────────────────────────────────────────────────────────────
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val html = fetch(data) ?: return false
+        val doc = Jsoup.parse(html)
+
+        // the first post is the one carrying the links; later posts are chatter
+        val post = doc.selectFirst("[data-role=commentContent]")
+            ?: doc.selectFirst(".cPost_contentWrap")
+            ?: doc
+
+        val hosts = LinkedHashMap<String, String>() // url -> label
+        post.select("a[href]").forEach { a ->
+            val href = a.attr("href").replace("&amp;", "&").trim()
+            if (!href.startsWith("http")) return@forEach
+            if (href.contains("mmshunt.net", true)) return@forEach
+            if (hosts.containsKey(href)) return@forEach
+            hosts[href] = hostLabel(href)
+        }
+
+        // and any file the post points at directly
+        Regex("""https?://[^\s"'<>\\]+\.(?:mp4|m3u8)[^\s"'<>\\]*""")
+            .findAll(post.html())
+            .map { it.value.replace("&amp;", "&") }
+            .forEach { url -> if (!hosts.containsKey(url)) hosts[url] = "direct" }
+
+        if (hosts.isEmpty()) return false
+
+        var found = false
+        hosts.forEach { (link, label) ->
+            // a direct file needs no extractor
+            if (Regex("""\.(mp4|m3u8)(\?|$)""", RegexOption.IGNORE_CASE).containsMatchIn(link)) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name · $label",
+                        url = link,
+                        type = if (link.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = data
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "Referer" to data,
+                            "User-Agent" to userAgent(),
+                            "Accept" to "*/*"
+                        )
+                    }
+                )
+                found = true
+                return@forEach
+            }
+
+            // everything else goes through Cloudstream's extractors
+            val got = mutableListOf<ExtractorLink>()
+            runCatching {
+                loadExtractor(link, data, subtitleCallback) { got.add(it) }
+            }
+            got.forEach { extracted ->
+                callback.invoke(
+                    newExtractorLink(
+                        source = extracted.source ?: name,
+                        name = if (extracted.name.isBlank()) label else extracted.name,
+                        url = extracted.url,
+                        type = extracted.type
+                    ) {
+                        this.referer = extracted.referer.ifBlank { data }
+                        this.quality = extracted.quality
+                        this.headers = extracted.headers
+                    }
+                )
+                found = true
+            }
+        }
+        return found
+    }
+
+    private fun hostLabel(url: String): String =
+        Regex("""^https?://([^/]+)""").find(url)?.groupValues?.get(1)
+            ?.removePrefix("www.") ?: "link"
+
+    private companion object {
+        const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
+    }
+}

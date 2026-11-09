@@ -104,21 +104,59 @@ class MmshuntProvider : MainAPI() {
         return out.distinctBy { it.url }
     }
 
+    /**
+     * The tthumb plugin paints its thumbnail from a data attribute, not from an img:
+     *
+     *   <div class="tthumb_standard"
+     *        data-background-src="https://mmshunt.net/uploads/monthly_2026_11/topic_45792.thumb.jpg...">
+     *     <img ...>    <- injected later by the plugin, the 157x350 one
+     *
+     * The inline style holds only spacer.png, so reading style or src alone gives a placeholder.
+     * data-background-src is asked for first, then a real img, then the style url, and the
+     * ?do=tthumbGetImage endpoint only as a last resort.
+     */
+    private fun posterOf(card: Element): String? {
+        card.selectFirst("[data-background-src]")
+            ?.attr("data-background-src")?.trim()?.ifBlank { null }
+            ?.let { return absolute(it) }
+
+        card.selectFirst("img[data-src], img[src]")?.let { img ->
+            listOf(img.attr("data-src"), img.attr("src"))
+                .firstOrNull { it.isNotBlank() && !it.contains("spacer", true) && !it.startsWith("data:") }
+                ?.let { return absolute(it) }
+        }
+
+        card.selectFirst("[style*=background-image]")?.attr("style")?.let { style ->
+            Regex("""url\(\s*['"]?([^'")]+)['"]?\s*\)""").find(style)?.groupValues?.get(1)
+                ?.takeIf { !it.contains("spacer", true) && !it.startsWith("data:") }
+                ?.let { return absolute(it) }
+        }
+
+        card.selectFirst("[data-ipsHover-target]")?.attr("data-ipsHover-target")
+            ?.trim()?.ifBlank { null }
+            ?.let { return absolute(it) }
+
+        return null
+    }
+
+    private fun absolute(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http") -> url
+        else -> fixUrl(url)
+    }
+
     private fun Element.toSearchResult(): SearchResponse? {
         val a = selectFirst("a[href*=/topic/]") ?: return null
         val href = a.attr("href").trim()
         if (href.isBlank()) return null
 
-        val img = selectFirst("img")
         val title = a.attr("alt").trim().ifBlank { null }
             ?: a.attr("title").trim().ifBlank { null }
             ?: selectFirst("h4, h3, .ipsDataItem_title")?.text()?.trim()?.ifBlank { null }
             ?: a.text().trim().ifBlank { null }
             ?: return null
 
-        val poster = img?.let { it.attr("data-src").ifBlank { it.attr("src") } }
-            ?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
-            ?.let { if (it.startsWith("//")) "https:$it" else if (it.startsWith("http")) it else fixUrl(it) }
+        val poster = posterOf(this)
 
         return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
             this.posterUrl = poster
@@ -135,6 +173,7 @@ class MmshuntProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
             ?: url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+            ?: posterOf(doc)
         val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()?.ifBlank { null }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {

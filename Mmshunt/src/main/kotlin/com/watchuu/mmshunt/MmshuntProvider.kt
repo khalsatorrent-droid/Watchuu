@@ -100,9 +100,21 @@ class MmshuntProvider : MainAPI() {
     private suspend fun cards(doc: org.jsoup.nodes.Document): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
 
+        // The forum listing is a grid of div.tthumb_gal_item, not the li rows used elsewhere on the
+        // site - and that grid is where the poster actually is:
+        //
+        //   <div class="tthumb_gal_item"><div class="tthumb_gal_border">
+        //     <div class="tthumb_gal_item_img"><a href="/topic/…"><img src="…/topic_45792.thumb.jpg…">
+        //
+        // Those cards carry no data-background-src at all (that attribute only exists on the home
+        // page's rows), which is why every poster came back empty. The li selectors stay as
+        // fallbacks for search results and other listing types.
+        //
         // plain loops rather than forEach: toSearchResult is suspend now, since it downloads the
         // poster to a local file, and a non-suspend lambda cannot call it
-        for (row in doc.select("li.cForumRow, li.ipsDataItem, li.ipsStreamItem, .ipsDataItem")) {
+        for (row in doc.select(
+            "div.tthumb_gal_item, li.cForumRow, li.ipsDataItem, li.ipsStreamItem, .ipsDataItem"
+        )) {
             row.toSearchResult()?.let { out.add(it) }
         }
 
@@ -218,8 +230,9 @@ class MmshuntProvider : MainAPI() {
         val href = a.attr("href").trim()
         if (href.isBlank()) return null
 
-        val title = a.attr("alt").trim().ifBlank { null }
-            ?: a.attr("title").trim().ifBlank { null }
+        val title = a.attr("title").trim().ifBlank { null }
+            ?: selectFirst("div.tthumb_gal_title a[title]")?.attr("title")?.trim()?.ifBlank { null }
+            ?: a.attr("alt").trim().ifBlank { null }
             ?: selectFirst("h4, h3, .ipsDataItem_title")?.text()?.trim()?.ifBlank { null }
             ?: a.text().trim().ifBlank { null }
             ?: return null

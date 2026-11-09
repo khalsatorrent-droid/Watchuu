@@ -145,6 +145,34 @@ class MmshuntProvider : MainAPI() {
         else -> fixUrl(url)
     }
 
+    /**
+     * The artwork sits on the same Cloudflare-fronted host as the pages, so an image request
+     * without the user agent and referer is refused and the card renders blank - which is what
+     * happens even when the url is correct and opens fine in a browser.
+     *
+     * Set by reflection so that an app whose API does not expose posterHeaders still loads the
+     * plugin and shows plain posters rather than failing to install.
+     */
+    private fun <T : Any> T.withPosterHeaders(): T {
+        runCatching {
+            javaClass.methods.firstOrNull { m ->
+                m.name == "setPosterHeaders" && m.parameterTypes.size == 1
+            }?.invoke(this, posterHeaders())
+        }
+        return this
+    }
+
+    private fun posterHeaders(): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = userAgent()
+        h["Referer"] = "$mainUrl/"
+        h["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        h["Accept-Language"] = "en-US,en;q=0.9"
+        runCatching { android.webkit.CookieManager.getInstance().getCookie(mainUrl) }
+            .getOrNull()?.ifBlank { null }?.let { h["Cookie"] = it }
+        return h
+    }
+
     private fun Element.toSearchResult(): SearchResponse? {
         val a = selectFirst("a[href*=/topic/]") ?: return null
         val href = a.attr("href").trim()
@@ -160,7 +188,7 @@ class MmshuntProvider : MainAPI() {
 
         return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
             this.posterUrl = poster
-        }
+        }.withPosterHeaders()
     }
 
     // ── Detail ─────────────────────────────────────────────────────────────────
@@ -179,7 +207,7 @@ class MmshuntProvider : MainAPI() {
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = plot
-        }
+        }.withPosterHeaders()
     }
 
     // ── Streams ────────────────────────────────────────────────────────────────

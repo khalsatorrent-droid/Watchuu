@@ -61,15 +61,30 @@ class MmshuntProvider : MainAPI() {
     @Volatile
     private var csrfKey: String? = null
 
-    private suspend fun fetch(url: String, referer: String = "$mainUrl/"): String? = runCatching {
+    /** the first item of the last page served, so a repeated answer is never shown as new */
+    @Volatile
+    private var lastFirstItem: String? = null
+
+    private suspend fun fetch(
+        url: String,
+        referer: String = "$mainUrl/",
+        ajax: Boolean = false
+    ): String? = runCatching {
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = userAgent()
+        headers["Accept-Language"] = "en-US,en;q=0.9"
+        headers["Referer"] = referer
+        if (ajax) {
+            // this is what the site's own pager sends; without it Invision answers a later page
+            // with the first page in full, which reads as pagination silently stopping
+            headers["X-Requested-With"] = "XMLHttpRequest"
+            headers["Accept"] = "application/json, text/javascript, */*; q=0.01"
+        } else {
+            headers["Accept"] = "text/html,application/xhtml+xml,*/*;q=0.8"
+        }
         val res = app.get(
             url,
-            headers = mapOf(
-                "User-Agent" to userAgent(),
-                "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
-                "Accept-Language" to "en-US,en;q=0.9",
-                "Referer" to referer
-            ),
+            headers = headers,
             interceptor = cf,
             timeout = 30L
         )
@@ -103,25 +118,40 @@ class MmshuntProvider : MainAPI() {
          *
          *   /forum/<id>-<slug>/page/<n>/?listResort=1&csrfKey=<key>
          *
-         * with the key taken from a form on the first page, and that is the form the capture shows
-         * returning rows. Without the key Invision answers with the first page again, which is what
-         * made paging look like it did nothing. The plain seo url is still tried, then the ajax
-         * form without a key, and a result identical to page one is treated as a failure and the
-         * next form is tried.
+         * and it also sends X-Requested-With: XMLHttpRequest. Without that header Invision answers
+         * a later page with the first page in full, which is why paging used to stop after a few
+         * pages. Every form is tried in turn, a repeat of the previous page is rejected, and if
+         * nothing answers the first page is reloaded to refresh the csrf key and the call retried.
          */
-        val firstUrl = cards(Jsoup.parse(fetch("$base/").orEmpty())).firstOrNull()?.url
+        // what the previous page started with, so a repeated answer is caught even deep in the list
+        val previousFirst = lastFirstItem
 
-        val attempts = ArrayList<String>()
-        csrfKey?.let { attempts.add("$base/page/$page/?listResort=1&csrfKey=$it") }
-        attempts.add("$base/page/$page/")
-        attempts.add("$base/page/$page/?listResort=1")
+        val attempts = ArrayList<Pair<String, Boolean>>() // url to isAjax
+        csrfKey?.let { attempts.add("$base/page/$page/?listResort=1&csrfKey=$it" to true) }
+        attempts.add("$base/page/$page/?listResort=1" to true)
+        attempts.add("$base/page/$page/" to false)
 
-        for (url in attempts) {
-            val html = fetch(url) ?: continue
+        for ((url, ajax) in attempts) {
+            val html = fetch(url, referer = url, ajax = ajax) ?: continue
             val items = cards(Jsoup.parse(html))
             if (items.isEmpty()) continue
-            if (firstUrl != null && items.first().url == firstUrl) continue
+            if (previousFirst != null && items.first().url == previousFirst) continue
+            lastFirstItem = items.first().url
             return newHomePageResponse(request.name, items, hasNext = pagesAfter(html, page, items))
+        }
+
+        // nothing answered: reload the first page to refresh the csrf key, then try once more
+        fetch("$base/")
+        csrfKey?.let { key ->
+            val url = "$base/page/$page/?listResort=1&csrfKey=$key"
+            val html = fetch(url, referer = url, ajax = true)
+            if (html != null) {
+                val items = cards(Jsoup.parse(html))
+                if (items.isNotEmpty() && items.first().url != previousFirst) {
+                    lastFirstItem = items.first().url
+                    return newHomePageResponse(request.name, items, hasNext = pagesAfter(html, page, items))
+                }
+            }
         }
 
         return newHomePageResponse(request.name, emptyList(), false)

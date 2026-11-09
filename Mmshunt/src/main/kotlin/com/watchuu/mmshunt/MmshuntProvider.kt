@@ -71,15 +71,30 @@ class MmshuntProvider : MainAPI() {
         )
         res.cookies.forEach { (k, v) -> if (k.isNotBlank()) sessionCookies[k] = v }
         res.text
-    }.getOrNull()?.takeIf { it.contains("<html", true) }
+    }.getOrNull()?.takeIf { body ->
+        // page 2 and beyond can come back as an ajax fragment with no <html> wrapper, so the
+        // check is "is this the page's content", not "is this a whole document"
+        body.contains("<html", true) ||
+            body.contains("tthumb_gal_item", true) ||
+            body.contains("ipsDataItem", true) ||
+            body.contains("commentContent", true)
+    }
 
     // ── Listings ───────────────────────────────────────────────────────────────
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        // the site writes paging as /forum/<id>-<slug>/page/<n>/ - with the trailing slash, which
+        // is also the form its own pager links use
         val base = "$mainUrl/${request.data.trim('/')}"
-        val url = if (page > 1) "$base/page/$page" else base
+        val url = if (page > 1) "$base/page/$page/" else "$base/"
 
-        val html = fetch(url) ?: return newHomePageResponse(request.name, emptyList(), false)
+        var html = fetch(url)
+        if (html == null && page > 1) {
+            // some sections only answer their ajax list form
+            html = fetch("$base/page/$page/?listResort=1")
+        }
+        if (html == null) return newHomePageResponse(request.name, emptyList(), false)
+
         val items = cards(Jsoup.parse(html))
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -92,7 +107,7 @@ class MmshuntProvider : MainAPI() {
         val first = fetch("$mainUrl/search/?&q=$q&search_and_or=or")
             ?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
         if (first.isEmpty()) return first
-        val second = fetch("$mainUrl/search/?&q=$q&search_and_or=or&page=2")
+        val second = fetch("$mainUrl/search/?&q=$q&page=2&search_and_or=or")
             ?.let { Jsoup.parse(it) }?.let { cards(it) }.orEmpty()
         return (first + second).distinctBy { it.url }
     }

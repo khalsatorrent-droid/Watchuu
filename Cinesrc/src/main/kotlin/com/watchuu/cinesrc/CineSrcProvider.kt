@@ -6,106 +6,87 @@ import java.net.URLEncoder
 import org.json.JSONObject
 
 /**
- * CineSrc (cinesrc.st) — built from the capture of 2026-11-11 11:39.
+ * CineSrc — a full TMDB frontend on top of the site's servers.
  *
- * The site is not a catalogue: its front page is a box that takes a TMDB id and an embed url of
- * the shape /embed/movie/<id> or /embed/tv/<id>?s=<season>&e=<episode>. What it adds is servers -
- * the capture lists thirteen of them by name:
+ * The site itself is only an embed api: it takes a TMDB id and plays it from one of thirteen
+ * servers. So the catalogue comes from TMDB directly, and every id it hands out is exactly what
+ * CineSrc wants - the two fit together with nothing in between.
  *
- *   nebula ⭐, light, wave, orbit, storm, aurora, flux, river, surge, mist, tempest, thunder,
- *   paris (FR&ENG), brisa (ES/LAT)
+ *   browse   /trending/all/day, /movie/popular, /tv/popular, /movie/now_playing,
+ *            /tv/on_the_air, top rated, and language/network discover rows
+ *   search   /search/multi?query=<q>
+ *   detail   /movie/<id> or /tv/<id>, plus /tv/<id>/season/<n> for real episode lists
+ *   play     https://cinesrc.st/embed/movie/<id>  or  /embed/tv/<id>?s=&e=
  *
- * So this extension is search-first: find a title, open it, and get whatever servers answer.
+ * Playback is the part CineSrc protects: a wasm proof of work, Next.js server-action hashes that
+ * change per deploy, and a per-server encrypted token. None of that is reimplemented here - the
+ * embed page is opened in a WebView, which solves it itself, and the /api/playlist/ requests it
+ * makes are collected, one per server it is driven to try.
  *
- *   search    /api/tmdb/search?q=<query>        -> {results:[{id, media_type, title, …}]}
- *   movie     /api/tmdb/movie/<id>
- *   series    /api/tmdb/tv/<id>  +  /api/tmdb/tv/<id>/season/<n>   (episode lists)
- *
- * Those answered in the capture with only the DDoS-Guard cookies - no proof of work - which is why
- * they can be called directly here.
- *
- * The servers themselves cannot be. Playback is protected by a wasm proof of work (/api/c endpoints, with
- * the solution in x-cs-* headers), Next.js server-action hashes that change on every deploy, and a
- * per-server encrypted token. Rather than reimplement that and break on their next release, the
- * embed page is opened in a WebView, which solves all of it itself, and the /api/playlist/ requests
- * it makes are collected - one per server it is driven to try. Each of those is offered as a link,
- * labelled with the server it came from where the page tells us, and by order otherwise.
+ * The TMDB key is the one FlixVision already carries in this repo.
  */
 class CineSrcProvider : MainAPI() {
     override var mainUrl = "https://cinesrc.st"
     override var name = "CineSrc"
     override var lang = "en"
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
-    private val tmdbImage = "https://image.tmdb.org/t/p/w500"
+    private val tmdbApi = "https://api.themoviedb.org/3"
+    private val tmdbKey = "2f3cb5763db1117fcba3948632f8aad9"
+    private val tmdbImg = "https://image.tmdb.org/t/p/w500"
 
-    /**
-     * CineSrc has no catalogue of its own - its front page is a box that takes a TMDB id - so this
-     * row exists to make the extension reachable rather than to pretend there is a library behind
-     * it: it runs the site's own search for a broad term and lists whatever comes back. The real
-     * way in is search.
-     */
     override val mainPage = mainPageOf(
-        "popular" to "Popular",
-        "movie" to "Movies",
-        "tv" to "Series"
+        "/trending/all/day" to "Trending Today",
+        "/trending/all/week" to "Trending This Week",
+        "/movie/popular" to "Popular Movies",
+        "/tv/popular" to "Popular Series",
+        "/movie/now_playing" to "In Theaters",
+        "/tv/on_the_air" to "Airing Now",
+        "/movie/top_rated" to "Top Rated Movies",
+        "/tv/top_rated" to "Top Rated Series",
+        "/discover/movie?with_original_language=hi&sort_by=popularity.desc" to "Hindi Movies",
+        "/discover/tv?with_original_language=hi&sort_by=popularity.desc" to "Hindi Series",
+        "/discover/movie?with_original_language=ta&sort_by=popularity.desc" to "Tamil Movies",
+        "/discover/movie?with_original_language=te&sort_by=popularity.desc" to "Telugu Movies",
+        "/discover/tv?with_networks=213" to "Netflix",
+        "/discover/tv?with_networks=1024" to "Amazon Prime",
+        "/discover/tv?with_networks=2739" to "Disney+"
     )
 
     private fun userAgent(): String = UA
 
-    private suspend fun json(path: String): JSONObject? = runCatching {
-        JSONObject(
-            app.get(
-                "$mainUrl$path",
-                headers = mapOf(
-                    "User-Agent" to userAgent(),
-                    "Accept" to "application/json",
-                    "Referer" to "$mainUrl/"
-                ),
-                timeout = 30L
-            ).text
-        )
-    }.getOrNull()
+    // ── TMDB ───────────────────────────────────────────────────────────────────
 
-    // ── Search ─────────────────────────────────────────────────────────────────
+    private suspend fun tmdb(path: String): JSONObject? {
+        val sep = if (path.contains('?')) "&" else "?"
+        val url = "$tmdbApi$path${sep}api_key=$tmdbKey&language=en-US"
+        return runCatching {
+            JSONObject(app.get(url, headers = mapOf("User-Agent" to userAgent()), timeout = 30L).text)
+        }.getOrNull()
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val sep = if (request.data.contains('?')) "&" else "?"
+        val json = tmdb("${request.data}${sep}page=$page") ?: return newHomePageResponse(
+            request.name, emptyList(), false
+        )
+
+        val items = resultsToCards(json.optJSONArray("results"))
+        val totalPages = json.optInt("total_pages", 1)
+        return newHomePageResponse(request.name, items, hasNext = page < totalPages)
+    }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         if (q.isBlank()) return emptyList()
 
-        val json = json("/api/tmdb/search?q=$q") ?: return emptyList()
-        return resultsToCards(json.optJSONArray("results"))
-    }
-
-    /**
-     * Home rows. The site has no catalogue of its own, so each row tries the tmdb list routes its
-     * proxy is most likely to expose and keeps the first that answers. If none do the row is empty
-     * rather than invented - search is the reliable way in.
-     */
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val candidates = when (request.data) {
-            "movie" -> listOf(
-                "/api/tmdb/movie/popular",
-                "/api/tmdb/discover/movie?sort_by=popularity.desc"
-            )
-            "tv" -> listOf(
-                "/api/tmdb/tv/popular",
-                "/api/tmdb/discover/tv?sort_by=popularity.desc"
-            )
-            else -> listOf(
-                "/api/tmdb/trending/all/week",
-                "/api/tmdb/trending/all/day",
-                "/api/tmdb/movie/popular"
-            )
+        val out = ArrayList<SearchResponse>()
+        for (page in 1..2) {
+            val json = tmdb("/search/multi?query=$q&page=$page") ?: continue
+            out.addAll(resultsToCards(json.optJSONArray("results")))
         }
-
-        for (path in candidates) {
-            val json = json("$path?page=$page") ?: json(path) ?: continue
-            val cards = resultsToCards(json.optJSONArray("results"))
-            if (cards.isNotEmpty()) return newHomePageResponse(request.name, cards, hasNext = true)
-        }
-        return newHomePageResponse(request.name, emptyList(), false)
+        return out.distinctBy { it.url }
     }
 
     private fun resultsToCards(arr: org.json.JSONArray?): List<SearchResponse> {
@@ -123,23 +104,22 @@ class CineSrcProvider : MainAPI() {
             if (mediaType == "person") continue
 
             val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { continue }
-            val poster = o.optString("poster_path").ifBlank { null }?.let { tmdbImage + it }
+            val poster = o.optString("poster_path").ifBlank { null }?.let { tmdbImg + it }
+            val year = (o.optString("release_date").ifBlank { o.optString("first_air_date") }).take(4)
             val url = "$mainUrl/detail/$mediaType/$id"
 
-            out.add(
-                if (mediaType == "tv") {
-                    newTvSeriesSearchResponse(title, url, TvType.TvSeries) { this.posterUrl = poster }
-                } else {
-                    newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = poster }
-                }
-            )
+            val card = if (mediaType == "tv") {
+                newTvSeriesSearchResponse(title, url, TvType.TvSeries) { this.posterUrl = poster }
+            } else {
+                newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = poster }
+            }
+            out.add(card)
         }
         return out.distinctBy { it.url }
     }
 
     // ── Detail ─────────────────────────────────────────────────────────────────
 
-    /** "/detail/<mediaType>/<id>" - the media type decides which tmdb proxy route to read */
     private fun parts(url: String): Pair<String, Int>? {
         val m = Regex("""/detail/(movie|tv)/(\d+)""").find(url) ?: return null
         return m.groupValues[1] to (m.groupValues[2].toIntOrNull() ?: return null)
@@ -147,47 +127,52 @@ class CineSrcProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val (mediaType, id) = parts(url) ?: return null
-
-        val json = json("/api/tmdb/$mediaType/$id") ?: return null
-        // the proxy may hand back tmdb's object directly or wrapped
-        val o = json.optJSONObject("data") ?: json
+        val o = tmdb("/$mediaType/$id") ?: return null
 
         val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { "TMDB $id" }
-        val posterPath = o.optString("poster_path").ifBlank { null }
-        val poster = posterPath?.let { tmdbImage + it }
+        val poster = o.optString("poster_path").ifBlank { null }?.let { tmdbImg + it }
         val plot = o.optString("overview").ifBlank { null }
         val year = (o.optString("release_date").ifBlank { o.optString("first_air_date") }).take(4)
 
         val tags = ArrayList<String>()
         year.ifBlank { null }?.let { tags.add(it) }
+        o.optString("tagline").ifBlank { null }?.let { tags.add(it) }
         o.optJSONArray("genres")?.let { g ->
             for (i in 0 until g.length()) {
                 g.optJSONObject(i)?.optString("name")?.ifBlank { null }?.let { tags.add(it) }
             }
         }
+        o.optDouble("vote_average", 0.0).takeIf { it > 0 }
+            ?.let { tags.add("%.1f/10".format(it)) }
 
         if (mediaType == "tv") {
             val episodes = ArrayList<Episode>()
-            val seasons = o.optInt("number_of_seasons", 1).coerceIn(1, 50)
+            val seasons = o.optJSONArray("seasons")
 
-            for (season in 1..seasons) {
-                val sJson = json("/api/tmdb/tv/$id/season/$season") ?: continue
-                val sObj = sJson.optJSONObject("data") ?: sJson
-                val eps = sObj.optJSONArray("episodes") ?: continue
+            if (seasons != null) {
+                for (i in 0 until seasons.length()) {
+                    val s = seasons.optJSONObject(i) ?: continue
+                    val seasonNumber = s.optInt("season_number", 0)
+                    if (seasonNumber <= 0) continue // specials
 
-                for (i in 0 until eps.length()) {
-                    val e = eps.optJSONObject(i) ?: continue
-                    val number = e.optInt("episode_number", i + 1)
-                    val epName = e.optString("name").ifBlank { "Episode $number" }
-                    episodes.add(
-                        newEpisode("$mediaType|$id|$season|$number") {
-                            this.name = epName
-                            this.season = season
-                            this.episode = number
-                            this.posterUrl = e.optString("still_path").ifBlank { null }
-                                ?.let { tmdbImage + it } ?: poster
-                        }
-                    )
+                    val sJson = tmdb("/tv/$id/season/$seasonNumber") ?: continue
+                    val eps = sJson.optJSONArray("episodes") ?: continue
+
+                    for (j in 0 until eps.length()) {
+                        val e = eps.optJSONObject(j) ?: continue
+                        val number = e.optInt("episode_number", j + 1)
+                        val epName = e.optString("name").ifBlank { "Episode $number" }
+                        val still = e.optString("still_path").ifBlank { null }
+
+                        episodes.add(
+                            newEpisode("$mediaType|$id|$seasonNumber|$number") {
+                                this.name = epName
+                                this.season = seasonNumber
+                                this.episode = number
+                                this.posterUrl = still?.let { tmdbImg + it } ?: poster
+                            }
+                        )
+                    }
                 }
             }
 
@@ -233,8 +218,6 @@ class CineSrcProvider : MainAPI() {
 
         var found = false
         playlists.forEachIndexed { index, link ->
-            // the playlist url is an m3u8 endpoint; the page's own player fetches it with the
-            // referer that earned its cookies, so that is passed on
             val type = if (link.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback.invoke(
                 newExtractorLink(

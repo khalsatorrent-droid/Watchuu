@@ -35,10 +35,22 @@ class CineSrcProvider : MainAPI() {
     override var mainUrl = "https://cinesrc.st"
     override var name = "CineSrc"
     override var lang = "en"
-    override val hasMainPage = false
+    override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val tmdbImage = "https://image.tmdb.org/t/p/w500"
+
+    /**
+     * CineSrc has no catalogue of its own - its front page is a box that takes a TMDB id - so this
+     * row exists to make the extension reachable rather than to pretend there is a library behind
+     * it: it runs the site's own search for a broad term and lists whatever comes back. The real
+     * way in is search.
+     */
+    override val mainPage = mainPageOf(
+        "popular" to "Popular",
+        "movie" to "Movies",
+        "tv" to "Series"
+    )
 
     private fun userAgent(): String = UA
 
@@ -63,7 +75,41 @@ class CineSrcProvider : MainAPI() {
         if (q.isBlank()) return emptyList()
 
         val json = json("/api/tmdb/search?q=$q") ?: return emptyList()
-        val arr = json.optJSONArray("results") ?: return emptyList()
+        return resultsToCards(json.optJSONArray("results"))
+    }
+
+    /**
+     * Home rows. The site has no catalogue of its own, so each row tries the tmdb list routes its
+     * proxy is most likely to expose and keeps the first that answers. If none do the row is empty
+     * rather than invented - search is the reliable way in.
+     */
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val candidates = when (request.data) {
+            "movie" -> listOf(
+                "/api/tmdb/movie/popular",
+                "/api/tmdb/discover/movie?sort_by=popularity.desc"
+            )
+            "tv" -> listOf(
+                "/api/tmdb/tv/popular",
+                "/api/tmdb/discover/tv?sort_by=popularity.desc"
+            )
+            else -> listOf(
+                "/api/tmdb/trending/all/week",
+                "/api/tmdb/trending/all/day",
+                "/api/tmdb/movie/popular"
+            )
+        }
+
+        for (path in candidates) {
+            val json = json("$path?page=$page") ?: json(path) ?: continue
+            val cards = resultsToCards(json.optJSONArray("results"))
+            if (cards.isNotEmpty()) return newHomePageResponse(request.name, cards, hasNext = true)
+        }
+        return newHomePageResponse(request.name, emptyList(), false)
+    }
+
+    private fun resultsToCards(arr: org.json.JSONArray?): List<SearchResponse> {
+        if (arr == null) return emptyList()
 
         val out = ArrayList<SearchResponse>()
         for (i in 0 until arr.length()) {
@@ -78,8 +124,8 @@ class CineSrcProvider : MainAPI() {
 
             val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { continue }
             val poster = o.optString("poster_path").ifBlank { null }?.let { tmdbImage + it }
-
             val url = "$mainUrl/detail/$mediaType/$id"
+
             out.add(
                 if (mediaType == "tv") {
                     newTvSeriesSearchResponse(title, url, TvType.TvSeries) { this.posterUrl = poster }

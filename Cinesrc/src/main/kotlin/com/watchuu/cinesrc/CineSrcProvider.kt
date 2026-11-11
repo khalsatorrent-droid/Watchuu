@@ -24,7 +24,7 @@ import org.json.JSONObject
  * Those answered in the capture with only the DDoS-Guard cookies - no proof of work - which is why
  * they can be called directly here.
  *
- * The servers themselves cannot be. Playback is protected by a wasm proof of work (/api/c/*, with
+ * The servers themselves cannot be. Playback is protected by a wasm proof of work (/api/c endpoints, with
  * the solution in x-cs-* headers), Next.js server-action hashes that change on every deploy, and a
  * per-server encrypted token. Rather than reimplement that and break on their next release, the
  * embed page is opened in a WebView, which solves all of it itself, and the /api/playlist/ requests

@@ -14,7 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * The embed page solves its own protections - DDoS-Guard cookies, the wasm proof of work at
- * /api/c/*, the Next.js server-action hashes - and then asks for a playlist. Those playlist
+ * /api/c endpoints, the Next.js server-action hashes - and then asks for a playlist. Those playlist
  * requests are what this watches for, so none of that has to be reimplemented or kept in step
  * with their next deploy.
  *

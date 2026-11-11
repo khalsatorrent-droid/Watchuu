@@ -367,6 +367,7 @@ class MmshuntProvider : MainAPI() {
             val href = a.attr("href").replace("&amp;", "&").trim()
             if (!href.startsWith("http")) return@forEach
             if (href.contains("mmshunt.net", true)) return@forEach
+            if (isNotMediaHost(href)) return@forEach
             if (hosts.containsKey(href)) return@forEach
             hosts[href] = hostLabel(href)
         }
@@ -408,6 +409,29 @@ class MmshuntProvider : MainAPI() {
             runCatching {
                 loadExtractor(link, data, subtitleCallback) { got.add(it) }
             }
+
+            // no extractor for this host: read the page itself for a file or an embed
+            if (got.isEmpty()) {
+                resolveGeneric(link, data).forEach { media ->
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name · $label",
+                            url = media,
+                            type = if (media.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = link
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf(
+                                "Referer" to link,
+                                "User-Agent" to userAgent(),
+                                "Accept" to "*/*"
+                            )
+                        }
+                    )
+                    found = true
+                }
+            }
             got.forEach { extracted ->
                 callback.invoke(
                     newExtractorLink(
@@ -425,6 +449,45 @@ class MmshuntProvider : MainAPI() {
             }
         }
         return found
+    }
+
+    /** image hosts and social links sit in the same post; they are never a video */
+    private val notMedia = listOf(
+        "imagetwist", "imgur", "postimg", "pixhost", "imgbb", "ibb.co", "imagebam",
+        "twitter.com", "x.com", "facebook", "instagram", "t.me", "telegram",
+        "reddit.com", "discord", "whatsapp", "wa.me", "pinterest", "tumblr"
+    )
+
+    private fun isNotMediaHost(url: String): Boolean {
+        val host = Regex("""^https?://([^/]+)""").find(url)?.groupValues?.get(1).orEmpty()
+        return notMedia.any { host.contains(it, true) }
+    }
+
+    /**
+     * Some of the hosts in these posts have no Cloudstream extractor. Rather than drop them, the
+     * page is fetched and searched for a file or an embed: a direct mp4/m3u8, or an iframe whose
+     * src can be handed to the extractors in turn. One level deep only, so this cannot run away.
+     */
+    private suspend fun resolveGeneric(url: String, referer: String): List<String> {
+        val html = fetch(url, referer) ?: return emptyList()
+        val out = LinkedHashSet<String>()
+
+        Regex("""https?://[^\s"'<>\\]+\.(?:mp4|m3u8)[^\s"'<>\\]*""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.value.replace("&amp;", "&") }.forEach { out.add(it) }
+
+        // an embed inside the page, tried through the extractors
+        Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.groupValues[1] }.forEach { src ->
+                val frame = if (src.startsWith("//")) "https:$src" else src
+                if (!frame.startsWith("http")) return@forEach
+                val got = mutableListOf<String>()
+                runCatching {
+                    loadExtractor(frame, url, { _ -> }) { link -> got.add(link.url) }
+                }
+                out.addAll(got)
+            }
+
+        return out.toList()
     }
 
     private fun hostLabel(url: String): String =

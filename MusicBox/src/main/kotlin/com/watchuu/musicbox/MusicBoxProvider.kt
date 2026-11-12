@@ -106,12 +106,23 @@ class MusicBoxProvider : MainAPI() {
         // it is never the only attempt. Apple's feed is reachable almost everywhere, and is the
         // fallback for every row.
         val items = when (catalogue) {
+            "spotify" -> spotifyTop(kind).ifEmpty { appleTop(kind) }
             "apple" -> appleTop(kind).ifEmpty { deezerChart(kind) }
             "soundcloud" -> soundcloudTop(kind).ifEmpty { appleTop(kind) }
             "qobuz", "tidal" -> deezerChart(kind).ifEmpty { appleTop(kind) }
-            else -> deezerChart(kind).ifEmpty { appleTop(kind) }
+            else -> spotifyTop(kind).ifEmpty { appleTop(kind) }.ifEmpty { deezerChart(kind) }
         }
         return newHomePageResponse(request.name, items, hasNext = false)
+    }
+
+    /** spotify publishes no chart to an anonymous client, so the rows are a broad search */
+    private suspend fun spotifyTop(kind: String): List<SearchResponse> {
+        val term = when (kind) {
+            "albums" -> "top albums"
+            "artists" -> "top artists"
+            else -> "top hits"
+        }
+        return runCatching { spotifySearch(term) }.getOrNull().orEmpty()
     }
 
     private suspend fun deezerChart(kind: String): List<SearchResponse> {
@@ -441,6 +452,28 @@ class MusicBoxProvider : MainAPI() {
      * through YouTube, like every other entry.
      */
 
+    private suspend fun spotifySearch(query: String): List<SearchResponse> {
+        val nodes = SpotifyClient.search(query)
+        val out = ArrayList<SearchResponse>()
+        for (node in nodes) {
+            val id = SpotifyClient.trackIdOf(node) ?: continue
+            val title = SpotifyClient.titleOf(node).ifBlank { continue }
+            val artist = SpotifyClient.artistsOf(node)
+            val poster = SpotifyClient.coverOf(node)
+            val display = if (artist.isNotBlank()) "$artist - $title" else title
+
+            // title and artist ride along, so a play never has to ask spotify again
+            val data = "sp|$id|${title.replace('|', ' ')}|${artist.replace('|', ' ')}"
+            out.add(
+                newMovieSearchResponse(display, "https://open.spotify.com/track/$id", TvType.Music) {
+                    this.posterUrl = poster
+                    this.posterHeaders = mapOf("User-Agent" to ua())
+                }
+            )
+        }
+        return out.distinctBy { it.url }
+    }
+
     // ── Search: all sources merged ─────────────────────────────────────────────
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -450,6 +483,7 @@ class MusicBoxProvider : MainAPI() {
         val out = ArrayList<SearchResponse>()
         val wants = { name: String -> catalogue == MusicBoxPrefs.ALL || catalogue == name }
 
+        if (wants("spotify")) runCatching { spotifySearch(query) }.getOrNull()?.let { out.addAll(it) }
         if (wants("deezer")) {
             runCatching { deezer("search/track?q=${URLEncoder.encode(query, "UTF-8")}&limit=20") }
                 .getOrNull()?.optJSONArray("data")?.let { out.addAll(deezerCards(it)) }
@@ -661,11 +695,13 @@ class MusicBoxProvider : MainAPI() {
         val kind = parts.getOrNull(1).orEmpty()
         val id = parts.getOrNull(2).orEmpty().ifBlank { kind }
         val carried = parts.getOrNull(3).orEmpty()
+        val carriedTitle = parts.getOrNull(4).orEmpty()
+        val carriedArtist = parts.getOrNull(5).orEmpty()
         if (id.isBlank()) return false
 
         var found = false
-        var title = ""
-        var artist = ""
+        var title = carriedTitle
+        var artist = carriedArtist
 
         // 1. anything already known when the entry was built. This is emitted first and needs no
         //    network call, so a track always has at least one playable link.

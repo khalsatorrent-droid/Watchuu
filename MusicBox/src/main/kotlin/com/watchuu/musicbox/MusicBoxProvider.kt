@@ -56,9 +56,9 @@ class MusicBoxProvider : MainAPI() {
     private val ytClientVersion = "1.20260101.01.00"
 
     override val mainPage = mainPageOf(
-        "chart/tracks" to "Top Tracks",
-        "chart/albums" to "Top Albums",
-        "chart/artists" to "Top Artists"
+        "tracks" to "Top Tracks",
+        "albums" to "Top Albums",
+        "artists" to "Top Artists"
     )
 
     private fun ua(): String = UA
@@ -82,17 +82,89 @@ class MusicBoxProvider : MainAPI() {
 
     private suspend fun deezer(path: String) = getJson("$dz/$path")
 
+    /**
+     * Home rows follow the catalogue choice. Each source has its own idea of "top", so each is
+     * asked in its own way rather than all being funnelled through Deezer:
+     *
+     *   deezer      /chart -> {tracks:{data:[…]}, albums:{data:[…]}, artists:{data:[…]}}
+     *   apple       rss.applemarketingtools.com most-played feed (no token needed)
+     *   soundcloud  api-v2 charts?kind=top
+     *   spotify     /search for a popular term, since its public api has no charts endpoint
+     *   qobuz/tidal have no public chart route; those rows stay empty rather than invented
+     */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
 
-        val json = deezer(request.data) ?: return newHomePageResponse(request.name, emptyList(), false)
-        val data = json.optJSONObject("data") ?: json
+        val catalogue = appContext?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
+        val kind = request.data // tracks | albums | artists
+
+        val items = when (catalogue) {
+            "apple" -> appleTop(kind)
+            "soundcloud" -> soundcloudTop(kind)
+            "spotify" -> spotifySearch("top hits")
+            "qobuz", "tidal" -> emptyList()
+            else -> deezerChart(kind)
+        }
+        return newHomePageResponse(request.name, items, hasNext = false)
+    }
+
+    private suspend fun deezerChart(kind: String): List<SearchResponse> {
+        val json = deezer("chart") ?: return emptyList()
+        val arr = json.optJSONObject(kind)?.optJSONArray("data") ?: return emptyList()
+        return deezerCards(arr)
+    }
+
+    private suspend fun appleTop(kind: String): List<SearchResponse> {
+        val feed = when (kind) {
+            "albums" -> "most-played/25/albums.json"
+            "artists" -> "most-played/25/music.json"
+            else -> "most-played/25/songs.json"
+        }
+        val json = getJson("https://rss.applemarketingtools.com/api/v2/us/music/$feed")
+            ?: return emptyList()
+        val results = json.optJSONObject("feed")?.optJSONArray("results") ?: return emptyList()
 
         val out = ArrayList<SearchResponse>()
-        listOf("tracks", "albums", "artists").forEach { key ->
-            data.optJSONArray(key)?.let { out.addAll(deezerCards(it)) }
+        for (i in 0 until results.length()) {
+            val o = results.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val name = o.optString("name").ifBlank { continue }
+            val artist = o.optString("artistName").orEmpty()
+            val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
+            val display = if (artist.isNotBlank()) "$artist - $name" else name
+            out.add(
+                newMovieSearchResponse(display, "https://music.apple.com/song/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
         }
-        return newHomePageResponse(request.name, out, hasNext = false)
+        return out
+    }
+
+    private suspend fun soundcloudTop(kind: String): List<SearchResponse> {
+        if (kind != "tracks") return emptyList()
+        val cid = soundcloudClientId() ?: return emptyList()
+        val json = getJson(
+            "$scApi/charts?kind=top&genre=soundcloud:genres:all-music&client_id=$cid&limit=20"
+        ) ?: return emptyList()
+        val collection = json.optJSONArray("collection") ?: return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until collection.length()) {
+            val t = collection.optJSONObject(i)?.optJSONObject("track") ?: continue
+            val id = t.optString("id").ifBlank { continue }
+            val title = t.optString("title").ifBlank { continue }
+            val artist = t.optJSONObject("user")?.optString("username").orEmpty()
+            val poster = t.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
+            out.add(
+                newMovieSearchResponse(
+                    if (artist.isNotBlank()) "$artist - $title" else title,
+                    "https://soundcloud.com/track/$id",
+                    TvType.Music
+                ) { this.posterUrl = poster }
+            )
+        }
+        return out
     }
 
     private fun deezerCards(arr: org.json.JSONArray): List<SearchResponse> {
@@ -346,6 +418,72 @@ class MusicBoxProvider : MainAPI() {
         return first.optString("previewUrl").ifBlank { null }
     }
 
+    // spotify: the web player hands out an anonymous token, which is enough for search
+    @Volatile
+    private var spotifyToken: String? = null
+    @Volatile
+    private var spotifyTokenAt: Long = 0L
+
+    private suspend fun spotifyAccessToken(): String? {
+        val now = System.currentTimeMillis()
+        spotifyToken?.let { if (now - spotifyTokenAt < 30 * 60_000L) return it }
+
+        val json = getJson("https://open.spotify.com/api/token?reason=init&productType=web-player")
+            ?: return null
+        val token = json.optString("accessToken").ifBlank { json.optString("access_token") }
+            .ifBlank { return null }
+        spotifyToken = token
+        spotifyTokenAt = now
+        return token
+    }
+
+    private suspend fun spotifySearch(query: String): List<SearchResponse> {
+        val token = spotifyAccessToken() ?: return emptyList()
+        val q = URLEncoder.encode(query, "UTF-8")
+        val json = getJson(
+            "https://api.spotify.com/v1/search?q=$q&type=track&limit=20",
+            mapOf("Authorization" to "Bearer $token")
+        ) ?: return emptyList()
+
+        val items = json.optJSONObject("tracks")?.optJSONArray("items") ?: return emptyList()
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val title = o.optString("name").ifBlank { continue }
+            val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
+            val poster = o.optJSONObject("album")?.optJSONArray("images")
+                ?.optJSONObject(0)?.optString("url")?.ifBlank { null }
+            val display = if (artist.isNotBlank()) "$artist - $title" else title
+
+            out.add(
+                newMovieSearchResponse(display, "https://open.spotify.com/track/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+        return out
+    }
+
+    private suspend fun spotifyLoad(url: String): LoadResponse? {
+        val id = Regex("""/track/([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1) ?: return null
+        val token = spotifyAccessToken() ?: return null
+        val o = getJson(
+            "https://api.spotify.com/v1/tracks/$id",
+            mapOf("Authorization" to "Bearer $token")
+        ) ?: return null
+
+        val title = o.optString("name").ifBlank { "Spotify $id" }
+        val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
+        val poster = o.optJSONObject("album")?.optJSONArray("images")
+            ?.optJSONObject(0)?.optString("url")?.ifBlank { null }
+
+        return newMovieLoadResponse(title, url, TvType.Music, "sp|$id") {
+            this.posterUrl = poster
+            this.plot = artist.ifBlank { null }
+        }
+    }
+
     // ── Search: all sources merged ─────────────────────────────────────────────
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -363,6 +501,7 @@ class MusicBoxProvider : MainAPI() {
         if (wants("tidal")) runCatching { tidalSearch(query) }.getOrNull()?.let { out.addAll(it) }
         if (wants("soundcloud")) runCatching { soundcloudSearch(query) }.getOrNull()?.let { out.addAll(it) }
         if (wants("apple")) runCatching { appleSearch(query) }.getOrNull()?.let { out.addAll(it) }
+        if (wants("spotify")) runCatching { spotifySearch(query) }.getOrNull()?.let { out.addAll(it) }
 
         return out.distinctBy { it.url }
     }
@@ -376,6 +515,7 @@ class MusicBoxProvider : MainAPI() {
             url.contains("tidal.com") -> tidalLoad(url)
             url.contains("soundcloud.com") -> soundcloudLoad(url)
             url.contains("music.apple.com") -> appleLoad(url)
+            url.contains("open.spotify.com") -> spotifyLoad(url)
             else -> null
         }
     }
@@ -553,6 +693,17 @@ class MusicBoxProvider : MainAPI() {
                     if (full != null) {
                         emit(callback, "SoundCloud", full, "https://soundcloud.com/")
                         found = true
+                    }
+                }
+                "spotify" -> if (source == "sp" && title.isBlank()) {
+                    val token = spotifyAccessToken()
+                    if (token != null) {
+                        val o = getJson(
+                            "https://api.spotify.com/v1/tracks/$id",
+                            mapOf("Authorization" to "Bearer $token")
+                        )
+                        title = o?.optString("name").orEmpty()
+                        artist = o?.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
                     }
                 }
                 "apple" -> if (source == "am") {

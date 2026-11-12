@@ -1,5 +1,10 @@
+dependencies {
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
+}
+
 // use an integer for version numbers
-version = 4
+version = 5
 
 cloudstream {
     language = "en"

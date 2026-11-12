@@ -10,6 +10,7 @@ class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         // register first, so the provider is live even if anything below fails
         MusicBoxProvider.appContext = context.applicationContext
+        runCatching { MusicBoxBrowser.init(context) }
         registerMainAPI(MusicBoxProvider())
 
         runCatching {

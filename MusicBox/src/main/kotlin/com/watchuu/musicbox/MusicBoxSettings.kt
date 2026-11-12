@@ -111,6 +111,20 @@ class MusicBoxSettings : DialogFragment() {
                 .show()
         }
 
+        val openChallenge: () -> Unit = {
+            val labels = MusicBoxBrowser.hosts.map { it.second }.toTypedArray()
+            AlertDialog.Builder(ctx)
+                .setTitle("Solve a challenge for")
+                .setItems(labels) { d, which ->
+                    d.dismiss()
+                    runCatching {
+                        MusicBoxBrowser.solve(requireActivity(), MusicBoxBrowser.hosts[which].second)
+                    }
+                }
+                .setNegativeButton("Back") { _, _ -> openRoot() }
+                .show()
+        }
+
         openRoot = {
             val catalogueLabel = MusicBoxPrefs.catalogues
                 .firstOrNull { it.first == MusicBoxPrefs.catalogue(ctx) }?.second ?: "All sources"
@@ -119,11 +133,20 @@ class MusicBoxSettings : DialogFragment() {
                 .joinToString(", ")
                 .ifBlank { "none" }
 
-            val items = arrayOf("Catalogue: $catalogueLabel", "Sources: $sourcesLabel")
+            val solved = MusicBoxBrowser.hosts.count { MusicBoxBrowser.hasClearance(it.second) }
+            val items = arrayOf(
+                "Catalogue: $catalogueLabel",
+                "Sources: $sourcesLabel",
+                "Solve Cloudflare challenge" + if (solved > 0) " ($solved cleared)" else ""
+            )
             AlertDialog.Builder(ctx)
                 .setTitle("MusicBox")
                 .setItems(items) { _, which ->
-                    if (which == 0) openCatalogue() else openSources()
+                    when (which) {
+                        0 -> openCatalogue()
+                        1 -> openSources()
+                        else -> openChallenge()
+                    }
                 }
                 .setNegativeButton("Close", null)
                 .show()

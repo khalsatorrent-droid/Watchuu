@@ -60,17 +60,19 @@ class MusicBoxProvider : MainAPI() {
 
     private fun ua(): String = UA
 
-    private fun headers(extra: Map<String, String> = emptyMap()): Map<String, String> {
+    private fun headers(url: String, extra: Map<String, String> = emptyMap()): Map<String, String> {
         val h = LinkedHashMap<String, String>()
         h["User-Agent"] = ua()
         h["Accept"] = "application/json"
+        // whatever clearance the challenge window earned for this host, if any
+        MusicBoxBrowser.cookiesFor(url)?.let { h["Cookie"] = it }
         h.putAll(extra)
         return h
     }
 
     private suspend fun getJson(url: String, extra: Map<String, String> = emptyMap()): JSONObject? =
         runCatching {
-            JSONObject(app.get(url, headers = headers(extra), timeout = 30L).text)
+            JSONObject(app.get(url, headers = headers(url, extra), timeout = 30L).text)
         }.getOrNull()
 
     // ── Deezer ─────────────────────────────────────────────────────────────────

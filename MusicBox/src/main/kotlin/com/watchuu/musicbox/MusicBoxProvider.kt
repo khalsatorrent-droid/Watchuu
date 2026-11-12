@@ -225,6 +225,122 @@ class MusicBoxProvider : MainAPI() {
             ?: Regex(""""(https?://[^"]+\.(?:mp3|m4a|flac)[^"]*)"""").find(decoded)?.groupValues?.get(1)
     }
 
+    // soundcloud: the client_id is pulled from its own js bundles, the same way the sflx
+    // extension does it, and cached for the session
+    private val scApi = "https://api-v2.soundcloud.com"
+    @Volatile
+    private var scClientId: String? = null
+
+    private suspend fun soundcloudClientId(): String? {
+        scClientId?.let { return it }
+        val html = runCatching {
+            app.get(
+                "https://soundcloud.com/",
+                headers = mapOf("User-Agent" to ua(), "Accept" to "text/html"),
+                timeout = 30L
+            ).text
+        }.getOrNull() ?: return null
+
+        // the id is often in the page itself, otherwise in one of the asset bundles
+        Regex("""client_id\s*[:=]\s*["']([A-Za-z0-9]{32})["']""").find(html)
+            ?.groupValues?.get(1)?.let { scClientId = it; return it }
+
+        val bundles = Regex("""src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"""")
+            .findAll(html).map { it.groupValues[1] }.take(6).toList()
+
+        for (bundle in bundles) {
+            val js = runCatching {
+                app.get(bundle, headers = mapOf("User-Agent" to ua()), timeout = 30L).text
+            }.getOrNull() ?: continue
+            Regex("""client_id\s*[:=]\s*["']([A-Za-z0-9]{32})["']""").find(js)
+                ?.groupValues?.get(1)?.let { scClientId = it; return it }
+        }
+        return null
+    }
+
+    private suspend fun soundcloudSearch(query: String): List<SearchResponse> {
+        val cid = soundcloudClientId() ?: return emptyList()
+        val q = URLEncoder.encode(query, "UTF-8")
+        val json = getJson("$scApi/search/tracks?q=$q&client_id=$cid&limit=20") ?: return emptyList()
+        val items = json.optJSONArray("collection") ?: return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val title = o.optString("title").ifBlank { continue }
+            val artist = o.optJSONObject("user")?.optString("username").orEmpty()
+            val poster = o.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
+            val display = if (artist.isNotBlank()) "$artist - $title" else title
+
+            out.add(
+                newMovieSearchResponse(display, "https://soundcloud.com/track/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+        return out
+    }
+
+    /** the full stream: a transcoding url, exchanged for the file it points at */
+    private suspend fun soundcloudStream(id: String): String? {
+        val cid = soundcloudClientId() ?: return null
+        val track = getJson("$scApi/tracks/$id?client_id=$cid") ?: return null
+        val transcodings = track.optJSONObject("media")?.optJSONArray("transcodings") ?: return null
+
+        for (i in 0 until transcodings.length()) {
+            val t = transcodings.optJSONObject(i) ?: continue
+            if (t.optBoolean("snipped", false)) continue
+            val protocol = t.optJSONObject("format")?.optString("protocol").orEmpty()
+            if (protocol != "progressive" && protocol != "hls") continue
+            val url = t.optString("url").ifBlank { continue }
+
+            val res = runCatching {
+                JSONObject(
+                    app.get(
+                        "$url?client_id=$cid",
+                        headers = mapOf("User-Agent" to ua(), "Accept" to "application/json"),
+                        timeout = 30L
+                    ).text
+                )
+            }.getOrNull() ?: continue
+
+            res.optString("url").ifBlank { null }?.let { return it }
+        }
+        return null
+    }
+
+    // apple music: the itunes catalogue needs no token at all and carries a preview per track
+    private suspend fun appleSearch(query: String): List<SearchResponse> {
+        val q = URLEncoder.encode(query, "UTF-8")
+        val json = getJson("https://itunes.apple.com/search?term=$q&media=music&entity=song&limit=20")
+            ?: return emptyList()
+        val items = json.optJSONArray("results") ?: return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val id = o.optString("trackId").ifBlank { continue }
+            val title = o.optString("trackName").ifBlank { continue }
+            val artist = o.optString("artistName").orEmpty()
+            val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
+            val display = if (artist.isNotBlank()) "$artist - $title" else title
+
+            out.add(
+                newMovieSearchResponse(display, "https://music.apple.com/song/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+        return out
+    }
+
+    private suspend fun applePreview(id: String): String? {
+        val json = getJson("https://itunes.apple.com/lookup?id=$id&entity=song") ?: return null
+        val first = json.optJSONArray("results")?.optJSONObject(0) ?: return null
+        return first.optString("previewUrl").ifBlank { null }
+    }
+
     // ── Search: all sources merged ─────────────────────────────────────────────
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -235,6 +351,8 @@ class MusicBoxProvider : MainAPI() {
             .getOrNull()?.optJSONArray("data")?.let { out.addAll(deezerCards(it)) }
         runCatching { qobuzSearch(query) }.getOrNull()?.let { out.addAll(it) }
         runCatching { tidalSearch(query) }.getOrNull()?.let { out.addAll(it) }
+        runCatching { soundcloudSearch(query) }.getOrNull()?.let { out.addAll(it) }
+        runCatching { appleSearch(query) }.getOrNull()?.let { out.addAll(it) }
 
         return out.distinctBy { it.url }
     }
@@ -246,6 +364,8 @@ class MusicBoxProvider : MainAPI() {
             url.contains("deezer.com") -> deezerLoad(url)
             url.contains("qobuz.com") -> qobuzLoad(url)
             url.contains("tidal.com") -> tidalLoad(url)
+            url.contains("soundcloud.com") -> soundcloudLoad(url)
+            url.contains("music.apple.com") -> appleLoad(url)
             else -> null
         }
     }
@@ -334,6 +454,36 @@ class MusicBoxProvider : MainAPI() {
         }
     }
 
+    private suspend fun soundcloudLoad(url: String): LoadResponse? {
+        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        val cid = soundcloudClientId() ?: return null
+        val o = getJson("$scApi/tracks/$id?client_id=$cid") ?: return null
+
+        val title = o.optString("title").ifBlank { "SoundCloud $id" }
+        val artist = o.optJSONObject("user")?.optString("username").orEmpty()
+        val poster = o.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
+
+        return newMovieLoadResponse(title, url, TvType.Music, "sc|$id") {
+            this.posterUrl = poster
+            this.plot = artist.ifBlank { null }
+        }
+    }
+
+    private suspend fun appleLoad(url: String): LoadResponse? {
+        val id = Regex("""/song/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        val json = getJson("https://itunes.apple.com/lookup?id=$id&entity=song") ?: return null
+        val o = json.optJSONArray("results")?.optJSONObject(0) ?: return null
+
+        val title = o.optString("trackName").ifBlank { "Apple $id" }
+        val artist = o.optString("artistName").orEmpty()
+        val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
+
+        return newMovieLoadResponse(title, url, TvType.Music, "am|$id") {
+            this.posterUrl = poster
+            this.plot = artist.ifBlank { null }
+        }
+    }
+
     // ── Streams: every source that can answer ──────────────────────────────────
 
     override suspend fun loadLinks(
@@ -375,6 +525,21 @@ class MusicBoxProvider : MainAPI() {
                 preview = runCatching { tidalStream(id) }.getOrNull()
                 if (preview != null) {
                     emit(callback, "Tidal stream", preview, "https://listen.tidal.com/")
+                    found = true
+                }
+            }
+            "sc" -> {
+                // soundcloud serves the whole track, so this is a full-length source
+                val full = runCatching { soundcloudStream(id) }.getOrNull()
+                if (full != null) {
+                    emit(callback, "SoundCloud", full, "https://soundcloud.com/")
+                    found = true
+                }
+            }
+            "am" -> {
+                preview = runCatching { applePreview(id) }.getOrNull()
+                if (preview != null) {
+                    emit(callback, "Apple Music preview (30s)", preview, "https://music.apple.com/")
                     found = true
                 }
             }

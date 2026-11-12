@@ -35,7 +35,7 @@ class MusicBoxProvider : MainAPI() {
 
     private fun loadSession() {
         try {
-            val stored = com.lagradost.cloudstream3.AcraApplication.context
+            val stored = com.lagradost.cloudstream3.CloudStreamApp.context
                 ?.getSharedPreferences("musicbox_prefs", 0)
                 ?.getString(PREF_KEY_SESSION, null)
             zarzSession.loadState(stored)
@@ -47,7 +47,7 @@ class MusicBoxProvider : MainAPI() {
 
     private fun saveSession() {
         try {
-            com.lagradost.cloudstream3.AcraApplication.context
+            com.lagradost.cloudstream3.CloudStreamApp.context
                 ?.getSharedPreferences("musicbox_prefs", 0)
                 ?.edit()
                 ?.putString(PREF_KEY_SESSION, zarzSession.saveState())
@@ -58,7 +58,7 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private fun getCatalogue(): String {
-        return com.lagradost.cloudstream3.AcraApplication.context
+        return com.lagradost.cloudstream3.CloudStreamApp.context
             ?.getSharedPreferences("musicbox_prefs", 0)
             ?.getString(PREF_KEY_CATALOGUE, "spotify") ?: "spotify"
     }

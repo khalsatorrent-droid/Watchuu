@@ -102,11 +102,14 @@ class MusicBoxProvider : MainAPI() {
         // Only three of these services publish a chart, and Apple publishes none for artists.
         // Rather than show an empty row - which reads as a broken extension - anything without a
         // chart of its own falls back to Deezer's, so the rows always have something in them.
+        // Deezer's api is not reachable everywhere - it is blocked in some countries outright - so
+        // it is never the only attempt. Apple's feed is reachable almost everywhere, and is the
+        // fallback for every row.
         val items = when (catalogue) {
             "apple" -> appleTop(kind).ifEmpty { deezerChart(kind) }
-            "soundcloud" -> soundcloudTop(kind).ifEmpty { deezerChart(kind) }
-            "deezer" -> deezerChart(kind)
-            else -> deezerChart(kind)
+            "soundcloud" -> soundcloudTop(kind).ifEmpty { appleTop(kind) }
+            "qobuz", "tidal" -> deezerChart(kind).ifEmpty { appleTop(kind) }
+            else -> deezerChart(kind).ifEmpty { appleTop(kind) }
         }
         return newHomePageResponse(request.name, items, hasNext = false)
     }
@@ -193,6 +196,8 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
             val url = "$dz/$kind/$id"
+            // the preview rides along with the id: a play must not depend on a second api call
+            val preview = o.optString("preview").ifBlank { "" }
             out.add(
                 if (kind == "track") {
                     newMovieSearchResponse(display, url, TvType.Music) { this.posterUrl = poster }
@@ -480,7 +485,8 @@ class MusicBoxProvider : MainAPI() {
             val title = o.optString("title").ifBlank { "Track $id" }
             val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
             val poster = o.optJSONObject("album")?.optString("cover_xl")?.ifBlank { null }
-            return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id") {
+            val preview = o.optString("preview").ifBlank { "" }
+            return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id|$preview") {
                 this.posterUrl = poster
                 this.plot = artist.ifBlank { null }
             }
@@ -502,8 +508,9 @@ class MusicBoxProvider : MainAPI() {
                 val t = tracks.optJSONObject(i) ?: continue
                 val tid = t.optString("id").ifBlank { continue }
                 val tname = t.optString("title").ifBlank { "Track ${i + 1}" }
+                val tpreview = t.optString("preview").ifBlank { "" }
                 episodes.add(
-                    newEpisode("dz|track|$tid") {
+                    newEpisode("dz|track|$tid|$tpreview") {
                         this.name = tname
                         this.season = 1
                         this.episode = i + 1
@@ -653,26 +660,28 @@ class MusicBoxProvider : MainAPI() {
         val source = parts.getOrNull(0).orEmpty()
         val kind = parts.getOrNull(1).orEmpty()
         val id = parts.getOrNull(2).orEmpty().ifBlank { kind }
+        val carried = parts.getOrNull(3).orEmpty()
         if (id.isBlank()) return false
 
         var found = false
         var title = ""
         var artist = ""
-        var preview: String? = null
+
+        // 1. anything already known when the entry was built. This is emitted first and needs no
+        //    network call, so a track always has at least one playable link.
+        if (carried.startsWith("http")) {
+            emit(callback, "preview (30s)", carried, "$mainUrl/")
+            found = true
+        }
 
         val enabled = appContext?.let { MusicBoxPrefs.enabledSources(it) }
             ?: MusicBoxPrefs.sources.map { it.first }
 
-        // the track's own service is asked first when it is enabled, then everything else in the
-        // stored order - so a search result from Deezer still gets YouTube's full audio afterwards
-        val order = ArrayList<String>()
-        if (enabled.contains(source)) order.add(source)
-        enabled.filter { it != source }.forEach { order.add(it) }
-
-        for (src in order) {
-            when (src) {
-                "deezer" -> if (source == "dz") {
-                    // the real file first, when a ticket is set
+        // 2. the entry's own service: the real file through the resolver if a ticket is set,
+        //    otherwise whatever that service offers
+        if (enabled.contains(sourceName(source))) {
+            when (source) {
+                "dz" -> {
                     val real = runCatching {
                         zarzDownload("dz", id, "https://www.deezer.com/track/$id")
                     }.getOrNull()
@@ -680,16 +689,18 @@ class MusicBoxProvider : MainAPI() {
                         emit(callback, "Deezer FLAC", real, "https://www.deezer.com/")
                         found = true
                     }
-                    val t = deezer("track/$id")
-                    title = t?.optString("title").orEmpty()
-                    artist = t?.optJSONObject("artist")?.optString("name").orEmpty()
-                    preview = t?.optString("preview")?.ifBlank { null }
-                    if (preview != null) {
-                        emit(callback, "Deezer preview (30s)", preview, "https://www.deezer.com/")
-                        found = true
+                    deezer("track/$id")?.let {
+                        title = it.optString("title")
+                        artist = it.optJSONObject("artist")?.optString("name").orEmpty()
+                        it.optString("preview").ifBlank { null }?.let { p ->
+                            if (p != carried) {
+                                emit(callback, "Deezer preview (30s)", p, "https://www.deezer.com/")
+                                found = true
+                            }
+                        }
                     }
                 }
-                "qobuz" -> if (source == "qb") {
+                "qb" -> {
                     val real = runCatching {
                         zarzDownload("qb", id, "https://play.qobuz.com/track/$id")
                     }.getOrNull()
@@ -697,13 +708,12 @@ class MusicBoxProvider : MainAPI() {
                         emit(callback, "Qobuz FLAC", real, "https://play.qobuz.com/")
                         found = true
                     }
-                    preview = runCatching { qobuzStream(id) }.getOrNull()
-                    if (preview != null) {
-                        emit(callback, "Qobuz stream", preview, "https://play.qobuz.com/")
+                    runCatching { qobuzStream(id) }.getOrNull()?.let {
+                        emit(callback, "Qobuz stream", it, "https://play.qobuz.com/")
                         found = true
                     }
                 }
-                "tidal" -> if (source == "td") {
+                "td" -> {
                     val real = runCatching {
                         zarzDownload("td", id, "https://tidal.com/browse/track/$id")
                     }.getOrNull()
@@ -711,69 +721,89 @@ class MusicBoxProvider : MainAPI() {
                         emit(callback, "Tidal FLAC", real, "https://listen.tidal.com/")
                         found = true
                     }
-                    preview = runCatching { tidalStream(id) }.getOrNull()
-                    if (preview != null) {
-                        emit(callback, "Tidal stream", preview, "https://listen.tidal.com/")
+                    runCatching { tidalStream(id) }.getOrNull()?.let {
+                        emit(callback, "Tidal stream", it, "https://listen.tidal.com/")
                         found = true
                     }
                 }
-                "soundcloud" -> if (source == "sc") {
-                    val full = runCatching { soundcloudStream(id) }.getOrNull()
-                    if (full != null) {
-                        emit(callback, "SoundCloud", full, "https://soundcloud.com/")
+                "sc" -> {
+                    runCatching { soundcloudStream(id) }.getOrNull()?.let {
+                        emit(callback, "SoundCloud", it, "https://soundcloud.com/")
                         found = true
                     }
                 }
-                "apple" -> if (source == "am") {
-                    preview = runCatching { applePreview(id) }.getOrNull()
-                    if (preview != null) {
-                        emit(callback, "Apple Music preview (30s)", preview, "https://music.apple.com/")
+                "am" -> {
+                    runCatching { applePreview(id) }.getOrNull()?.let {
+                        emit(callback, "Apple Music preview (30s)", it, "https://music.apple.com/")
                         found = true
                     }
                 }
             }
         }
 
-        // if the entry did not come from one of those, the title still needs filling for YouTube
-        if (title.isBlank() && source == "dz") {
-            deezer("track/$id")?.let {
-                title = it.optString("title")
-                artist = it.optJSONObject("artist")?.optString("name").orEmpty()
-            }
-        }
-
-        // full audio: YouTube Music, resolved by Cloudstream's own extractor
-        val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
-            .ifBlank { title }
-        val youtubeEnabled = enabled.contains("youtube")
-        val videoId = if (youtubeEnabled && query.isNotBlank()) {
-            runCatching { youtubeSearch(query) }.getOrNull()
-        } else null
-        if (videoId != null) {
-            val got = mutableListOf<ExtractorLink>()
-            runCatching {
-                loadExtractor("https://www.youtube.com/watch?v=$videoId", "https://music.youtube.com/", subtitleCallback) {
-                    got.add(it)
+        // 3. full audio from YouTube, when it is enabled and we know what the track is called
+        if (enabled.contains("youtube")) {
+            if (title.isBlank()) {
+                when (source) {
+                    "dz" -> deezer("track/$id")?.let {
+                        title = it.optString("title")
+                        artist = it.optJSONObject("artist")?.optString("name").orEmpty()
+                    }
+                    "am" -> getJson("https://itunes.apple.com/lookup?id=$id&entity=song")
+                        ?.optJSONArray("results")?.optJSONObject(0)?.let {
+                            title = it.optString("trackName")
+                            artist = it.optString("artistName")
+                        }
+                    "sc" -> soundcloudClientId()?.let { cid ->
+                        getJson("$scApi/tracks/$id?client_id=$cid")?.let {
+                            title = it.optString("title")
+                            artist = it.optJSONObject("user")?.optString("username").orEmpty()
+                        }
+                    }
                 }
             }
-            got.forEach { link ->
-                callback.invoke(
-                    newExtractorLink(
-                        source = link.source ?: name,
-                        name = "${link.name.ifBlank { name }} · YouTube",
-                        url = link.url,
-                        type = link.type
-                    ) {
-                        this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
-                        this.quality = link.quality
-                        this.headers = link.headers
+
+            val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
+            if (query.isNotBlank()) {
+                runCatching { youtubeSearch(query) }.getOrNull()?.let { videoId ->
+                    val got = mutableListOf<ExtractorLink>()
+                    runCatching {
+                        loadExtractor(
+                            "https://www.youtube.com/watch?v=$videoId",
+                            "https://music.youtube.com/",
+                            subtitleCallback
+                        ) { got.add(it) }
                     }
-                )
-                found = true
+                    got.forEach { link ->
+                        callback.invoke(
+                            newExtractorLink(
+                                source = link.source ?: name,
+                                name = "${link.name.ifBlank { name }} · YouTube",
+                                url = link.url,
+                                type = link.type
+                            ) {
+                                this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
+                                this.quality = link.quality
+                                this.headers = link.headers
+                            }
+                        )
+                        found = true
+                    }
+                }
             }
         }
 
         return found
+    }
+
+    /** the settings key that controls a given entry's own service */
+    private fun sourceName(source: String): String = when (source) {
+        "dz" -> "deezer"
+        "qb" -> "qobuz"
+        "td" -> "tidal"
+        "sc" -> "soundcloud"
+        "am" -> "apple"
+        else -> ""
     }
 
     private suspend fun emit(

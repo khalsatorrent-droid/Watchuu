@@ -36,7 +36,10 @@ class MusicBoxProvider : MainAPI() {
     override var name = "MusicBox"
     override var lang = "en"
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.Music)
+    // TvType.Others is what makes the provider reachable: Music alone is not a type the app
+    // offers in its filters, so a provider declaring only that never appears. Monochrome in this
+    // repo declares both for exactly this reason.
+    override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     // deezer
     private val dz = "https://api.deezer.com"

@@ -20,6 +20,7 @@ object MusicBoxPrefs {
     private const val FILE = "musicbox"
     private const val KEY_CATALOGUE = "catalogue"
     private const val KEY_SOURCES = "sources"
+    private const val KEY_ZARZ_TICKET = "zarz_ticket"
 
     /** value used for "All" */
     const val ALL = "all"
@@ -46,6 +47,19 @@ object MusicBoxPrefs {
     )
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    /**
+     * The ticket the zarz resolver wants on a download call. The extensions do not sign it
+     * themselves - they call session.signedFetch and the host app signs with keys an extension
+     * never sees - so the ticket has to come from a verification the user completes, and is pasted
+     * here. With one, Qobuz/Tidal/Deezer return the real file instead of a preview.
+     */
+    fun zarzTicket(ctx: Context): String? =
+        prefs(ctx).getString(KEY_ZARZ_TICKET, null)?.ifBlank { null }
+
+    fun setZarzTicket(ctx: Context, value: String?) {
+        prefs(ctx).edit().putString(KEY_ZARZ_TICKET, value?.ifBlank { null }).apply()
+    }
 
     fun catalogue(ctx: Context): String =
         prefs(ctx).getString(KEY_CATALOGUE, ALL) ?: ALL
@@ -126,6 +140,33 @@ class MusicBoxSettings : DialogFragment() {
                 .show()
         }
 
+        val openZarz: () -> Unit = {
+            val current = MusicBoxPrefs.zarzTicket(ctx).orEmpty()
+            val input = android.widget.EditText(ctx).apply {
+                setText(current)
+                hint = "X-Zarz-Ticket value"
+            }
+            AlertDialog.Builder(ctx)
+                .setTitle("Zarz ticket")
+                .setMessage(
+                    "Paste the ticket from the verification page. With one, Qobuz, Tidal and " +
+                        "Deezer return the real file; without one they only offer a preview."
+                )
+                .setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    MusicBoxPrefs.setZarzTicket(ctx, input.text.toString().trim())
+                    openRoot()
+                }
+                .setNeutralButton("Verify") { _, _ ->
+                    runCatching {
+                        MusicBoxBrowser.solve(requireActivity(), "https://api.zarz.moe/")
+                    }
+                    openRoot()
+                }
+                .setNegativeButton("Cancel") { _, _ -> openRoot() }
+                .show()
+        }
+
         openRoot = {
             val catalogueLabel = MusicBoxPrefs.catalogues
                 .firstOrNull { it.first == MusicBoxPrefs.catalogue(ctx) }?.second ?: "All sources"
@@ -135,10 +176,12 @@ class MusicBoxSettings : DialogFragment() {
                 .ifBlank { "none" }
 
             val solved = MusicBoxBrowser.hosts.count { MusicBoxBrowser.hasClearance(it.second) }
+            val zarz = if (MusicBoxPrefs.zarzTicket(ctx) != null) "set" else "not set"
             val items = arrayOf(
                 "Catalogue: $catalogueLabel",
                 "Sources: $sourcesLabel",
-                "Solve Cloudflare challenge" + if (solved > 0) " ($solved cleared)" else ""
+                "Solve Cloudflare challenge" + if (solved > 0) " ($solved cleared)" else "",
+                "Zarz ticket: $zarz"
             )
             AlertDialog.Builder(ctx)
                 .setTitle("MusicBox")
@@ -146,7 +189,8 @@ class MusicBoxSettings : DialogFragment() {
                     when (which) {
                         0 -> openCatalogue()
                         1 -> openSources()
-                        else -> openChallenge()
+                        2 -> openChallenge()
+                        else -> openZarz()
                     }
                 }
                 .setNegativeButton("Close", null)

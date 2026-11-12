@@ -634,6 +634,63 @@ class MusicBoxProvider : MainAPI() {
         }
     }
 
+    /**
+     * The real file, through the resolver the extensions use.
+     *
+     * All three extensions make the same call, only the path differs:
+     *
+     *   POST https://api.zarz.moe/dl/dzr   (deezer)
+     *   POST https://api.zarz.moe/dl/qbz   (qobuz)
+     *   POST https://api.zarz.moe/dl/tid   (tidal)
+     *   body:  {id, type:"track", platform:"deezer", url:<track url>}
+     *   header X-Zarz-Ticket: <ticket>
+     *   ->    {success:true, direct_downloadable:true, direct_download_url:"…"}
+     *      or {needsVerification:true, auth_url:"…"}
+     *
+     * The ticket is the part an extension cannot mint: the sflx code calls session.signedFetch and
+     * the host app signs with keys it never exposes. So the ticket is pasted in settings after a
+     * verification, and without one this returns null and the caller falls back to a preview.
+     */
+    private suspend fun zarzDownload(kind: String, id: String, trackUrl: String): String? {
+        val ctx = appContext ?: return null
+        val ticket = MusicBoxPrefs.zarzTicket(ctx) ?: return null
+
+        val path = when (kind) {
+            "dz" -> "/dl/dzr"
+            "qb" -> "/dl/qbz"
+            "td" -> "/dl/tid"
+            else -> return null
+        }
+        val body = JSONObject().apply {
+            put("id", id)
+            put("type", "track")
+            put("platform", when (kind) { "dz" -> "deezer"; "qb" -> "qobuz"; else -> "tidal" })
+            put("url", trackUrl)
+        }
+
+        val res = runCatching {
+            app.post(
+                "https://api.zarz.moe$path",
+                headers = headers(
+                    "https://api.zarz.moe$path",
+                    mapOf(
+                        "Content-Type" to "application/json",
+                        "X-Zarz-Ticket" to ticket
+                    )
+                ),
+                requestBody = body.toString().toRequestBody("application/json".toMediaType()),
+                timeout = 45L
+            ).text
+        }.getOrNull() ?: return null
+
+        val json = runCatching { JSONObject(res) }.getOrNull() ?: return null
+        if (json.optBoolean("needsVerification", false)) return null
+        if (!json.optBoolean("success", false)) return null
+
+        return json.optString("direct_download_url").ifBlank { null }
+            ?: json.optString("download_url").ifBlank { null }
+    }
+
     // ── Streams: every source that can answer ──────────────────────────────────
 
     override suspend fun loadLinks(
@@ -665,6 +722,14 @@ class MusicBoxProvider : MainAPI() {
         for (src in order) {
             when (src) {
                 "deezer" -> if (source == "dz") {
+                    // the real file first, when a ticket is set
+                    val real = runCatching {
+                        zarzDownload("dz", id, "https://www.deezer.com/track/$id")
+                    }.getOrNull()
+                    if (real != null) {
+                        emit(callback, "Deezer FLAC", real, "https://www.deezer.com/")
+                        found = true
+                    }
                     val t = deezer("track/$id")
                     title = t?.optString("title").orEmpty()
                     artist = t?.optJSONObject("artist")?.optString("name").orEmpty()
@@ -675,6 +740,13 @@ class MusicBoxProvider : MainAPI() {
                     }
                 }
                 "qobuz" -> if (source == "qb") {
+                    val real = runCatching {
+                        zarzDownload("qb", id, "https://play.qobuz.com/track/$id")
+                    }.getOrNull()
+                    if (real != null) {
+                        emit(callback, "Qobuz FLAC", real, "https://play.qobuz.com/")
+                        found = true
+                    }
                     preview = runCatching { qobuzStream(id) }.getOrNull()
                     if (preview != null) {
                         emit(callback, "Qobuz stream", preview, "https://play.qobuz.com/")
@@ -682,6 +754,13 @@ class MusicBoxProvider : MainAPI() {
                     }
                 }
                 "tidal" -> if (source == "td") {
+                    val real = runCatching {
+                        zarzDownload("td", id, "https://tidal.com/browse/track/$id")
+                    }.getOrNull()
+                    if (real != null) {
+                        emit(callback, "Tidal FLAC", real, "https://listen.tidal.com/")
+                        found = true
+                    }
                     preview = runCatching { tidalStream(id) }.getOrNull()
                     if (preview != null) {
                         emit(callback, "Tidal stream", preview, "https://listen.tidal.com/")

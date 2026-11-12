@@ -7,6 +7,8 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import org.json.JSONObject
 import java.net.URL
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -192,7 +194,7 @@ class ZarzSession(
                     "User-Agent" to USER_AGENT,
                 ),
                 requestBody = payload.toString()
-                    .toRequestBody("application/json".toMediaTypeOrNull())
+                    .toRequestBody("application/json".toMediaType())
             )
 
             if (response.code == 429 && attempt < 2) {
@@ -453,7 +455,7 @@ class ZarzSession(
                 put("url", youtubeUrl)
                 put("downloadMode", "audio")
                 put("audioFormat", "best")
-            }.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            }.toString().toRequestBody("application/json".toMediaType())
         )
         if (response.code !in 200..299) {
             throw Exception("Cobalt audio failed: HTTP ${response.code}")
@@ -483,12 +485,12 @@ class ZarzSession(
             "POST" -> app.post(
                 url,
                 headers = headers,
-                requestBody = body.toRequestBody("application/json".toMediaTypeOrNull())
+                requestBody = body.toRequestBody("application/json".toMediaType())
             )
             "PUT" -> app.put(
                 url,
                 headers = headers,
-                requestBody = body.toRequestBody("application/json".toMediaTypeOrNull())
+                requestBody = body.toRequestBody("application/json".toMediaType())
             )
             "DELETE" -> app.delete(url, headers = headers)
             else -> app.get(url, headers = headers)
@@ -624,15 +626,3 @@ private fun parseTimestamp(value: String): Long? {
     }
 }
 
-// NiceHttp extensions for request body construction
-private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.RequestBody {
-    return okhttp3.RequestBody.create(mediaType, this)
-}
-
-private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
-    return try {
-        okhttp3.MediaType.get(this)
-    } catch (_: Exception) {
-        null
-    }
-}

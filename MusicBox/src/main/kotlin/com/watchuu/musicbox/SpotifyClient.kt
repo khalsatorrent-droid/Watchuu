@@ -1,6 +1,8 @@
 package com.watchuu.musicbox
 
 import com.lagradost.cloudstream3.app
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -103,7 +105,7 @@ object SpotifyClient {
                 "User-Agent" to "Mozilla/5.0",
             ),
             requestBody = clientTokenPayload.toString()
-                .toRequestBody("application/json".toMediaTypeOrNull())
+                .toRequestBody("application/json".toMediaType())
         )
         val ctJson = JSONObject(ctResp.text)
         clientToken = ctJson.optJSONObject("granted_token")?.optString("token", "") ?: ""
@@ -277,10 +279,3 @@ object SpotifyClient {
     }
 }
 
-// Utility extensions
-private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.RequestBody {
-    return okhttp3.RequestBody.create(mediaType, this)
-}
-private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
-    return try { okhttp3.MediaType.get(this) } catch (_: Exception) { null }
-}

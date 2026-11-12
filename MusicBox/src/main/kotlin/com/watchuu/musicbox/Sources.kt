@@ -1,6 +1,8 @@
 package com.watchuu.musicbox
 
 import com.lagradost.cloudstream3.app
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.crypto.Cipher
@@ -521,7 +523,7 @@ object YouTubeMusicApi {
                 "Origin" to "https://music.youtube.com",
             ),
             requestBody = payload.toString()
-                .toRequestBody("application/json".toMediaTypeOrNull())
+                .toRequestBody("application/json".toMediaType())
         )
 
         val text = resp.text
@@ -533,9 +535,3 @@ object YouTubeMusicApi {
 
 // Utility extensions
 private fun String.encodeUrl(): String = java.net.URLEncoder.encode(this, "UTF-8")
-private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.RequestBody {
-    return okhttp3.RequestBody.create(mediaType, this)
-}
-private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
-    return try { okhttp3.MediaType.get(this) } catch (_: Exception) { null }
-}

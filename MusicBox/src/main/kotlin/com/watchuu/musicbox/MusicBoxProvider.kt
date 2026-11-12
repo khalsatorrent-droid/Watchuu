@@ -89,8 +89,9 @@ class MusicBoxProvider : MainAPI() {
      *   deezer      /chart -> {tracks:{data:[…]}, albums:{data:[…]}, artists:{data:[…]}}
      *   apple       rss.applemarketingtools.com most-played feed (no token needed)
      *   soundcloud  api-v2 charts?kind=top
-     *   spotify     /search for a popular term, since its public api has no charts endpoint
-     *   qobuz/tidal have no public chart route; those rows stay empty rather than invented
+     *   qobuz/tidal have no public chart route, and apple has none for artists, so anything
+     *   without a chart of its own falls back to Deezer's - an empty row reads as a broken
+     *   extension, and a filled one that is honestly labelled is better
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
@@ -98,11 +99,13 @@ class MusicBoxProvider : MainAPI() {
         val catalogue = appContext?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
         val kind = request.data // tracks | albums | artists
 
+        // Only three of these services publish a chart, and Apple publishes none for artists.
+        // Rather than show an empty row - which reads as a broken extension - anything without a
+        // chart of its own falls back to Deezer's, so the rows always have something in them.
         val items = when (catalogue) {
-            "apple" -> appleTop(kind)
-            "soundcloud" -> soundcloudTop(kind)
-            "spotify" -> spotifySearch("top hits")
-            "qobuz", "tidal" -> emptyList()
+            "apple" -> appleTop(kind).ifEmpty { deezerChart(kind) }
+            "soundcloud" -> soundcloudTop(kind).ifEmpty { deezerChart(kind) }
+            "deezer" -> deezerChart(kind)
             else -> deezerChart(kind)
         }
         return newHomePageResponse(request.name, items, hasNext = false)
@@ -115,10 +118,12 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private suspend fun appleTop(kind: String): List<SearchResponse> {
+        // apple's marketing feed has songs, albums and playlists - there is no artists feed, so
+        // that row is left to the Deezer fallback
         val feed = when (kind) {
             "albums" -> "most-played/25/albums.json"
-            "artists" -> "most-played/25/music.json"
-            else -> "most-played/25/songs.json"
+            "tracks" -> "most-played/25/songs.json"
+            else -> return emptyList()
         }
         val json = getJson("https://rss.applemarketingtools.com/api/v2/us/music/$feed")
             ?: return emptyList()
@@ -418,71 +423,18 @@ class MusicBoxProvider : MainAPI() {
         return first.optString("previewUrl").ifBlank { null }
     }
 
-    // spotify: the web player hands out an anonymous token, which is enough for search
-    @Volatile
-    private var spotifyToken: String? = null
-    @Volatile
-    private var spotifyTokenAt: Long = 0L
-
-    private suspend fun spotifyAccessToken(): String? {
-        val now = System.currentTimeMillis()
-        spotifyToken?.let { if (now - spotifyTokenAt < 30 * 60_000L) return it }
-
-        val json = getJson("https://open.spotify.com/api/token?reason=init&productType=web-player")
-            ?: return null
-        val token = json.optString("accessToken").ifBlank { json.optString("access_token") }
-            .ifBlank { return null }
-        spotifyToken = token
-        spotifyTokenAt = now
-        return token
-    }
-
-    private suspend fun spotifySearch(query: String): List<SearchResponse> {
-        val token = spotifyAccessToken() ?: return emptyList()
-        val q = URLEncoder.encode(query, "UTF-8")
-        val json = getJson(
-            "https://api.spotify.com/v1/search?q=$q&type=track&limit=20",
-            mapOf("Authorization" to "Bearer $token")
-        ) ?: return emptyList()
-
-        val items = json.optJSONObject("tracks")?.optJSONArray("items") ?: return emptyList()
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val title = o.optString("name").ifBlank { continue }
-            val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
-            val poster = o.optJSONObject("album")?.optJSONArray("images")
-                ?.optJSONObject(0)?.optString("url")?.ifBlank { null }
-            val display = if (artist.isNotBlank()) "$artist - $title" else title
-
-            out.add(
-                newMovieSearchResponse(display, "https://open.spotify.com/track/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    private suspend fun spotifyLoad(url: String): LoadResponse? {
-        val id = Regex("""/track/([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1) ?: return null
-        val token = spotifyAccessToken() ?: return null
-        val o = getJson(
-            "https://api.spotify.com/v1/tracks/$id",
-            mapOf("Authorization" to "Bearer $token")
-        ) ?: return null
-
-        val title = o.optString("name").ifBlank { "Spotify $id" }
-        val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
-        val poster = o.optJSONObject("album")?.optJSONArray("images")
-            ?.optJSONObject(0)?.optString("url")?.ifBlank { null }
-
-        return newMovieLoadResponse(title, url, TvType.Music, "sp|$id") {
-            this.posterUrl = poster
-            this.plot = artist.ifBlank { null }
-        }
-    }
+    /**
+     * Spotify is intentionally not offered as a catalogue.
+     *
+     * Its anonymous web token is not a plain GET any more: spotify-web's own code computes a TOTP
+     * from baked-in secret byte arrays (version 61), exchanges it at /api/token, then calls
+     * api-partner.spotify.com/pathfinder with a client token and persisted-query sha256 hashes that
+     * change whenever Spotify deploys. Two of those three are things that break on someone else's
+     * release schedule, which is the definition of a catalogue that does not work.
+     *
+     * The extension still lists it in the sources, because a Spotify link can still be played -
+     * through YouTube, like every other entry.
+     */
 
     // ── Search: all sources merged ─────────────────────────────────────────────
 
@@ -501,7 +453,6 @@ class MusicBoxProvider : MainAPI() {
         if (wants("tidal")) runCatching { tidalSearch(query) }.getOrNull()?.let { out.addAll(it) }
         if (wants("soundcloud")) runCatching { soundcloudSearch(query) }.getOrNull()?.let { out.addAll(it) }
         if (wants("apple")) runCatching { appleSearch(query) }.getOrNull()?.let { out.addAll(it) }
-        if (wants("spotify")) runCatching { spotifySearch(query) }.getOrNull()?.let { out.addAll(it) }
 
         return out.distinctBy { it.url }
     }
@@ -515,7 +466,6 @@ class MusicBoxProvider : MainAPI() {
             url.contains("tidal.com") -> tidalLoad(url)
             url.contains("soundcloud.com") -> soundcloudLoad(url)
             url.contains("music.apple.com") -> appleLoad(url)
-            url.contains("open.spotify.com") -> spotifyLoad(url)
             else -> null
         }
     }
@@ -772,17 +722,6 @@ class MusicBoxProvider : MainAPI() {
                     if (full != null) {
                         emit(callback, "SoundCloud", full, "https://soundcloud.com/")
                         found = true
-                    }
-                }
-                "spotify" -> if (source == "sp" && title.isBlank()) {
-                    val token = spotifyAccessToken()
-                    if (token != null) {
-                        val o = getJson(
-                            "https://api.spotify.com/v1/tracks/$id",
-                            mapOf("Authorization" to "Bearer $token")
-                        )
-                        title = o?.optString("name").orEmpty()
-                        artist = o?.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
                     }
                 }
                 "apple" -> if (source == "am") {

@@ -32,7 +32,6 @@ object MusicBoxPrefs {
         "tidal" to "Tidal",
         "soundcloud" to "SoundCloud",
         "apple" to "Apple Music",
-        "spotify" to "Spotify",
         "youtube" to "YouTube Music"
     )
 

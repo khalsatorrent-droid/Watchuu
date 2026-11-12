@@ -1,6 +1,8 @@
 package com.watchuu.musicbox
 
 import com.lagradost.cloudstream3.app
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -159,9 +161,7 @@ object SpotifyClient {
             val res = app.post(
                 "https://clienttoken.spotify.com/v1/clienttoken",
                 headers = headers() + mapOf("Content-Type" to "application/json"),
-                requestBody = okhttp3.RequestBody.create(
-                    okhttp3.MediaType.parse("application/json"), payload.toString()
-                ),
+                requestBody = payload.toString().toRequestBody("application/json".toMediaType()),
                 timeout = 30L
             ).text
             val json = JSONObject(res)
@@ -207,9 +207,7 @@ object SpotifyClient {
                     "Content-Type" to "application/json",
                     "app-platform" to "WebPlayer"
                 ),
-                requestBody = okhttp3.RequestBody.create(
-                    okhttp3.MediaType.parse("application/json"), payload.toString()
-                ),
+                requestBody = payload.toString().toRequestBody("application/json".toMediaType()),
                 timeout = 30L
             ).text
         }.getOrNull() ?: return emptyList()

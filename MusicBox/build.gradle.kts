@@ -4,11 +4,11 @@ dependencies {
 }
 
 // use an integer for version numbers
-version = 12
+version = 13
 
 cloudstream {
     language = "en"
-    description = "Music - Spotify Web catalogue with Apple, Deezer, SoundCloud, Tidal and Qobuz backups; plays through YouTube and the resolver"
+    description = "Music - Spotify catalogue with 6-provider download: Amazon Music, Deezer, JioSaavn, SoundCloud, Tidal, YouTube Music via ZARZ signed sessions"
     authors = listOf("khalsatorrent-droid")
 
     status = 1

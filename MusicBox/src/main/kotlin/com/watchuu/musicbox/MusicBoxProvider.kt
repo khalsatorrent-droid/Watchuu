@@ -21,7 +21,10 @@ class MusicBoxProvider : MainAPI() {
     override var name = "MusicBox"
     override val hasMainPage = true
     override val hasQuickSearch = true
-    override val supportedTypes = setOf(TvType.Music)
+    // TvType.Others is what makes the provider reachable. Music alone is not a type this app
+    // offers in its filters, so a provider declaring only that never appears in the list - which is
+    // exactly what happened here twice. Monochrome declares both for the same reason.
+    override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     companion object {
         private const val TAG = "MusicBox"

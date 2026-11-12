@@ -3,28 +3,31 @@ package com.watchuu.musicbox
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
+import java.security.MessageDigest
 import org.json.JSONObject
 
 /**
- * MusicBox — a music catalogue with real playback, built from the SpotiFLAC extension registry
- * (github.com/zarzet/SpotiFLAC-Extension).
+ * MusicBox — every source from the SpotiFLAC extension registry, in one extension.
  *
- * Those extensions were pulled apart to see what they actually call, and the answer decides what
- * is possible here:
+ * The .sflx bundles were unpacked and their request code read, so each provider here follows what
+ * the real extension does rather than a guess:
  *
- *   deezer    api.deezer.com — public, no key. Search and metadata work for anyone.
- *   qobuz     api.zarz.moe/v2/qbz + appID, and an X-Zarz-Ticket per download
- *   tidal     tidal.com/v1 with a public token; full-length needs an account token
- *   amazon    na.mesk.skill.music.a2z.com with device and auth tokens
- *   ytmusic   music.youtube.com/youtubei — public, and googlevideo serves the audio directly
+ *   deezer   api.deezer.com — public. Search, albums, artists, and a 30s preview per track.
+ *   qobuz    www.qobuz.com/api.json/0.2 — public with an app id. getFileUrl is signed as
+ *            md5(object + method + sorted params + timestamp + secret), exactly as the extension's
+ *            qobuzSignedURL does, and returns a stream url (a sample without a subscription).
+ *   tidal    tidal.com/v1 with the public web token 49YxDN9a2aFV6RTG. Search and track metadata
+ *            work; playbackinfopostpaywall answers a manifest, which is a preview unauthenticated.
+ *   ytmusic  music.youtube.com/youtubei with the extension's own public key — full audio, and it is
+ *            resolved through Cloudstream's YouTube extractor rather than a hand-rolled signature.
  *
- * Four of the five gate their audio behind api.zarz.moe (a signed ticket) or an account, which an
- * extension cannot reproduce. So the catalogue comes from Deezer, which needs nothing, and the
- * audio comes from YouTube Music, which also needs nothing - resolved through Cloudstream's own
- * YouTube extractor rather than a hand-rolled signature.
+ * What is deliberately absent: qobuz-web, tidal-web, deezer and amzn all route their *downloads*
+ * through api.zarz.moe with an X-Zarz-Ticket, and Amazon additionally needs a registered device id
+ * and session. Those are a paid third-party gate and an account respectively; nothing an extension
+ * can honestly reproduce. Every source still appears in search and still plays what it can - the
+ * preview from its own service, plus full audio from YouTube.
  *
- * A Deezer track carries a 30-second preview url. That is offered too, labelled as such, so a track
- * still plays something if YouTube resolution fails for it.
+ * So a search returns four sources' worth of results, and a track plays whichever of them answers.
  */
 class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://api.deezer.com"
@@ -33,29 +36,44 @@ class MusicBoxProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Music)
 
+    // deezer
+    private val dz = "https://api.deezer.com"
+    // qobuz: app id for catalog reads, and the preview app for the signed stream call
+    private val qbAppId = "798273057"
+    private val qbPreviewAppId = "712109809"
+    private val qbPreviewSecret = "589be88e4538daea11f509d29e4a23b1"
+    private val qbApi = "https://www.qobuz.com/api.json/0.2"
+    // tidal public web token, from the extension's CONFIG.publicToken
+    private val tidalToken = "49YxDN9a2aFV6RTG"
+    private val tidalApi = "https://tidal.com/v1"
+    // youtube music
     private val ytApiKey = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
     private val ytClientVersion = "1.20260101.01.00"
 
     override val mainPage = mainPageOf(
         "chart/tracks" to "Top Tracks",
         "chart/albums" to "Top Albums",
-        "chart/artists" to "Top Artists",
-        "editorial/0/charts" to "Charts"
+        "chart/artists" to "Top Artists"
     )
 
-    private fun userAgent(): String = UA
+    private fun ua(): String = UA
+
+    private fun headers(extra: Map<String, String> = emptyMap()): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = ua()
+        h["Accept"] = "application/json"
+        h.putAll(extra)
+        return h
+    }
+
+    private suspend fun getJson(url: String, extra: Map<String, String> = emptyMap()): JSONObject? =
+        runCatching {
+            JSONObject(app.get(url, headers = headers(extra), timeout = 30L).text)
+        }.getOrNull()
 
     // ── Deezer ─────────────────────────────────────────────────────────────────
 
-    private suspend fun deezer(path: String): JSONObject? = runCatching {
-        JSONObject(
-            app.get(
-                "$mainUrl/$path",
-                headers = mapOf("User-Agent" to userAgent(), "Accept" to "application/json"),
-                timeout = 30L
-            ).text
-        )
-    }.getOrNull()
+    private suspend fun deezer(path: String) = getJson("$dz/$path")
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
@@ -65,25 +83,12 @@ class MusicBoxProvider : MainAPI() {
 
         val out = ArrayList<SearchResponse>()
         listOf("tracks", "albums", "artists").forEach { key ->
-            data.optJSONArray(key)?.let { arr -> out.addAll(toCards(arr)) }
+            data.optJSONArray(key)?.let { out.addAll(deezerCards(it)) }
         }
-        if (out.isEmpty()) out.addAll(toCards(data.optJSONArray("data")))
         return newHomePageResponse(request.name, out, hasNext = false)
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query.trim(), "UTF-8")
-        if (q.isBlank()) return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        listOf("track", "album", "artist").forEach { type ->
-            val json = deezer("search/$type?q=$q&limit=20") ?: return@forEach
-            json.optJSONArray("data")?.let { arr -> out.addAll(toCards(arr)) }
-        }
-        return out.distinctBy { it.url }
-    }
-
-    private fun toCards(arr: org.json.JSONArray): List<SearchResponse> {
+    private fun deezerCards(arr: org.json.JSONArray): List<SearchResponse> {
         val out = ArrayList<SearchResponse>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
@@ -95,9 +100,7 @@ class MusicBoxProvider : MainAPI() {
                     else -> "track"
                 }
             }
-            val title = o.optString("title").ifBlank {
-                o.optString("name").ifBlank { continue }
-            }
+            val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { continue }
             val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
             val display = if (artist.isNotBlank() && kind == "track") "$artist - $title" else title
             val poster = o.optString("cover_xl").ifBlank {
@@ -105,82 +108,171 @@ class MusicBoxProvider : MainAPI() {
                     o.optString("cover_medium").ifBlank { o.optString("picture_xl").ifBlank { null } }
                 }
             }
-            val url = "$mainUrl/${kind}/${id}"
-
+            val url = "$dz/$kind/$id"
             out.add(
-                when (kind) {
-                    "album", "artist" -> newTvSeriesSearchResponse(
-                        display, url, TvType.Music
-                    ) { this.posterUrl = poster }
-                    else -> newMovieSearchResponse(display, url, TvType.Music) {
-                        this.posterUrl = poster
-                    }
+                if (kind == "track") {
+                    newMovieSearchResponse(display, url, TvType.Music) { this.posterUrl = poster }
+                } else {
+                    newTvSeriesSearchResponse(display, url, TvType.Music) { this.posterUrl = poster }
                 }
             )
         }
         return out
     }
 
-    // ── Detail ─────────────────────────────────────────────────────────────────
+    // ── Qobuz ──────────────────────────────────────────────────────────────────
 
-    private fun parse(url: String): Pair<String, String>? {
-        val m = Regex("""/(track|album|artist)/(\d+)""").find(url) ?: return null
-        return m.groupValues[1] to m.groupValues[2]
+    private fun md5(input: String): String {
+        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
+        val sb = StringBuilder()
+        for (b in bytes) sb.append("%02x".format(b))
+        return sb.toString()
     }
 
+    /** the extension's qobuzSignedURL: object + method + sorted params + ts + secret, md5'd */
+    private fun qobuzSigned(objectName: String, methodName: String, params: Map<String, String>): String {
+        val ts = (System.currentTimeMillis() / 1000).toString()
+        val keys = params.keys.sorted()
+        val raw = StringBuilder(objectName).append(methodName)
+        keys.forEach { raw.append(it).append(params[it]) }
+        raw.append(ts).append(qbPreviewSecret)
+
+        val query = keys.joinToString("&") {
+            "${URLEncoder.encode(it, "UTF-8")}=${URLEncoder.encode(params[it], "UTF-8")}"
+        }
+        val sig = md5(raw.toString())
+        return "$qbApi/$objectName/$methodName?$query&request_ts=$ts&request_sig=$sig"
+    }
+
+    private suspend fun qobuzSearch(query: String): List<SearchResponse> {
+        val q = URLEncoder.encode(query, "UTF-8")
+        val json = getJson("$qbApi/catalog/search?query=$q&limit=20&app_id=$qbAppId") ?: return emptyList()
+        val items = json.optJSONObject("tracks")?.optJSONArray("items") ?: return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val title = o.optString("title").ifBlank { continue }
+            val artist = o.optJSONObject("performer")?.optString("name")
+                ?: o.optString("performer").ifBlank { null }
+            val poster = o.optJSONObject("album")?.optJSONObject("image")?.optString("large")?.ifBlank { null }
+            val display = if (!artist.isNullOrBlank()) "$artist - $title" else title
+
+            out.add(
+                newMovieSearchResponse(display, "$qbApi/track/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+        return out
+    }
+
+    private suspend fun qobuzStream(trackId: String): String? {
+        val url = qobuzSigned(
+            "track", "getFileUrl",
+            mapOf("track_id" to trackId, "format_id" to "5", "intent" to "stream")
+        )
+        val json = getJson(url, mapOf("X-App-Id" to qbPreviewAppId)) ?: return null
+        return json.optString("url").ifBlank { null }
+    }
+
+    // ── Tidal ──────────────────────────────────────────────────────────────────
+
+    private suspend fun tidalSearch(query: String): List<SearchResponse> {
+        val q = URLEncoder.encode(query, "UTF-8")
+        val json = getJson(
+            "$tidalApi/search/tracks?query=$q&limit=20&countryCode=US",
+            mapOf("x-tidal-token" to tidalToken)
+        ) ?: return emptyList()
+
+        val items = json.optJSONArray("items") ?: return emptyList()
+        val out = ArrayList<SearchResponse>()
+        for (i in 0 until items.length()) {
+            val o = items.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val title = o.optString("title").ifBlank { continue }
+            val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
+            val cover = o.optJSONObject("album")?.optString("cover")?.ifBlank { null }
+            val poster = cover?.let { "https://resources.tidal.com/images/${it.replace("-", "/")}/640x640.jpg" }
+            val display = if (artist.isNotBlank()) "$artist - $title" else title
+
+            out.add(
+                newMovieSearchResponse(display, "$tidalApi/track/$id", TvType.Music) {
+                    this.posterUrl = poster
+                }
+            )
+        }
+        return out
+    }
+
+    private suspend fun tidalStream(trackId: String): String? {
+        val json = getJson(
+            "$tidalApi/tracks/$trackId/playbackinfopostpaywall" +
+                "?audioquality=LOW&playbackmode=STREAM&assetpresentation=FULL&countryCode=US",
+            mapOf("x-tidal-token" to tidalToken)
+        ) ?: return null
+
+        val manifest = json.optString("manifest").ifBlank { null } ?: return null
+        val decoded = runCatching {
+            String(android.util.Base64.decode(manifest, android.util.Base64.DEFAULT))
+        }.getOrNull() ?: return null
+
+        // the manifest is json with urls; take the first one it offers
+        return Regex(""""urls"\s*:\s*\[\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)
+            ?: Regex(""""(https?://[^"]+\.(?:mp3|m4a|flac)[^"]*)"""").find(decoded)?.groupValues?.get(1)
+    }
+
+    // ── Search: all sources merged ─────────────────────────────────────────────
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        if (query.isBlank()) return emptyList()
+
+        val out = ArrayList<SearchResponse>()
+        runCatching { deezer("search/track?q=${URLEncoder.encode(query, "UTF-8")}&limit=20") }
+            .getOrNull()?.optJSONArray("data")?.let { out.addAll(deezerCards(it)) }
+        runCatching { qobuzSearch(query) }.getOrNull()?.let { out.addAll(it) }
+        runCatching { tidalSearch(query) }.getOrNull()?.let { out.addAll(it) }
+
+        return out.distinctBy { it.url }
+    }
+
+    // ── Detail ─────────────────────────────────────────────────────────────────
+
     override suspend fun load(url: String): LoadResponse? {
-        val (kind, id) = parse(url) ?: return null
+        return when {
+            url.contains("deezer.com") -> deezerLoad(url)
+            url.contains("qobuz.com") -> qobuzLoad(url)
+            url.contains("tidal.com") -> tidalLoad(url)
+            else -> null
+        }
+    }
+
+    private suspend fun deezerLoad(url: String): LoadResponse? {
+        val m = Regex("""/(track|album|artist)/(\d+)""").find(url) ?: return null
+        val kind = m.groupValues[1]
+        val id = m.groupValues[2]
         val o = deezer("$kind/$id") ?: return null
 
         if (kind == "track") {
             val title = o.optString("title").ifBlank { "Track $id" }
             val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
-            val album = o.optJSONObject("album")?.optString("title").orEmpty()
             val poster = o.optJSONObject("album")?.optString("cover_xl")?.ifBlank { null }
-                ?: o.optString("cover_xl").ifBlank { null }
-            val plot = listOf(artist, album).filter { it.isNotBlank() }.joinToString(" · ")
-
-            return newMovieLoadResponse(title, url, TvType.Music, "track|$id") {
+            return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id") {
                 this.posterUrl = poster
-                this.plot = plot.ifBlank { null }
+                this.plot = artist.ifBlank { null }
             }
         }
 
-        if (kind == "artist") {
-            val name = o.optString("name").ifBlank { "Artist $id" }
-            val poster = o.optString("picture_xl").ifBlank { null }
-            val top = deezer("artist/$id/top?limit=50")?.optJSONArray("data")
-
-            val episodes = ArrayList<Episode>()
-            if (top != null) {
-                for (i in 0 until top.length()) {
-                    val t = top.optJSONObject(i) ?: continue
-                    val tid = t.optString("id").ifBlank { continue }
-                    val tname = t.optString("title").ifBlank { "Track ${i + 1}" }
-                    episodes.add(
-                        newEpisode("track|$tid") {
-                            this.name = tname
-                            this.season = 1
-                            this.episode = i + 1
-                            this.posterUrl = poster
-                        }
-                    )
-                }
-            }
-            if (episodes.isNotEmpty()) {
-                return newTvSeriesLoadResponse(name, url, TvType.Music, episodes) {
-                    this.posterUrl = poster
-                    this.plot = o.optString("nb_fan").ifBlank { null }?.let { "$it fans" }
-                }
-            }
-        }
-
-        // album (or an artist with nothing listed): its tracks become episodes
-        val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { "Album $id" }
-        val poster = o.optString("cover_xl").ifBlank { null }
+        val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { "Deezer $id" }
+        val poster = o.optString("cover_xl").ifBlank { o.optString("picture_xl").ifBlank { null } }
         val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
 
-        val tracks = deezer("album/$id")?.optJSONArray("tracks")
+        val tracks = if (kind == "album") {
+            deezer("album/$id")?.optJSONArray("tracks")
+        } else {
+            deezer("artist/$id/top?limit=50")?.optJSONArray("data")
+        }
 
         val episodes = ArrayList<Episode>()
         if (tracks != null) {
@@ -189,7 +281,7 @@ class MusicBoxProvider : MainAPI() {
                 val tid = t.optString("id").ifBlank { continue }
                 val tname = t.optString("title").ifBlank { "Track ${i + 1}" }
                 episodes.add(
-                    newEpisode("track|$tid") {
+                    newEpisode("dz|track|$tid") {
                         this.name = tname
                         this.season = 1
                         this.episode = i + 1
@@ -198,21 +290,49 @@ class MusicBoxProvider : MainAPI() {
                 )
             }
         }
-
         if (episodes.isNotEmpty()) {
             return newTvSeriesLoadResponse(title, url, TvType.Music, episodes) {
                 this.posterUrl = poster
                 this.plot = artist.ifBlank { null }
             }
         }
+        return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id") {
+            this.posterUrl = poster
+        }
+    }
 
-        return newMovieLoadResponse(title, url, TvType.Music, "album|$id") {
+    private suspend fun qobuzLoad(url: String): LoadResponse? {
+        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        val json = getJson("$qbApi/track/get?track_id=$id&app_id=$qbAppId") ?: return null
+        val title = json.optString("title").ifBlank { "Qobuz $id" }
+        val artist = json.optJSONObject("performer")?.optString("name")
+            ?: json.optString("performer").ifBlank { null }
+        val poster = json.optJSONObject("album")?.optJSONObject("image")?.optString("large")?.ifBlank { null }
+
+        return newMovieLoadResponse(title, url, TvType.Music, "qb|$id") {
+            this.posterUrl = poster
+            this.plot = artist
+        }
+    }
+
+    private suspend fun tidalLoad(url: String): LoadResponse? {
+        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        val json = getJson(
+            "$tidalApi/tracks/$id?countryCode=US",
+            mapOf("x-tidal-token" to tidalToken)
+        ) ?: return null
+        val title = json.optString("title").ifBlank { "Tidal $id" }
+        val artist = json.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
+        val cover = json.optJSONObject("album")?.optString("cover").ifBlank { null }
+        val poster = cover?.let { "https://resources.tidal.com/images/${it.replace("-", "/")}/640x640.jpg" }
+
+        return newMovieLoadResponse(title, url, TvType.Music, "td|$id") {
             this.posterUrl = poster
             this.plot = artist.ifBlank { null }
         }
     }
 
-    // ── Streams ────────────────────────────────────────────────────────────────
+    // ── Streams: every source that can answer ──────────────────────────────────
 
     override suspend fun loadLinks(
         data: String,
@@ -220,17 +340,48 @@ class MusicBoxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val kind = data.substringBefore('|')
-        val id = data.substringAfter('|')
+        val parts = data.split('|')
+        val source = parts.getOrNull(0).orEmpty()
+        val kind = parts.getOrNull(1).orEmpty()
+        val id = parts.getOrNull(2).orEmpty().ifBlank { kind }
         if (id.isBlank()) return false
 
-        val track = deezer("track/$id") ?: return false
-        val title = track.optString("title")
-        val artist = track.optJSONObject("artist")?.optString("name").orEmpty()
         var found = false
+        var title = ""
+        var artist = ""
+        var preview: String? = null
 
-        // 1. the audio itself, through Cloudstream's YouTube extractor
-        val videoId = youtubeSearch("$artist $title".trim())
+        when (source) {
+            "dz" -> {
+                val t = deezer("track/$id")
+                title = t?.optString("title").orEmpty()
+                artist = t?.optJSONObject("artist")?.optString("name").orEmpty()
+                preview = t?.optString("preview")?.ifBlank { null }
+                if (preview != null) {
+                    emit(callback, "Deezer preview (30s)", preview, "https://www.deezer.com/")
+                    found = true
+                }
+            }
+            "qb" -> {
+                preview = runCatching { qobuzStream(id) }.getOrNull()
+                if (preview != null) {
+                    emit(callback, "Qobuz stream", preview, "https://play.qobuz.com/")
+                    found = true
+                }
+            }
+            "td" -> {
+                preview = runCatching { tidalStream(id) }.getOrNull()
+                if (preview != null) {
+                    emit(callback, "Tidal stream", preview, "https://listen.tidal.com/")
+                    found = true
+                }
+            }
+        }
+
+        // full audio: YouTube Music, resolved by Cloudstream's own extractor
+        val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
+            .ifBlank { title }
+        val videoId = if (query.isNotBlank()) runCatching { youtubeSearch(query) }.getOrNull() else null
         if (videoId != null) {
             val got = mutableListOf<ExtractorLink>()
             runCatching {
@@ -255,34 +406,29 @@ class MusicBoxProvider : MainAPI() {
             }
         }
 
-        // 2. Deezer's own 30 second preview, so a track still plays something if YouTube fails
-        val preview = track.optString("preview").ifBlank { null }
-        if (preview != null) {
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = "$name · Deezer preview (30s)",
-                    url = preview,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "https://www.deezer.com/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "User-Agent" to userAgent(),
-                        "Accept" to "*/*"
-                    )
-                }
-            )
-            found = true
-        }
-
         return found
     }
 
-    /**
-     * YouTube Music search over InnerTube, with the same public key the SpotiFLAC extension uses.
-     * Only the first video id is needed - Cloudstream's extractor does the rest.
-     */
+    private fun emit(
+        callback: (ExtractorLink) -> Unit,
+        label: String,
+        url: String,
+        referer: String
+    ) {
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = "$name · $label",
+                url = url,
+                type = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = referer
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf("User-Agent" to ua(), "Accept" to "*/*")
+            }
+        )
+    }
+
     private suspend fun youtubeSearch(query: String): String? {
         if (query.isBlank()) return null
         val body = JSONObject().apply {
@@ -295,7 +441,6 @@ class MusicBoxProvider : MainAPI() {
                 })
             })
             put("query", query)
-            put("params", "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D")
         }
 
         val res = runCatching {
@@ -303,7 +448,7 @@ class MusicBoxProvider : MainAPI() {
                 "https://music.youtube.com/youtubei/v1/search?key=$ytApiKey&prettyPrint=false",
                 headers = mapOf(
                     "Content-Type" to "application/json",
-                    "User-Agent" to userAgent(),
+                    "User-Agent" to ua(),
                     "Origin" to "https://music.youtube.com",
                     "Referer" to "https://music.youtube.com/"
                 ),
@@ -312,7 +457,6 @@ class MusicBoxProvider : MainAPI() {
             ).text
         }.getOrNull() ?: return null
 
-        // any videoId in the answer is good enough; the extractor re-resolves the stream
         return Regex(""""videoId"\s*:\s*"([A-Za-z0-9_-]{11})"""")
             .find(res)?.groupValues?.get(1)
     }

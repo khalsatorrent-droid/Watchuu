@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
 import java.security.MessageDigest
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
 /**
@@ -323,7 +325,7 @@ class MusicBoxProvider : MainAPI() {
         ) ?: return null
         val title = json.optString("title").ifBlank { "Tidal $id" }
         val artist = json.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
-        val cover = json.optJSONObject("album")?.optString("cover").ifBlank { null }
+        val cover = json.optJSONObject("album")?.optString("cover")?.ifBlank { null }
         val poster = cover?.let { "https://resources.tidal.com/images/${it.replace("-", "/")}/640x640.jpg" }
 
         return newMovieLoadResponse(title, url, TvType.Music, "td|$id") {
@@ -409,7 +411,7 @@ class MusicBoxProvider : MainAPI() {
         return found
     }
 
-    private fun emit(
+    private suspend fun emit(
         callback: (ExtractorLink) -> Unit,
         label: String,
         url: String,
@@ -452,7 +454,7 @@ class MusicBoxProvider : MainAPI() {
                     "Origin" to "https://music.youtube.com",
                     "Referer" to "https://music.youtube.com/"
                 ),
-                data = body.toString(),
+                requestBody = body.toString().toRequestBody("application/json".toMediaType()),
                 timeout = 30L
             ).text
         }.getOrNull() ?: return null

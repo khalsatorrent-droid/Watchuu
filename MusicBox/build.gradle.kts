@@ -4,14 +4,14 @@ dependencies {
 }
 
 // use an integer for version numbers
-version = 11
+version = 12
 
 cloudstream {
     language = "en"
-    description = "Music - top tracks, albums and artists from Deezer, played through YouTube's audio"
+    description = "Music - Spotify Web catalogue with Apple, Deezer, SoundCloud, Tidal and Qobuz backups; plays through YouTube and the resolver"
     authors = listOf("khalsatorrent-droid")
 
     status = 1
     tvTypes = listOf("Music")
-    iconUrl = "https://www.google.com/s2/favicons?domain=deezer.com&sz=%size%"
+    iconUrl = "https://www.google.com/s2/favicons?domain=spotify.com&sz=%size%"
 }

@@ -2,58 +2,37 @@ package com.watchuu.musicbox
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import java.net.URLEncoder
-import java.security.MessageDigest
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
 
 /**
- * MusicBox — every source from the SpotiFLAC extension registry, in one extension.
+ * MusicBox — rebuilt around two ideas: a catalogue that always answers, and playback that never
+ * comes back empty.
  *
- * The .sflx bundles were unpacked and their request code read, so each provider here follows what
- * the real extension does rather than a guess:
+ * Catalogue
+ *   Spotify Web is the primary, using the flow its own extension uses (TOTP -> token -> client
+ *   token -> pathfinder). Apple, Deezer and SoundCloud are the backups, and the home rows fall
+ *   through them in order, so a row fills even where one service is unreachable - Deezer is blocked
+ *   outright in some countries.
  *
- *   deezer   api.deezer.com — public. Search, albums, artists, and a 30s preview per track.
- *   qobuz    www.qobuz.com/api.json/0.2 — public with an app id. getFileUrl is signed as
- *            md5(object + method + sorted params + timestamp + secret), exactly as the extension's
- *            qobuzSignedURL does, and returns a stream url (a sample without a subscription).
- *   tidal    tidal.com/v1 with the public web token 49YxDN9a2aFV6RTG. Search and track metadata
- *            work; playbackinfopostpaywall answers a manifest, which is a preview unauthenticated.
- *   ytmusic  music.youtube.com/youtubei with the extension's own public key — full audio, and it is
- *            resolved through Cloudstream's YouTube extractor rather than a hand-rolled signature.
+ * Playback
+ *   Every source contributes whatever it can, at every quality it will answer for:
+ *     carried preview (no network call, always emitted first)
+ *     SoundCloud  full track
+ *     Tidal       low / high / lossless / hi-res, whichever the call returns
+ *     Qobuz       mp3 320 / flac / flac 24 bit
+ *     Deezer      preview, plus the resolver's file when a ticket is set
+ *     Apple       preview
+ *     YouTube     full audio, through Cloudstream's extractor
  *
- * What is deliberately absent: qobuz-web, tidal-web, deezer and amzn all route their *downloads*
- * through api.zarz.moe with an X-Zarz-Ticket, and Amazon additionally needs a registered device id
- * and session. Those are a paid third-party gate and an account respectively; nothing an extension
- * can honestly reproduce. Every source still appears in search and still plays what it can - the
- * preview from its own service, plus full audio from YouTube.
- *
- * So a search returns four sources' worth of results, and a track plays whichever of them answers.
+ * The resolver behind all of that (api.zarz.moe) needs a ticket the extensions cannot mint either -
+ * they call session.signedFetch and the app signs it. That ticket is pasted in settings; without one
+ * the previews stand and nothing breaks.
  */
 class MusicBoxProvider : MainAPI() {
-    override var mainUrl = "https://api.deezer.com"
+    override var mainUrl = "https://musicbox.local"
     override var name = "MusicBox"
     override var lang = "en"
     override val hasMainPage = true
-    // TvType.Others is what makes the provider reachable: Music alone is not a type the app
-    // offers in its filters, so a provider declaring only that never appears. Monochrome in this
-    // repo declares both for exactly this reason.
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
-
-    // deezer
-    private val dz = "https://api.deezer.com"
-    // qobuz: app id for catalog reads, and the preview app for the signed stream call
-    private val qbAppId = "798273057"
-    private val qbPreviewAppId = "712109809"
-    private val qbPreviewSecret = "589be88e4538daea11f509d29e4a23b1"
-    private val qbApi = "https://www.qobuz.com/api.json/0.2"
-    // tidal public web token, from the extension's CONFIG.publicToken
-    private val tidalToken = "49YxDN9a2aFV6RTG"
-    private val tidalApi = "https://tidal.com/v1"
-    // youtube music
-    private val ytApiKey = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
-    private val ytClientVersion = "1.20260101.01.00"
 
     override val mainPage = mainPageOf(
         "tracks" to "Top Tracks",
@@ -61,62 +40,32 @@ class MusicBoxProvider : MainAPI() {
         "artists" to "Top Artists"
     )
 
-    private fun ua(): String = UA
+    private fun ctx() = MusicBoxProvider.appContext
 
-    private fun headers(url: String, extra: Map<String, String> = emptyMap()): Map<String, String> {
-        val h = LinkedHashMap<String, String>()
-        h["User-Agent"] = ua()
-        h["Accept"] = "application/json"
-        // whatever clearance the challenge window earned for this host, if any
-        MusicBoxBrowser.cookiesFor(url)?.let { h["Cookie"] = it }
-        h.putAll(extra)
-        return h
-    }
+    // ── home ───────────────────────────────────────────────────────────────────
 
-    private suspend fun getJson(url: String, extra: Map<String, String> = emptyMap()): JSONObject? =
-        runCatching {
-            JSONObject(app.get(url, headers = headers(url, extra), timeout = 30L).text)
-        }.getOrNull()
-
-    // ── Deezer ─────────────────────────────────────────────────────────────────
-
-    private suspend fun deezer(path: String) = getJson("$dz/$path")
-
-    /**
-     * Home rows follow the catalogue choice. Each source has its own idea of "top", so each is
-     * asked in its own way rather than all being funnelled through Deezer:
-     *
-     *   deezer      /chart -> {tracks:{data:[…]}, albums:{data:[…]}, artists:{data:[…]}}
-     *   apple       rss.applemarketingtools.com most-played feed (no token needed)
-     *   soundcloud  api-v2 charts?kind=top
-     *   qobuz/tidal have no public chart route, and apple has none for artists, so anything
-     *   without a chart of its own falls back to Deezer's - an empty row reads as a broken
-     *   extension, and a filled one that is honestly labelled is better
-     */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
 
-        val catalogue = appContext?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
-        val kind = request.data // tracks | albums | artists
+        val catalogue = ctx()?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
+        val kind = request.data
 
-        // Only three of these services publish a chart, and Apple publishes none for artists.
-        // Rather than show an empty row - which reads as a broken extension - anything without a
-        // chart of its own falls back to Deezer's, so the rows always have something in them.
-        // Deezer's api is not reachable everywhere - it is blocked in some countries outright - so
-        // it is never the only attempt. Apple's feed is reachable almost everywhere, and is the
-        // fallback for every row.
-        val items = when (catalogue) {
-            "spotify" -> spotifyTop(kind).ifEmpty { appleTop(kind) }
-            "apple" -> appleTop(kind).ifEmpty { deezerChart(kind) }
-            "soundcloud" -> soundcloudTop(kind).ifEmpty { appleTop(kind) }
-            "qobuz", "tidal" -> deezerChart(kind).ifEmpty { appleTop(kind) }
-            else -> spotifyTop(kind).ifEmpty { appleTop(kind) }.ifEmpty { deezerChart(kind) }
+        val tracks = when (catalogue) {
+            "spotify" -> spotifyRows(kind).ifEmpty { Sources.appleTop(kind) }
+            "apple" -> Sources.appleTop(kind).ifEmpty { Sources.deezerChart(kind) }
+            "deezer" -> Sources.deezerChart(kind).ifEmpty { Sources.appleTop(kind) }
+            "soundcloud" -> Sources.soundcloudTop(kind).ifEmpty { Sources.appleTop(kind) }
+            "qobuz", "tidal" -> Sources.deezerChart(kind).ifEmpty { Sources.appleTop(kind) }
+            else -> spotifyRows(kind)
+                .ifEmpty { Sources.appleTop(kind) }
+                .ifEmpty { Sources.deezerChart(kind) }
         }
-        return newHomePageResponse(request.name, items, hasNext = false)
+
+        return newHomePageResponse(request.name, tracks.mapNotNull { it.toCard() }, hasNext = false)
     }
 
-    /** spotify publishes no chart to an anonymous client, so the rows are a broad search */
-    private suspend fun spotifyTop(kind: String): List<SearchResponse> {
+    /** spotify publishes no anonymous chart, so its rows are a broad search */
+    private suspend fun spotifyRows(kind: String): List<Track> {
         val term = when (kind) {
             "albums" -> "top albums"
             "artists" -> "top artists"
@@ -125,564 +74,120 @@ class MusicBoxProvider : MainAPI() {
         return runCatching { spotifySearch(term) }.getOrNull().orEmpty()
     }
 
-    private suspend fun deezerChart(kind: String): List<SearchResponse> {
-        val json = deezer("chart") ?: return emptyList()
-        val arr = json.optJSONObject(kind)?.optJSONArray("data") ?: return emptyList()
-        return deezerCards(arr)
-    }
-
-    private suspend fun appleTop(kind: String): List<SearchResponse> {
-        // apple's marketing feed has songs, albums and playlists - there is no artists feed, so
-        // that row is left to the Deezer fallback
-        val feed = when (kind) {
-            "albums" -> "most-played/25/albums.json"
-            "tracks" -> "most-played/25/songs.json"
-            else -> return emptyList()
-        }
-        val json = getJson("https://rss.applemarketingtools.com/api/v2/us/music/$feed")
-            ?: return emptyList()
-        val results = json.optJSONObject("feed")?.optJSONArray("results") ?: return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until results.length()) {
-            val o = results.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val name = o.optString("name").ifBlank { continue }
-            val artist = o.optString("artistName").orEmpty()
-            val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
-            val display = if (artist.isNotBlank()) "$artist - $name" else name
-            out.add(
-                newMovieSearchResponse(display, "https://music.apple.com/song/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    private suspend fun soundcloudTop(kind: String): List<SearchResponse> {
-        if (kind != "tracks") return emptyList()
-        val cid = soundcloudClientId() ?: return emptyList()
-        val json = getJson(
-            "$scApi/charts?kind=top&genre=soundcloud:genres:all-music&client_id=$cid&limit=20"
-        ) ?: return emptyList()
-        val collection = json.optJSONArray("collection") ?: return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until collection.length()) {
-            val t = collection.optJSONObject(i)?.optJSONObject("track") ?: continue
-            val id = t.optString("id").ifBlank { continue }
-            val title = t.optString("title").ifBlank { continue }
-            val artist = t.optJSONObject("user")?.optString("username").orEmpty()
-            val poster = t.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
-            out.add(
-                newMovieSearchResponse(
-                    if (artist.isNotBlank()) "$artist - $title" else title,
-                    "https://soundcloud.com/track/$id",
-                    TvType.Music
-                ) { this.posterUrl = poster }
-            )
-        }
-        return out
-    }
-
-    private fun deezerCards(arr: org.json.JSONArray): List<SearchResponse> {
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val kind = o.optString("type").ifBlank {
-                when {
-                    o.has("nb_tracks") || o.has("record_type") -> "album"
-                    o.has("nb_album") || o.has("radio") -> "artist"
-                    else -> "track"
-                }
-            }
-            val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { continue }
-            val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
-            val display = if (artist.isNotBlank() && kind == "track") "$artist - $title" else title
-            val poster = o.optString("cover_xl").ifBlank {
-                o.optString("cover_big").ifBlank {
-                    o.optString("cover_medium").ifBlank { o.optString("picture_xl").ifBlank { null } }
-                }
-            }
-            val url = "$dz/$kind/$id"
-            // the preview rides along with the id: a play must not depend on a second api call
-            val preview = o.optString("preview").ifBlank { "" }
-            out.add(
-                if (kind == "track") {
-                    newMovieSearchResponse(display, url, TvType.Music) { this.posterUrl = poster }
-                } else {
-                    newTvSeriesSearchResponse(display, url, TvType.Music) { this.posterUrl = poster }
-                }
-            )
-        }
-        return out
-    }
-
-    // ── Qobuz ──────────────────────────────────────────────────────────────────
-
-    private fun md5(input: String): String {
-        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
-        val sb = StringBuilder()
-        for (b in bytes) sb.append("%02x".format(b))
-        return sb.toString()
-    }
-
-    /** the extension's qobuzSignedURL: object + method + sorted params + ts + secret, md5'd */
-    private fun qobuzSigned(objectName: String, methodName: String, params: Map<String, String>): String {
-        val ts = (System.currentTimeMillis() / 1000).toString()
-        val keys = params.keys.sorted()
-        val raw = StringBuilder(objectName).append(methodName)
-        keys.forEach { raw.append(it).append(params[it]) }
-        raw.append(ts).append(qbPreviewSecret)
-
-        val query = keys.joinToString("&") {
-            "${URLEncoder.encode(it, "UTF-8")}=${URLEncoder.encode(params[it], "UTF-8")}"
-        }
-        val sig = md5(raw.toString())
-        return "$qbApi/$objectName/$methodName?$query&request_ts=$ts&request_sig=$sig"
-    }
-
-    private suspend fun qobuzSearch(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        val json = getJson("$qbApi/catalog/search?query=$q&limit=20&app_id=$qbAppId") ?: return emptyList()
-        val items = json.optJSONObject("tracks")?.optJSONArray("items") ?: return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val title = o.optString("title").ifBlank { continue }
-            val artist = o.optJSONObject("performer")?.optString("name")
-                ?: o.optString("performer").ifBlank { null }
-            val poster = o.optJSONObject("album")?.optJSONObject("image")?.optString("large")?.ifBlank { null }
-            val display = if (!artist.isNullOrBlank()) "$artist - $title" else title
-
-            out.add(
-                newMovieSearchResponse(display, "$qbApi/track/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    private suspend fun qobuzStream(trackId: String): String? {
-        val url = qobuzSigned(
-            "track", "getFileUrl",
-            mapOf("track_id" to trackId, "format_id" to "5", "intent" to "stream")
-        )
-        val json = getJson(url, mapOf("X-App-Id" to qbPreviewAppId)) ?: return null
-        return json.optString("url").ifBlank { null }
-    }
-
-    // ── Tidal ──────────────────────────────────────────────────────────────────
-
-    private suspend fun tidalSearch(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        val json = getJson(
-            "$tidalApi/search/tracks?query=$q&limit=20&countryCode=US",
-            mapOf("x-tidal-token" to tidalToken)
-        ) ?: return emptyList()
-
-        val items = json.optJSONArray("items") ?: return emptyList()
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val title = o.optString("title").ifBlank { continue }
-            val artist = o.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
-            val cover = o.optJSONObject("album")?.optString("cover")?.ifBlank { null }
-            val poster = cover?.let { "https://resources.tidal.com/images/${it.replace("-", "/")}/640x640.jpg" }
-            val display = if (artist.isNotBlank()) "$artist - $title" else title
-
-            out.add(
-                newMovieSearchResponse(display, "$tidalApi/track/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    private suspend fun tidalStream(trackId: String): String? {
-        val json = getJson(
-            "$tidalApi/tracks/$trackId/playbackinfopostpaywall" +
-                "?audioquality=LOW&playbackmode=STREAM&assetpresentation=FULL&countryCode=US",
-            mapOf("x-tidal-token" to tidalToken)
-        ) ?: return null
-
-        val manifest = json.optString("manifest").ifBlank { null } ?: return null
-        val decoded = runCatching {
-            String(android.util.Base64.decode(manifest, android.util.Base64.DEFAULT))
-        }.getOrNull() ?: return null
-
-        // the manifest is json with urls; take the first one it offers
-        return Regex(""""urls"\s*:\s*\[\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)
-            ?: Regex(""""(https?://[^"]+\.(?:mp3|m4a|flac)[^"]*)"""").find(decoded)?.groupValues?.get(1)
-    }
-
-    // soundcloud: the client_id is pulled from its own js bundles, the same way the sflx
-    // extension does it, and cached for the session
-    private val scApi = "https://api-v2.soundcloud.com"
-    @Volatile
-    private var scClientId: String? = null
-
-    private suspend fun soundcloudClientId(): String? {
-        scClientId?.let { return it }
-        val html = runCatching {
-            app.get(
-                "https://soundcloud.com/",
-                headers = mapOf("User-Agent" to ua(), "Accept" to "text/html"),
-                timeout = 30L
-            ).text
-        }.getOrNull() ?: return null
-
-        // the id is often in the page itself, otherwise in one of the asset bundles
-        Regex("""client_id\s*[:=]\s*["']([A-Za-z0-9]{32})["']""").find(html)
-            ?.groupValues?.get(1)?.let { scClientId = it; return it }
-
-        val bundles = Regex("""src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"""")
-            .findAll(html).map { it.groupValues[1] }.take(6).toList()
-
-        for (bundle in bundles) {
-            val js = runCatching {
-                app.get(bundle, headers = mapOf("User-Agent" to ua()), timeout = 30L).text
-            }.getOrNull() ?: continue
-            Regex("""client_id\s*[:=]\s*["']([A-Za-z0-9]{32})["']""").find(js)
-                ?.groupValues?.get(1)?.let { scClientId = it; return it }
-        }
-        return null
-    }
-
-    private suspend fun soundcloudSearch(query: String): List<SearchResponse> {
-        val cid = soundcloudClientId() ?: return emptyList()
-        val q = URLEncoder.encode(query, "UTF-8")
-        val json = getJson("$scApi/search/tracks?q=$q&client_id=$cid&limit=20") ?: return emptyList()
-        val items = json.optJSONArray("collection") ?: return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            val id = o.optString("id").ifBlank { continue }
-            val title = o.optString("title").ifBlank { continue }
-            val artist = o.optJSONObject("user")?.optString("username").orEmpty()
-            val poster = o.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
-            val display = if (artist.isNotBlank()) "$artist - $title" else title
-
-            out.add(
-                newMovieSearchResponse(display, "https://soundcloud.com/track/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    /** the full stream: a transcoding url, exchanged for the file it points at */
-    private suspend fun soundcloudStream(id: String): String? {
-        val cid = soundcloudClientId() ?: return null
-        val track = getJson("$scApi/tracks/$id?client_id=$cid") ?: return null
-        val transcodings = track.optJSONObject("media")?.optJSONArray("transcodings") ?: return null
-
-        for (i in 0 until transcodings.length()) {
-            val t = transcodings.optJSONObject(i) ?: continue
-            if (t.optBoolean("snipped", false)) continue
-            val protocol = t.optJSONObject("format")?.optString("protocol").orEmpty()
-            if (protocol != "progressive" && protocol != "hls") continue
-            val url = t.optString("url").ifBlank { continue }
-
-            val res = runCatching {
-                JSONObject(
-                    app.get(
-                        "$url?client_id=$cid",
-                        headers = mapOf("User-Agent" to ua(), "Accept" to "application/json"),
-                        timeout = 30L
-                    ).text
-                )
-            }.getOrNull() ?: continue
-
-            res.optString("url").ifBlank { null }?.let { return it }
-        }
-        return null
-    }
-
-    // apple music: the itunes catalogue needs no token at all and carries a preview per track
-    private suspend fun appleSearch(query: String): List<SearchResponse> {
-        val q = URLEncoder.encode(query, "UTF-8")
-        val json = getJson("https://itunes.apple.com/search?term=$q&media=music&entity=song&limit=20")
-            ?: return emptyList()
-        val items = json.optJSONArray("results") ?: return emptyList()
-
-        val out = ArrayList<SearchResponse>()
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            val id = o.optString("trackId").ifBlank { continue }
-            val title = o.optString("trackName").ifBlank { continue }
-            val artist = o.optString("artistName").orEmpty()
-            val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
-            val display = if (artist.isNotBlank()) "$artist - $title" else title
-
-            out.add(
-                newMovieSearchResponse(display, "https://music.apple.com/song/$id", TvType.Music) {
-                    this.posterUrl = poster
-                }
-            )
-        }
-        return out
-    }
-
-    private suspend fun applePreview(id: String): String? {
-        val json = getJson("https://itunes.apple.com/lookup?id=$id&entity=song") ?: return null
-        val first = json.optJSONArray("results")?.optJSONObject(0) ?: return null
-        return first.optString("previewUrl").ifBlank { null }
-    }
-
-    /**
-     * Spotify is intentionally not offered as a catalogue.
-     *
-     * Its anonymous web token is not a plain GET any more: spotify-web's own code computes a TOTP
-     * from baked-in secret byte arrays (version 61), exchanges it at /api/token, then calls
-     * api-partner.spotify.com/pathfinder with a client token and persisted-query sha256 hashes that
-     * change whenever Spotify deploys. Two of those three are things that break on someone else's
-     * release schedule, which is the definition of a catalogue that does not work.
-     *
-     * The extension still lists it in the sources, because a Spotify link can still be played -
-     * through YouTube, like every other entry.
-     */
-
-    private suspend fun spotifySearch(query: String): List<SearchResponse> {
-        val nodes = SpotifyClient.search(query)
-        val out = ArrayList<SearchResponse>()
-        for (node in nodes) {
-            val id = SpotifyClient.trackIdOf(node) ?: continue
-            val title = SpotifyClient.titleOf(node).ifBlank { continue }
-            val artist = SpotifyClient.artistsOf(node)
-            val poster = SpotifyClient.coverOf(node)
-            val display = if (artist.isNotBlank()) "$artist - $title" else title
-
-            // title and artist ride along, so a play never has to ask spotify again
-            val data = "sp|$id|${title.replace('|', ' ')}|${artist.replace('|', ' ')}"
-            out.add(
-                newMovieSearchResponse(display, "https://open.spotify.com/track/$id", TvType.Music) {
-                    this.posterUrl = poster
-                    this.posterHeaders = mapOf("User-Agent" to ua())
-                }
-            )
-        }
-        return out.distinctBy { it.url }
-    }
-
-    // ── Search: all sources merged ─────────────────────────────────────────────
+    // ── search ─────────────────────────────────────────────────────────────────
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
+        val catalogue = ctx()?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
 
-        val catalogue = appContext?.let { MusicBoxPrefs.catalogue(it) } ?: MusicBoxPrefs.ALL
-        val out = ArrayList<SearchResponse>()
-        val wants = { name: String -> catalogue == MusicBoxPrefs.ALL || catalogue == name }
-
-        if (wants("spotify")) runCatching { spotifySearch(query) }.getOrNull()?.let { out.addAll(it) }
-        if (wants("deezer")) {
-            runCatching { deezer("search/track?q=${URLEncoder.encode(query, "UTF-8")}&limit=20") }
-                .getOrNull()?.optJSONArray("data")?.let { out.addAll(deezerCards(it)) }
+        val out = ArrayList<Track>()
+        suspend fun add(name: String, block: suspend () -> List<Track>) {
+            if (catalogue != MusicBoxPrefs.ALL && catalogue != name) return
+            runCatching { block() }.getOrNull()?.let { out.addAll(it) }
         }
-        if (wants("qobuz")) runCatching { qobuzSearch(query) }.getOrNull()?.let { out.addAll(it) }
-        if (wants("tidal")) runCatching { tidalSearch(query) }.getOrNull()?.let { out.addAll(it) }
-        if (wants("soundcloud")) runCatching { soundcloudSearch(query) }.getOrNull()?.let { out.addAll(it) }
-        if (wants("apple")) runCatching { appleSearch(query) }.getOrNull()?.let { out.addAll(it) }
 
-        return out.distinctBy { it.url }
+        add("spotify") { spotifySearch(query) }
+        add("deezer") { Sources.deezerSearch(query) }
+        add("apple") { Sources.appleSearch(query) }
+        add("soundcloud") { Sources.soundcloudSearch(query) }
+        add("tidal") { Sources.tidalSearch(query) }
+        add("qobuz") { Sources.qobuzSearch(query) }
+
+        return out.mapNotNull { it.toCard() }.distinctBy { it.url }
     }
 
-    // ── Detail ─────────────────────────────────────────────────────────────────
+    private suspend fun spotifySearch(query: String): List<Track> {
+        val nodes = SpotifyClient.search(query)
+        val out = ArrayList<Track>()
+        for (node in nodes) {
+            val id = SpotifyClient.trackIdOf(node) ?: continue
+            val title = SpotifyClient.titleOf(node).ifBlank { continue }
+            out.add(
+                Track(
+                    source = "sp",
+                    id = id,
+                    title = title,
+                    artist = SpotifyClient.artistsOf(node),
+                    poster = SpotifyClient.coverOf(node)
+                )
+            )
+        }
+        return out
+    }
+
+    // ── cards ──────────────────────────────────────────────────────────────────
+
+    private fun Track.toCard(): SearchResponse? {
+        val label = if (artist.isNotBlank()) "$artist - $title" else title
+        if (label.isBlank()) return null
+
+        return when (kind) {
+            "album", "artist" -> newTvSeriesSearchResponse(
+                label, "$mainUrl/${source}/${kind}/$id", TvType.Music
+            ) {
+                this.posterUrl = poster
+            }
+            else -> newMovieSearchResponse(label, "$mainUrl/${source}/track/$id", TvType.Music) {
+                this.posterUrl = poster
+            }
+        }
+    }
+
+    // ── detail ─────────────────────────────────────────────────────────────────
 
     override suspend fun load(url: String): LoadResponse? {
-        return when {
-            url.contains("deezer.com") -> deezerLoad(url)
-            url.contains("qobuz.com") -> qobuzLoad(url)
-            url.contains("tidal.com") -> tidalLoad(url)
-            url.contains("soundcloud.com") -> soundcloudLoad(url)
-            url.contains("music.apple.com") -> appleLoad(url)
+        val parts = url.removePrefix(mainUrl).trim('/').split('/')
+        val source = parts.getOrNull(0) ?: return null
+        val kind = parts.getOrNull(1) ?: "track"
+        val id = parts.getOrNull(2) ?: return null
+
+        // an album or artist becomes a series of tracks
+        if (kind == "album" || kind == "artist") {
+            val tracks = when (source) {
+                "dz" -> if (kind == "album") Sources.deezerAlbum(id) else Sources.deezerArtist(id)
+                else -> emptyList()
+            }
+            if (tracks.isEmpty()) return null
+
+            val first = tracks.firstOrNull()
+            val title = if (kind == "album") first?.title.orEmpty() else first?.artist.orEmpty()
+            val episodes = tracks.mapIndexed { index, t ->
+                newEpisode(t.encode()) {
+                    this.name = t.title
+                    this.season = 1
+                    this.episode = index + 1
+                    this.posterUrl = t.poster
+                }
+            }
+            return newTvSeriesLoadResponse(
+                title.ifBlank { "Album $id" }, url, TvType.Music, episodes
+            ) {
+                this.posterUrl = first?.poster
+                this.plot = first?.artist
+            }
+        }
+
+        // a single track: look up what it is called, and keep it with the entry
+        val track = when (source) {
+            "dz" -> Sources.deezerTrack(id)
+            "am" -> Sources.appleTrack(id)
             else -> null
         }
-    }
 
-    private suspend fun deezerLoad(url: String): LoadResponse? {
-        val m = Regex("""/(track|album|artist)/(\d+)""").find(url) ?: return null
-        val kind = m.groupValues[1]
-        val id = m.groupValues[2]
-        val o = deezer("$kind/$id") ?: return null
-
-        if (kind == "track") {
-            val title = o.optString("title").ifBlank { "Track $id" }
-            val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
-            val poster = o.optJSONObject("album")?.optString("cover_xl")?.ifBlank { null }
-            val preview = o.optString("preview").ifBlank { "" }
-            return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id|$preview") {
-                this.posterUrl = poster
-                this.plot = artist.ifBlank { null }
-            }
-        }
-
-        val title = o.optString("title").ifBlank { o.optString("name") }.ifBlank { "Deezer $id" }
-        val poster = o.optString("cover_xl").ifBlank { o.optString("picture_xl").ifBlank { null } }
-        val artist = o.optJSONObject("artist")?.optString("name").orEmpty()
-
-        val tracks = if (kind == "album") {
-            deezer("album/$id")?.optJSONArray("tracks")
-        } else {
-            deezer("artist/$id/top?limit=50")?.optJSONArray("data")
-        }
-
-        val episodes = ArrayList<Episode>()
-        if (tracks != null) {
-            for (i in 0 until tracks.length()) {
-                val t = tracks.optJSONObject(i) ?: continue
-                val tid = t.optString("id").ifBlank { continue }
-                val tname = t.optString("title").ifBlank { "Track ${i + 1}" }
-                val tpreview = t.optString("preview").ifBlank { "" }
-                episodes.add(
-                    newEpisode("dz|track|$tid|$tpreview") {
-                        this.name = tname
-                        this.season = 1
-                        this.episode = i + 1
-                        this.posterUrl = poster
-                    }
-                )
-            }
-        }
-        if (episodes.isNotEmpty()) {
-            return newTvSeriesLoadResponse(title, url, TvType.Music, episodes) {
-                this.posterUrl = poster
-                this.plot = artist.ifBlank { null }
-            }
-        }
-        return newMovieLoadResponse(title, url, TvType.Music, "dz|track|$id") {
-            this.posterUrl = poster
+        return newMovieLoadResponse(
+            track?.let { if (it.artist.isNotBlank()) "${it.artist} - ${it.title}" else it.title }
+                ?: "Track $id",
+            url,
+            TvType.Music,
+            Track(source, id, track?.title.orEmpty(), track?.artist.orEmpty(),
+                track?.poster, track?.preview).encode()
+        ) {
+            this.posterUrl = track?.poster
+            this.plot = track?.artist
         }
     }
 
-    private suspend fun qobuzLoad(url: String): LoadResponse? {
-        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
-        val json = getJson("$qbApi/track/get?track_id=$id&app_id=$qbAppId") ?: return null
-        val title = json.optString("title").ifBlank { "Qobuz $id" }
-        val artist = json.optJSONObject("performer")?.optString("name")
-            ?: json.optString("performer").ifBlank { null }
-        val poster = json.optJSONObject("album")?.optJSONObject("image")?.optString("large")?.ifBlank { null }
-
-        return newMovieLoadResponse(title, url, TvType.Music, "qb|$id") {
-            this.posterUrl = poster
-            this.plot = artist
-        }
-    }
-
-    private suspend fun tidalLoad(url: String): LoadResponse? {
-        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
-        val json = getJson(
-            "$tidalApi/tracks/$id?countryCode=US",
-            mapOf("x-tidal-token" to tidalToken)
-        ) ?: return null
-        val title = json.optString("title").ifBlank { "Tidal $id" }
-        val artist = json.optJSONArray("artists")?.optJSONObject(0)?.optString("name").orEmpty()
-        val cover = json.optJSONObject("album")?.optString("cover")?.ifBlank { null }
-        val poster = cover?.let { "https://resources.tidal.com/images/${it.replace("-", "/")}/640x640.jpg" }
-
-        return newMovieLoadResponse(title, url, TvType.Music, "td|$id") {
-            this.posterUrl = poster
-            this.plot = artist.ifBlank { null }
-        }
-    }
-
-    private suspend fun soundcloudLoad(url: String): LoadResponse? {
-        val id = Regex("""/track/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
-        val cid = soundcloudClientId() ?: return null
-        val o = getJson("$scApi/tracks/$id?client_id=$cid") ?: return null
-
-        val title = o.optString("title").ifBlank { "SoundCloud $id" }
-        val artist = o.optJSONObject("user")?.optString("username").orEmpty()
-        val poster = o.optString("artwork_url").ifBlank { null }?.replace("large", "t500x500")
-
-        return newMovieLoadResponse(title, url, TvType.Music, "sc|$id") {
-            this.posterUrl = poster
-            this.plot = artist.ifBlank { null }
-        }
-    }
-
-    private suspend fun appleLoad(url: String): LoadResponse? {
-        val id = Regex("""/song/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
-        val json = getJson("https://itunes.apple.com/lookup?id=$id&entity=song") ?: return null
-        val o = json.optJSONArray("results")?.optJSONObject(0) ?: return null
-
-        val title = o.optString("trackName").ifBlank { "Apple $id" }
-        val artist = o.optString("artistName").orEmpty()
-        val poster = o.optString("artworkUrl100").ifBlank { null }?.replace("100x100", "600x600")
-
-        return newMovieLoadResponse(title, url, TvType.Music, "am|$id") {
-            this.posterUrl = poster
-            this.plot = artist.ifBlank { null }
-        }
-    }
-
-    /**
-     * The real file, through the resolver the extensions use.
-     *
-     * All three extensions make the same call, only the path differs:
-     *
-     *   POST https://api.zarz.moe/dl/dzr   (deezer)
-     *   POST https://api.zarz.moe/dl/qbz   (qobuz)
-     *   POST https://api.zarz.moe/dl/tid   (tidal)
-     *   body:  {id, type:"track", platform:"deezer", url:<track url>}
-     *   header X-Zarz-Ticket: <ticket>
-     *   ->    {success:true, direct_downloadable:true, direct_download_url:"…"}
-     *      or {needsVerification:true, auth_url:"…"}
-     *
-     * The ticket is the part an extension cannot mint: the sflx code calls session.signedFetch and
-     * the host app signs with keys it never exposes. So the ticket is pasted in settings after a
-     * verification, and without one this returns null and the caller falls back to a preview.
-     */
-    private suspend fun zarzDownload(kind: String, id: String, trackUrl: String): String? {
-        val ctx = appContext ?: return null
-        val ticket = MusicBoxPrefs.zarzTicket(ctx) ?: return null
-
-        val path = when (kind) {
-            "dz" -> "/dl/dzr"
-            "qb" -> "/dl/qbz"
-            "td" -> "/dl/tid"
-            else -> return null
-        }
-        val body = JSONObject().apply {
-            put("id", id)
-            put("type", "track")
-            put("platform", when (kind) { "dz" -> "deezer"; "qb" -> "qobuz"; else -> "tidal" })
-            put("url", trackUrl)
-        }
-
-        val res = runCatching {
-            app.post(
-                "https://api.zarz.moe$path",
-                headers = headers(
-                    "https://api.zarz.moe$path",
-                    mapOf(
-                        "Content-Type" to "application/json",
-                        "X-Zarz-Ticket" to ticket
-                    )
-                ),
-                requestBody = body.toString().toRequestBody("application/json".toMediaType()),
-                timeout = 45L
-            ).text
-        }.getOrNull() ?: return null
-
-        val json = runCatching { JSONObject(res) }.getOrNull() ?: return null
-        if (json.optBoolean("needsVerification", false)) return null
-        if (!json.optBoolean("success", false)) return null
-
-        return json.optString("direct_download_url").ifBlank { null }
-            ?: json.optString("download_url").ifBlank { null }
-    }
-
-    // ── Streams: every source that can answer ──────────────────────────────────
+    // ── playback ───────────────────────────────────────────────────────────────
 
     override suspend fun loadLinks(
         data: String,
@@ -690,118 +195,83 @@ class MusicBoxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split('|')
-        val source = parts.getOrNull(0).orEmpty()
-        val kind = parts.getOrNull(1).orEmpty()
-        val id = parts.getOrNull(2).orEmpty().ifBlank { kind }
-        val carried = parts.getOrNull(3).orEmpty()
-        val carriedTitle = parts.getOrNull(4).orEmpty()
-        val carriedArtist = parts.getOrNull(5).orEmpty()
-        if (id.isBlank()) return false
+        val track = Track.decode(data) ?: return false
+        val enabled = ctx()?.let { MusicBoxPrefs.enabledSources(it) }
+            ?: MusicBoxPrefs.sources.map { it.first }
+        val ticket = ctx()?.let { MusicBoxPrefs.zarzTicket(it) }
 
         var found = false
-        var title = carriedTitle
-        var artist = carriedArtist
 
-        // 1. anything already known when the entry was built. This is emitted first and needs no
-        //    network call, so a track always has at least one playable link.
-        if (carried.startsWith("http")) {
-            emit(callback, "preview (30s)", carried, "$mainUrl/")
+        suspend fun emit(label: String, url: String, referer: String, hls: Boolean = false) {
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = "$name · $label",
+                    url = url,
+                    type = if (hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "User-Agent" to Sources.userAgent(),
+                        "Accept" to "*/*"
+                    )
+                }
+            )
             found = true
         }
 
-        val enabled = appContext?.let { MusicBoxPrefs.enabledSources(it) }
-            ?: MusicBoxPrefs.sources.map { it.first }
+        // 1. what the entry already carried. No network, so this cannot fail.
+        track.preview?.let { emit("preview", it, "https://www.deezer.com/") }
 
-        // 2. the entry's own service: the real file through the resolver if a ticket is set,
-        //    otherwise whatever that service offers
-        if (enabled.contains(sourceName(source))) {
-            when (source) {
+        // 2. the entry's own service, at every quality it will answer for
+        if (enabled.contains(sourceKey(track.source))) {
+            when (track.source) {
+                "sc" -> runCatching { Sources.soundcloudStream(track.id) }.getOrNull()
+                    ?.let { emit("SoundCloud", it, "https://soundcloud.com/") }
+
+                "td" -> runCatching { Sources.tidalPlays(track.id) }.getOrNull()?.forEach {
+                    emit(it.label, it.url, it.referer, it.isHls)
+                }
+
+                "qb" -> runCatching { Sources.qobuzPlays(track.id) }.getOrNull()?.forEach {
+                    emit(it.label, it.url, it.referer, it.isHls)
+                }
+
                 "dz" -> {
-                    val real = runCatching {
-                        zarzDownload("dz", id, "https://www.deezer.com/track/$id")
-                    }.getOrNull()
-                    if (real != null) {
-                        emit(callback, "Deezer FLAC", real, "https://www.deezer.com/")
-                        found = true
-                    }
-                    deezer("track/$id")?.let {
-                        title = it.optString("title")
-                        artist = it.optJSONObject("artist")?.optString("name").orEmpty()
-                        it.optString("preview").ifBlank { null }?.let { p ->
-                            if (p != carried) {
-                                emit(callback, "Deezer preview (30s)", p, "https://www.deezer.com/")
-                                found = true
-                            }
-                        }
+                    runCatching { Sources.deezerPreview(track.id) }.getOrNull()
+                        ?.takeIf { it != track.preview }
+                        ?.let { emit("Deezer preview", it, "https://www.deezer.com/") }
+                    if (ticket != null) {
+                        runCatching {
+                            Sources.zarz("dz", track.id, "https://www.deezer.com/track/${track.id}", ticket)
+                        }.getOrNull()?.let { emit("Deezer FLAC", it, "https://www.deezer.com/") }
                     }
                 }
-                "qb" -> {
-                    val real = runCatching {
-                        zarzDownload("qb", id, "https://play.qobuz.com/track/$id")
-                    }.getOrNull()
-                    if (real != null) {
-                        emit(callback, "Qobuz FLAC", real, "https://play.qobuz.com/")
-                        found = true
-                    }
-                    runCatching { qobuzStream(id) }.getOrNull()?.let {
-                        emit(callback, "Qobuz stream", it, "https://play.qobuz.com/")
-                        found = true
-                    }
+
+                "am" -> runCatching { Sources.applePreview(track.id) }.getOrNull()
+                    ?.takeIf { it != track.preview }
+                    ?.let { emit("Apple preview", it, "https://music.apple.com/") }
+            }
+
+            // the resolver, for the two services that cannot serve a file themselves
+            if (ticket != null && track.source in listOf("qb", "td")) {
+                val url = when (track.source) {
+                    "qb" -> "https://play.qobuz.com/track/${track.id}"
+                    else -> "https://tidal.com/browse/track/${track.id}"
                 }
-                "td" -> {
-                    val real = runCatching {
-                        zarzDownload("td", id, "https://tidal.com/browse/track/$id")
-                    }.getOrNull()
-                    if (real != null) {
-                        emit(callback, "Tidal FLAC", real, "https://listen.tidal.com/")
-                        found = true
-                    }
-                    runCatching { tidalStream(id) }.getOrNull()?.let {
-                        emit(callback, "Tidal stream", it, "https://listen.tidal.com/")
-                        found = true
-                    }
-                }
-                "sc" -> {
-                    runCatching { soundcloudStream(id) }.getOrNull()?.let {
-                        emit(callback, "SoundCloud", it, "https://soundcloud.com/")
-                        found = true
-                    }
-                }
-                "am" -> {
-                    runCatching { applePreview(id) }.getOrNull()?.let {
-                        emit(callback, "Apple Music preview (30s)", it, "https://music.apple.com/")
-                        found = true
-                    }
-                }
+                runCatching { Sources.zarz(track.source, track.id, url, ticket) }.getOrNull()
+                    ?.let { emit(if (track.source == "qb") "Qobuz FLAC" else "Tidal FLAC", it, url) }
             }
         }
 
-        // 3. full audio from YouTube, when it is enabled and we know what the track is called
+        // 3. full audio from YouTube, which is the only source that always has one
         if (enabled.contains("youtube")) {
-            if (title.isBlank()) {
-                when (source) {
-                    "dz" -> deezer("track/$id")?.let {
-                        title = it.optString("title")
-                        artist = it.optJSONObject("artist")?.optString("name").orEmpty()
-                    }
-                    "am" -> getJson("https://itunes.apple.com/lookup?id=$id&entity=song")
-                        ?.optJSONArray("results")?.optJSONObject(0)?.let {
-                            title = it.optString("trackName")
-                            artist = it.optString("artistName")
-                        }
-                    "sc" -> soundcloudClientId()?.let { cid ->
-                        getJson("$scApi/tracks/$id?client_id=$cid")?.let {
-                            title = it.optString("title")
-                            artist = it.optJSONObject("user")?.optString("username").orEmpty()
-                        }
-                    }
-                }
-            }
-
-            val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
+            val query = listOf(track.artist, track.title)
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
             if (query.isNotBlank()) {
-                runCatching { youtubeSearch(query) }.getOrNull()?.let { videoId ->
+                runCatching { Sources.youtubeVideoId(query) }.getOrNull()?.let { videoId ->
                     val got = mutableListOf<ExtractorLink>()
                     runCatching {
                         loadExtractor(
@@ -832,74 +302,19 @@ class MusicBoxProvider : MainAPI() {
         return found
     }
 
-    /** the settings key that controls a given entry's own service */
-    private fun sourceName(source: String): String = when (source) {
+    private fun sourceKey(source: String): String = when (source) {
         "dz" -> "deezer"
         "qb" -> "qobuz"
         "td" -> "tidal"
         "sc" -> "soundcloud"
         "am" -> "apple"
+        "sp" -> "spotify"
         else -> ""
     }
 
-    private suspend fun emit(
-        callback: (ExtractorLink) -> Unit,
-        label: String,
-        url: String,
-        referer: String
-    ) {
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = "$name · $label",
-                url = url,
-                type = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
-                this.referer = referer
-                this.quality = Qualities.Unknown.value
-                this.headers = mapOf("User-Agent" to ua(), "Accept" to "*/*")
-            }
-        )
-    }
-
-    private suspend fun youtubeSearch(query: String): String? {
-        if (query.isBlank()) return null
-        val body = JSONObject().apply {
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB_REMIX")
-                    put("clientVersion", ytClientVersion)
-                    put("hl", "en")
-                    put("gl", "US")
-                })
-            })
-            put("query", query)
-        }
-
-        val res = runCatching {
-            app.post(
-                "https://music.youtube.com/youtubei/v1/search?key=$ytApiKey&prettyPrint=false",
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "User-Agent" to ua(),
-                    "Origin" to "https://music.youtube.com",
-                    "Referer" to "https://music.youtube.com/"
-                ),
-                requestBody = body.toString().toRequestBody("application/json".toMediaType()),
-                timeout = 30L
-            ).text
-        }.getOrNull() ?: return null
-
-        return Regex(""""videoId"\s*:\s*"([A-Za-z0-9_-]{11})"""")
-            .find(res)?.groupValues?.get(1)
-    }
-
     companion object {
-        /** set by the plugin so the settings dialog's choices can be read */
+        /** set by the plugin, for the settings and the challenge cookies */
         @Volatile
         var appContext: android.content.Context? = null
-
-        const val UA = "Mozilla/5.0 (Linux; Android 16; SM-S911B Build/BP4A.251205.006) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.47 Mobile Safari/537.36"
     }
 }

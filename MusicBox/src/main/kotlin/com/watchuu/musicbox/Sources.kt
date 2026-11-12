@@ -531,5 +531,11 @@ object YouTubeMusicApi {
     }
 }
 
-// Utility extension
+// Utility extensions
 private fun String.encodeUrl(): String = java.net.URLEncoder.encode(this, "UTF-8")
+private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.RequestBody {
+    return okhttp3.RequestBody.create(mediaType, this)
+}
+private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
+    return try { okhttp3.MediaType.get(this) } catch (_: Exception) { null }
+}

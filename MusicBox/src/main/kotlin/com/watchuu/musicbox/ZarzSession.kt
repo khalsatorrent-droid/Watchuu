@@ -631,7 +631,7 @@ private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.Request
 
 private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
     return try {
-        okhttp3.MediaType.parse(this)
+        okhttp3.MediaType.get(this)
     } catch (_: Exception) {
         null
     }

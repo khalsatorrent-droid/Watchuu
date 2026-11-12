@@ -276,3 +276,11 @@ object SpotifyClient {
         return SpotifyArtist(id = id, name = name, imageUrl = imageUrl)
     }
 }
+
+// Utility extensions
+private fun String.toRequestBody(mediaType: okhttp3.MediaType?): okhttp3.RequestBody {
+    return okhttp3.RequestBody.create(mediaType, this)
+}
+private fun String.toMediaTypeOrNull(): okhttp3.MediaType? {
+    return try { okhttp3.MediaType.get(this) } catch (_: Exception) { null }
+}

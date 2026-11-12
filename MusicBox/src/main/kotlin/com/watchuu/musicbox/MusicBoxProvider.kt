@@ -91,10 +91,24 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private suspend fun getDeezerChart(): List<SearchResponse> {
+        // Deezer is blocked outright in some countries, so a chart from it alone can come back
+        // empty and leave the row blank. Apple's feed is reachable almost everywhere and needs no
+        // token, so it is the backstop for every row here.
         return try {
-            DeezerApi.getChart(20).map { it.toSearchResponse() }
+            val deezer = DeezerApi.getChart(20).map { it.toSearchResponse() }
+            if (deezer.isNotEmpty()) deezer else appleRow("top hits")
         } catch (e: Exception) {
             Log.w(TAG, "Deezer chart failed: ${e.message}")
+            appleRow("top hits")
+        }
+    }
+
+    /** apple's public catalogue, used wherever another source has nothing to show */
+    private suspend fun appleRow(query: String): List<SearchResponse> {
+        return try {
+            AppleMusicApi.search(query, 20).map { it.toSearchResponse() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Apple fallback failed for '$query': ${e.message}")
             emptyList()
         }
     }
@@ -105,21 +119,23 @@ class MusicBoxProvider : MainAPI() {
             tracks.map { it.toSearchResponse() }
         } catch (e: Exception) {
             Log.w(TAG, "Spotify trending failed: ${e.message}")
-            // Fallback to Deezer
+            // Deezer next, then Apple - two fallbacks, because either one can be unreachable
             try {
-                DeezerApi.search("top hits 2024", 20).map { it.toSearchResponse() }
+                val deezer = DeezerApi.search("top hits", 20).map { it.toSearchResponse() }
+                if (deezer.isNotEmpty()) deezer else appleRow("top hits")
             } catch (_: Exception) {
-                emptyList()
+                appleRow("top hits")
             }
         }
     }
 
     private suspend fun getDeezerNew(): List<SearchResponse> {
         return try {
-            DeezerApi.search("new releases", 20).map { it.toSearchResponse() }
+            val deezer = DeezerApi.search("new releases", 20).map { it.toSearchResponse() }
+            if (deezer.isNotEmpty()) deezer else appleRow("new music releases")
         } catch (e: Exception) {
             Log.w(TAG, "Deezer new releases failed: ${e.message}")
-            emptyList()
+            appleRow("new music releases")
         }
     }
 
@@ -127,12 +143,16 @@ class MusicBoxProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val catalogue = getCatalogue()
-        return when (catalogue) {
+        val primary = when (catalogue) {
             "spotify" -> searchSpotify(query)
             "deezer" -> searchDeezer(query)
             "jiosaavn" -> searchJioSaavn(query)
             else -> searchSpotify(query)
         }
+        // a chosen catalogue that is unreachable must not mean an empty screen: Apple's catalogue
+        // needs no token and answers nearly everywhere, so it stands in when the pick returns
+        // nothing at all
+        return primary.ifEmpty { appleRow(query) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)

@@ -218,7 +218,7 @@ object MusicBoxSettings {
         // ========== ZARZ sessions (one per provider) ==========
         root.addView(header("Mornye Verification (api.zarz.moe)"))
         root.addView(TextView(act).apply {
-            text = "Each ZARZ provider (Deezer, Tidal, Qobuz) needs its own one-time verification. Tap Verify and finish the check in the window that opens."
+            text = "Each ZARZ provider (Deezer, Tidal, Qobuz, Amazon) needs its own one-time verification. Tap Verify and finish the check in the window that opens."
             textSize = 12f
         })
         for (p in ZarzHub.Provider.values()) {

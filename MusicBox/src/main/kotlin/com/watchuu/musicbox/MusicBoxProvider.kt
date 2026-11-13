@@ -625,6 +625,11 @@ class MusicBoxProvider : MainAPI() {
             tryJamendo("", searchQuery, emitLink)
         }
 
+        // 9. Amazon Music (ZARZ signed session; CENC audio is decrypted locally)
+        if (ZarzHub.session(ZarzHub.Provider.AMAZON).record.usable() || emittedCount == 0) {
+            tryAmazonMusic(title, artist, emitLink)
+        }
+
         // 10. YouTube Music (CharlesPikachu/musicdl: Y2Mate, CnvMP3, YTMP3, MP3Juice, CloudStream Extractor, Cobalt)
         if (source != "ytmusic" && emittedCount < 3) {
             tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink)
@@ -991,6 +996,35 @@ class MusicBoxProvider : MainAPI() {
             return added
         } catch (e: Exception) {
             Log.d(TAG, "Jamendo failed: ${e.message}")
+        }
+        return false
+    }
+
+    private suspend fun tryAmazonMusic(
+        title: String,
+        artist: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        if (!MusicBoxSettings.enableAmazonDownload || title.isBlank()) return false
+        try {
+            val asin = AmazonApi.findAsin(title, artist) ?: return false
+            val d = ZarzHub.amazon(asin, "flac")
+            val audio = d.optJSONObject("audio") ?: return false
+            val url = audio.optString("url")
+            if (url.isBlank()) return false
+            val key = audio.optString("key").trim()
+            val playUrl = if (key.isNotBlank()) AmazonProxy.prepare(url, key) else url
+            val codec = audio.optString("codec").substringBefore(".").lowercase().ifBlank { "flac" }
+            callback.invoke(
+                newExtractorLink("MusicBox", "Amazon Music · ${codec.uppercase()}", playUrl, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return true
+        } catch (e: ZarzSession.VerificationRequired) {
+            needsVerify(ZarzHub.Provider.AMAZON)
+        } catch (e: Exception) {
+            Log.d(TAG, "Amazon Music failed: ${e.message}")
         }
         return false
     }

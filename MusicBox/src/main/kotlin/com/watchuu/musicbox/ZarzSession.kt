@@ -282,6 +282,7 @@ object ZarzHub {
         DEEZER("dzr", "deezer@1.3.5", "Deezer"),
         TIDAL("tid", "tidal-web@1.2.5", "Tidal"),
         QOBUZ("qbz", "qobuz-web@1.2.21", "Qobuz"),
+        AMAZON("amazeamazeamaze", "amzn@2.3.12", "Amazon"),
     }
 
     private const val PREFS = "musicbox_prefs"
@@ -346,6 +347,14 @@ object ZarzHub {
             JSONObject().put("quality", quality).put("upload_to_r2", false).put("id", trackId).put("type", "track").put("url", url),
         )
         return (r as? JSONObject) ?: JSONObject()
+    }
+
+    /** /dl/amazeamazeamaze; ticket resource is the ASIN. Returns audio{url,key,codec,...} (CENC-encrypted). */
+    suspend fun amazon(asin: String, codec: String = "flac"): JSONObject {
+        val r = session(Provider.AMAZON).download(
+            "amazeamazeamaze", asin, "/dl/amazeamazeamaze", JSONObject().put("asin", asin).put("codec", codec),
+        )
+        return (r as? JSONObject) ?: (r as org.json.JSONArray).optJSONObject(0) ?: JSONObject()
     }
 
     /** Cobalt lives on /v1 and is not signed. */

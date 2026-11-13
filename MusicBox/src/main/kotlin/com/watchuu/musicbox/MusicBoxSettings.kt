@@ -264,20 +264,16 @@ object MusicBoxSettings {
         }
         root.addView(sessionStatus)
 
-        val session = ZarzSession()
-        val stored = ensurePrefs()?.getString("musicbox_zarz_session", null)
-        session.loadState(stored)
+        ensurePrefs()
+        ZarzSessionManager.versions.forEach { ZarzSessionManager.loadFromPrefs(it, act) }
 
-        sessionStatus.text = if (session.record.isUsable()) {
-            "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
-        } else if (session.record.sessionId.isNotBlank()) {
-            "✗ Session expired"
-        } else {
-            "○ No session (musicdl providers work without ZARZ; bootstrap optional)"
-        }
+        fun statusLines(): String =
+            ZarzSessionManager.versions.joinToString("\n") { ZarzSessionManager.statusText(it) }
+
+        sessionStatus.text = statusLines()
 
         val btnBootstrap = Button(act).apply {
-            text = "Bootstrap ZARZ Session"
+            text = "Bootstrap a provider session"
             isAllCaps = false
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -285,43 +281,74 @@ object MusicBoxSettings {
             )
         }
         btnBootstrap.setOnClickListener {
-            scope.launch {
-                try {
-                    val url = session.bootstrap()
-                    ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+            // Each provider has its own session: the server scopes one to its app_version, so a
+            // deezer session cannot sign a tidal call and comes back 403.
+            val labels = ZarzSessionManager.versions
+                .map { "${ZarzSessionManager.label(it)}  (${it})" }
+                .toTypedArray()
 
-                    withContext(Dispatchers.Main) {
-                        if (url.isBlank()) {
-                            sessionStatus.text = "✓ Session obtained directly!"
-                            Toast.makeText(act, "Session active!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            sessionStatus.text = "⚠ Verification required"
-                            MusicBoxBrowser.openVerification(act, url) { grant ->
-                                scope.launch {
-                                    try {
-                                        session.exchange(grant)
-                                        ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
-                                        withContext(Dispatchers.Main) {
-                                            sessionStatus.text = "✓ Session active!"
-                                            Toast.makeText(act, "Verification complete!", Toast.LENGTH_SHORT).show()
-                                        }
-                                    } catch (e: Exception) {
-                                        withContext(Dispatchers.Main) {
-                                            sessionStatus.text = "✗ Exchange failed: ${e.message}"
-                                            Toast.makeText(act, "Exchange failed: ${e.message}", Toast.LENGTH_LONG).show()
+            AlertDialog.Builder(act)
+                .setTitle("Bootstrap which provider?")
+                .setItems(labels) { dialog, which ->
+                    dialog.dismiss()
+                    val version = ZarzSessionManager.versions[which]
+                    val session = ZarzSessionManager.session(version)
+
+                    scope.launch {
+                        try {
+                            val url = session.bootstrap()
+                            ZarzSessionManager.persist(version, act)
+
+                            withContext(Dispatchers.Main) {
+                                if (url.isBlank()) {
+                                    sessionStatus.text = statusLines()
+                                    Toast.makeText(
+                                        act,
+                                        "${ZarzSessionManager.label(version)} session active",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    sessionStatus.text = "⚠ Verification required for " +
+                                        ZarzSessionManager.label(version)
+                                    MusicBoxBrowser.openVerification(act, url) { grant ->
+                                        scope.launch {
+                                            try {
+                                                session.exchange(grant)
+                                                ZarzSessionManager.persist(version, act)
+                                                withContext(Dispatchers.Main) {
+                                                    sessionStatus.text = statusLines()
+                                                    Toast.makeText(
+                                                        act,
+                                                        "${ZarzSessionManager.label(version)} verified",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            } catch (e: Exception) {
+                                                withContext(Dispatchers.Main) {
+                                                    sessionStatus.text =
+                                                        "✗ ${ZarzSessionManager.label(version)} exchange failed: ${e.message}"
+                                                    Toast.makeText(
+                                                        act,
+                                                        "Exchange failed: ${e.message}",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                sessionStatus.text =
+                                    "✗ ${ZarzSessionManager.label(version)} bootstrap failed: ${e.message}"
+                                Toast.makeText(act, "Bootstrap failed: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        sessionStatus.text = "✗ Bootstrap failed: ${e.message}"
-                        Toast.makeText(act, "Bootstrap failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
                 }
-            }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
         root.addView(btnBootstrap)
 
@@ -334,9 +361,11 @@ object MusicBoxSettings {
             )
         }
         btnClear.setOnClickListener {
-            session.record.clear()
-            ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
-            sessionStatus.text = "○ Session cleared"
+            ZarzSessionManager.versions.forEach {
+                ZarzSessionManager.session(it).record.clear()
+                ZarzSessionManager.persist(it, act)
+            }
+            sessionStatus.text = statusLines()
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)

@@ -1,139 +1,132 @@
 package com.watchuu.musicbox
 
-import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
 import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.*
 import android.widget.LinearLayout
-import android.widget.Toast
-import com.lagradost.cloudstream3.CommonActivity
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 
 /**
- * In-app browser for the Mornye / api.zarz.moe verification challenge.
+ * WebView-based browser for ZARZ verification challenges.
  *
- * The challenge page finishes by navigating to `mornye://session-grant?...&state=..&grant=..`
- * (the callback the host app registers). A WebView cannot open that scheme, so we intercept it,
- * check `state`, and hand the grant to [ZarzSession.exchange].
+ * When a ZARZ bootstrap returns a challenge URL, the user must complete a
+ * Turnstile/hCaptcha/etc. verification in a browser. After verification,
+ * the page redirects to a callback URL containing a `grant` token. This
+ * class intercepts that redirect and returns the grant to the caller.
  */
 object MusicBoxBrowser {
-    private const val UA =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    private val main = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lastPrompt = HashMap<ZarzHub.Provider, Long>()
+    private const val GRANT_CALLBACK_SCHEME = "mornye"
+    private const val GRANT_PARAM = "grant"
 
-    fun toast(msg: String) = main.post {
-        (CommonActivity.activity as? Activity)?.let { Toast.makeText(it, msg, Toast.LENGTH_LONG).show() }
+    /**
+     * Open a WebView dialog to complete the ZARZ verification challenge.
+     *
+     * @param activity  The current activity context.
+     * @param url       The verification URL from bootstrap().
+     * @param onGrant   Called with the grant token once verification succeeds.
+     */
+    fun openVerification(
+        activity: Activity,
+        url: String,
+        onGrant: (String) -> Unit,
+    ) {
+        val webView = WebView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+            }
+        }
+
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle("Verification Required")
+            .setView(webView)
+            .setNegativeButton("Cancel", null)
+            .setCancelable(true)
+            .create()
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest,
+            ): Boolean {
+                val uri = request.url ?: return false
+                return handleUrl(uri, dialog, onGrant)
+            }
+
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+                return handleUrl(Uri.parse(url), dialog, onGrant)
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // Also check the URL on page navigation start
+                if (url != null) {
+                    val uri = Uri.parse(url)
+                    handleUrl(uri, dialog, onGrant)
+                }
+            }
+        }
+
+        dialog.setOnDismissListener {
+            webView.destroy()
+        }
+
+        dialog.show()
+        webView.loadUrl(url)
     }
 
     /**
-     * Make sure [p] has a usable session; when the gateway wants verification, open the challenge.
-     * [onDone] is called on the main thread with a human readable result.
+     * Check if the URL is a grant callback and extract the token.
+     * Returns true if the URL was intercepted.
      */
-    fun verify(p: ZarzHub.Provider, activity: Activity? = null, onDone: (String) -> Unit = {}) {
-        scope.launch {
-            val session = ZarzHub.session(p)
-            val msg = try {
-                when (val b = session.bootstrap()) {
-                    ZarzSession.Bootstrap.Ready -> "${p.label}: verified"
-                    is ZarzSession.Bootstrap.Challenge -> {
-                        val act = activity ?: CommonActivity.activity as? Activity
-                        if (act == null) "${p.label}: open MusicBox settings to verify"
-                        else {
-                            main.post { openChallenge(act, p, b) { onDone(it) } }
-                            return@launch
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                "${p.label}: ${e.message}"
+    private fun handleUrl(
+        uri: Uri,
+        dialog: AlertDialog,
+        onGrant: (String) -> Unit,
+    ): Boolean {
+        // Check for custom scheme callback (mornye://...)
+        if (uri.scheme?.lowercase() == GRANT_CALLBACK_SCHEME) {
+            val grant = uri.getQueryParameter(GRANT_PARAM)
+                ?: uri.lastPathSegment
+                ?: ""
+            if (grant.isNotBlank()) {
+                dialog.dismiss()
+                onGrant(grant)
+                return true
             }
-            main.post { onDone(msg) }
         }
-    }
 
-    /** Called from playback when a provider reports VERIFY_REQUIRED (throttled). */
-    fun promptFromPlayback(p: ZarzHub.Provider) {
-        val now = System.currentTimeMillis()
-        synchronized(lastPrompt) {
-            if (now - (lastPrompt[p] ?: 0L) < 90_000) return
-            lastPrompt[p] = now
-        }
-        toast("MusicBox: ${p.label} needs verification")
-        verify(p) { toast(it) }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun openChallenge(
-        activity: Activity,
-        p: ZarzHub.Provider,
-        challenge: ZarzSession.Bootstrap.Challenge,
-        onDone: (String) -> Unit,
-    ) {
-        val web = WebView(activity).apply {
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.javaScriptCanOpenWindowsAutomatically = true
-            settings.userAgentString = UA
-            CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-        }
-        var finished = false
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("Verify ${p.label} (api.zarz.moe)")
-            .setView(web)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        fun complete(grant: String) {
-            if (finished) return
-            finished = true
+        // Check for grant parameter in any URL
+        val grant = uri.getQueryParameter(GRANT_PARAM)
+        if (!grant.isNullOrBlank()) {
             dialog.dismiss()
-            scope.launch {
-                val msg = try {
-                    ZarzHub.session(p).exchange(grant)
-                    "${p.label}: verification complete"
-                } catch (e: Exception) {
-                    "${p.label}: ${e.message}"
-                }
-                main.post { onDone(msg) }
-            }
-        }
-
-        fun intercept(uri: Uri): Boolean {
-            if (uri.scheme?.lowercase() != "mornye") return false
-            val state = uri.getQueryParameter("state").orEmpty()
-            if (state.isNotEmpty() && state != challenge.state) return true // stale callback, ignore
-            val grant = uri.getQueryParameter("grant") ?: uri.getQueryParameter("code")
-            if (!grant.isNullOrBlank()) complete(grant)
-            else {
-                val err = uri.getQueryParameter("error") ?: "no grant in callback"
-                if (!finished) { finished = true; dialog.dismiss(); main.post { onDone("${p.label}: $err") } }
-            }
+            onGrant(grant)
             return true
         }
 
-        web.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = intercept(request.url)
+        // Check for /session/exchange or /callback paths with grant
+        val path = uri.path?.lowercase() ?: ""
+        if (path.contains("callback") || path.contains("exchange") || path.contains("grant")) {
+            val grantFromPath = uri.getQueryParameter(GRANT_PARAM)
+                ?: uri.getQueryParameter("code")
+                ?: uri.getQueryParameter("token")
+            if (!grantFromPath.isNullOrBlank()) {
+                dialog.dismiss()
+                onGrant(grantFromPath)
+                return true
+            }
         }
-        dialog.setOnDismissListener {
-            if (!finished) { finished = true; main.post { onDone("${p.label}: verification cancelled") } }
-            web.destroy()
-        }
-        dialog.show()
-        web.loadUrl(challenge.url)
+
+        return false
     }
 }

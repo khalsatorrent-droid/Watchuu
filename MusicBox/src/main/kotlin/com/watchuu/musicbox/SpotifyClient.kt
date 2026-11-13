@@ -40,7 +40,7 @@ object SpotifyClient {
     private const val AUTH_URL = "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"
     private const val API_TOKEN_URL = "https://open.spotify.com/api/token"
     private const val CLIENT_TOKEN_URL = "https://clienttoken.spotify.com/v1/clienttoken"
-    private const val PATHFINDER_URL = "$BASE_URL/pathfinder/v2/query"
+    private const val PATHFINDER_URL = "$BASE_URL/pathfinder/v1/query"
 
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
@@ -103,107 +103,122 @@ object SpotifyClient {
 
     // ========== TOTP implementation ==========
 
-    /**
-     * The web player's TOTP key is NOT the raw secret bytes: each byte is XOR-ed with ((i % 33) + 9),
-     * the results are joined as decimal text, and that ASCII text is the HMAC-SHA1 key.
-     */
     private fun generateTOTP(timestampMs: Long = System.currentTimeMillis()): String {
-        val joined = TOTP_SECRET.indices.joinToString("") { (TOTP_SECRET[it] xor ((it % 33) + 9)).toString() }
-        val key = joined.toByteArray(Charsets.US_ASCII)
-        var t = timestampMs / 30000
+        val timeStep = timestampMs / 30000
         val timeBytes = ByteArray(8)
+        var t = timeStep
         for (i in 7 downTo 0) {
             timeBytes[i] = (t and 0xFF).toByte()
             t = t shr 8
         }
+
+        val secretBytes = ByteArray(TOTP_SECRET.size) { TOTP_SECRET[it].toByte() }
         val mac = Mac.getInstance("HmacSHA1")
-        mac.init(SecretKeySpec(key, "HmacSHA1"))
+        mac.init(SecretKeySpec(secretBytes, "HmacSHA1"))
         val hash = mac.doFinal(timeBytes)
+
         val offset = hash[hash.size - 1].toInt() and 0x0F
         val code = ((hash[offset].toInt() and 0x7F) shl 24) or
                 ((hash[offset + 1].toInt() and 0xFF) shl 16) or
                 ((hash[offset + 2].toInt() and 0xFF) shl 8) or
                 (hash[offset + 3].toInt() and 0xFF)
+
         return String.format("%06d", code % 1000000)
     }
 
     // ========== Auth ==========
 
-    private val spCookies = java.util.concurrent.ConcurrentHashMap<String, String>()
-    @Volatile private var spClientVersion = ""
-    @Volatile private var spDeviceId = ""
-    @Volatile private var spClientId = ""
-    @Volatile private var clientExpiry = 0L
-    @Volatile var lastError: String = ""
-        private set
-
-    private fun cookieHeader() = spCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-
-    private fun absorbCookies(resp: com.lagradost.nicehttp.NiceResponse) {
-        for (sc in resp.headers.values("Set-Cookie")) {
-            val m = Regex("^([^=]+)=([^;]*)").find(sc) ?: continue
-            spCookies[m.groupValues[1].trim()] = m.groupValues[2].trim()
-        }
-        spCookies["sp_t"]?.let { spDeviceId = it }
-    }
-
     private suspend fun ensureTokens(): Boolean {
-        val now = System.currentTimeMillis()
-        if (accessToken.isNotBlank() && now < tokenExpiry - 60_000 && clientToken.isNotBlank() && now < clientExpiry) return true
-        accessToken = ""; clientToken = ""
-        try {
-            // 1. open.spotify.com -> sp_t cookie + clientVersion from appServerConfig
-            if (spClientVersion.isBlank() || spDeviceId.isBlank()) {
-                val page = app.get("https://open.spotify.com", headers = mapOf("User-Agent" to UA), timeout = 15L)
-                absorbCookies(page)
-                val m = Regex("""<script id="appServerConfig" type="text/plain">([^<]+)</script>""").find(page.text)
-                if (m != null) {
-                    spClientVersion = JSONObject(String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT), Charsets.UTF_8))
-                        .optString("clientVersion", "")
-                }
-                if (spDeviceId.isBlank()) spDeviceId = spCookies["sp_t"] ?: java.util.UUID.randomUUID().toString().replace("-", "")
+        if (accessToken.isNotBlank() && System.currentTimeMillis() < tokenExpiry) return true
+
+        val baseHeaders = mapOf(
+            "User-Agent" to UA,
+            "Accept" to "application/json",
+            "Referer" to "https://open.spotify.com/",
+            "Origin" to "https://open.spotify.com",
+        )
+
+        // 1. Try /api/token with TOTP
+        runCatching {
+            val now = System.currentTimeMillis()
+            val totp = generateTOTP(now)
+            val url = "$API_TOKEN_URL?reason=init&productType=web-player&totp=$totp&totpServer=$totp&totpVer=$TOTP_VERSION"
+            val resp = app.get(url, headers = baseHeaders, timeout = 12L)
+            val json = JSONObject(resp.text)
+            val tok = json.optString("accessToken", "")
+            if (tok.isNotBlank()) {
+                accessToken = tok
+                tokenExpiry = json.optLong("accessTokenExpirationTimestampMs", now + 1800_000L)
             }
-            if (spClientVersion.isBlank()) { lastError = "no clientVersion on open.spotify.com"; return false }
-
-            // 2. anonymous access token (TOTP)
-            val totp = generateTOTP()
-            val tokResp = app.get(
-                "$API_TOKEN_URL?reason=init&productType=web-player&totp=$totp&totpVer=$TOTP_VERSION&totpServer=$totp",
-                headers = mapOf("User-Agent" to UA, "Content-Type" to "application/json;charset=UTF-8", "Cookie" to cookieHeader()),
-                timeout = 15L,
-            )
-            absorbCookies(tokResp)
-            if (tokResp.code != 200) { lastError = "/api/token HTTP ${tokResp.code}"; return false }
-            val tj = JSONObject(tokResp.text)
-            accessToken = tj.optString("accessToken", "")
-            spClientId = tj.optString("clientId", "")
-            tokenExpiry = tj.optLong("accessTokenExpirationTimestampMs", now + 1800_000L)
-            if (accessToken.isBlank() || spClientId.isBlank()) { lastError = "token response incomplete"; return false }
-
-            // 3. client token
-            val payload = JSONObject().put("client_data", JSONObject()
-                .put("client_version", spClientVersion).put("client_id", spClientId)
-                .put("js_sdk_data", JSONObject().put("device_brand", "unknown").put("device_model", "unknown")
-                    .put("os", "windows").put("os_version", "NT 10.0").put("device_id", spDeviceId).put("device_type", "computer")))
-            val ct = app.post(
-                CLIENT_TOKEN_URL,
-                headers = mapOf("Authority" to "clienttoken.spotify.com", "Content-Type" to "application/json",
-                    "Accept" to "application/json", "User-Agent" to UA),
-                requestBody = payload.toString().toRequestBody("application/json".toMediaType()),
-                timeout = 15L,
-            )
-            val cj = JSONObject(ct.text)
-            val granted = cj.optJSONObject("granted_token")
-            if (granted == null) { lastError = "clienttoken: ${cj.optString("response_type")} (HTTP ${ct.code})"; accessToken = ""; return false }
-            clientToken = granted.optString("token", "")
-            clientExpiry = now + granted.optLong("expires_after_seconds", 1800) * 1000
-            lastError = ""
-        } catch (e: Exception) {
-            lastError = e.message ?: e.javaClass.simpleName
-            accessToken = ""
-            return false
         }
-        return accessToken.isNotBlank() && clientToken.isNotBlank()
+
+        // 2. Try legacy /get_access_token
+        if (accessToken.isBlank()) {
+            runCatching {
+                val resp = app.get(AUTH_URL, headers = baseHeaders, timeout = 12L)
+                val json = JSONObject(resp.text)
+                val tok = json.optString("accessToken", "")
+                if (tok.isNotBlank()) {
+                    accessToken = tok
+                    tokenExpiry = json.optLong("accessTokenExpirationTimestampMs", System.currentTimeMillis() + 1800_000L)
+                }
+            }
+        }
+
+        // 3. Scrape session script tag from open.spotify.com
+        if (accessToken.isBlank()) {
+            runCatching {
+                val html = app.get("https://open.spotify.com/", headers = mapOf("User-Agent" to UA), timeout = 12L).text
+                val match = Regex(""""accessToken"\s*:\s*"([^"]+)"""").find(html)
+                if (match != null) {
+                    accessToken = match.groupValues[1]
+                    tokenExpiry = System.currentTimeMillis() + 1800_000L
+                }
+            }
+        }
+
+        if (accessToken.isBlank()) return false
+
+        // Attempt to obtain clientToken (optional for /v1/ endpoints, used for pathfinder)
+        if (clientToken.isBlank()) {
+            runCatching {
+                val totp = generateTOTP()
+                val clientTokenPayload = JSONObject().apply {
+                    put("client_data", JSONObject().apply {
+                        put("client_version", "1.2.52.442.g0f1fed8b")
+                        put("client_id", "d8a5ed958d274c2e8ee717e6a4b0971d")
+                        put("js_sdk_data", JSONObject().apply {
+                            put("device_brand", "unknown")
+                            put("device_model", "unknown")
+                            put("os", "windows")
+                            put("os_version", "NT 10.0")
+                            put("device_id", "")
+                            put("device_type", "computer")
+                        })
+                    })
+                    put("totp", JSONObject().apply {
+                        put("timestamp", System.currentTimeMillis() / 30000)
+                        put("totp_code", totp)
+                        put("totp_version", TOTP_VERSION)
+                    })
+                }
+
+                val ctResp = app.post(
+                    CLIENT_TOKEN_URL,
+                    headers = mapOf(
+                        "Content-Type" to "application/json",
+                        "Accept" to "application/json",
+                        "User-Agent" to UA,
+                    ),
+                    requestBody = clientTokenPayload.toString().toRequestBody("application/json".toMediaType()),
+                    timeout = 10L
+                )
+                val ctJson = JSONObject(ctResp.text)
+                clientToken = ctJson.optJSONObject("granted_token")?.optString("token", "") ?: ""
+            }
+        }
+
+        return accessToken.isNotBlank()
     }
 
     private fun authHeaders(): Map<String, String> {
@@ -215,22 +230,25 @@ object SpotifyClient {
             "Referer" to "https://open.spotify.com/",
             "App-Platform" to "WebPlayer",
         )
-        if (clientToken.isNotBlank()) map["Client-Token"] = clientToken
-        if (spClientVersion.isNotBlank()) map["Spotify-App-Version"] = spClientVersion
+        if (clientToken.isNotBlank()) {
+            map["Client-Token"] = clientToken
+        }
         return map
     }
 
-    /** Pathfinder v2 persisted query (POST). */
     private suspend fun pathfinderQuery(operationName: String, hash: String, variables: JSONObject): JSONObject {
-        val body = JSONObject().put("variables", variables).put("operationName", operationName)
-            .put("extensions", JSONObject().put("persistedQuery", JSONObject().put("version", 1).put("sha256Hash", hash)))
-        val resp = app.post(
-            PATHFINDER_URL,
-            headers = authHeaders() + ("Content-Type" to "application/json"),
-            requestBody = body.toString().toRequestBody("application/json".toMediaType()),
-            timeout = 15L,
-        )
-        if (resp.code == 401) { accessToken = ""; lastError = "pathfinder 401" }
+        val url = "$PATHFINDER_URL?operationName=$operationName" +
+                "&variables=${URLEncoder.encode(variables.toString(), "UTF-8")}" +
+                "&extensions=${URLEncoder.encode(
+                    JSONObject().apply {
+                        put("persistedQuery", JSONObject().apply {
+                            put("version", 1)
+                            put("sha256Hash", hash)
+                        })
+                    }.toString(), "UTF-8"
+                )}"
+
+        val resp = app.get(url, headers = authHeaders(), timeout = 15L)
         return JSONObject(resp.text)
     }
 
@@ -274,10 +292,9 @@ object SpotifyClient {
                         put("offset", 0)
                         put("limit", limit)
                         put("numberOfTopResults", 5)
-                        put("includeAudiobooks", true)
-                        put("includePreReleases", true)
-                        put("includeAuthors", false)
-                        put("includeArtistHasConcertsField", false)
+                        put("includeAudiobooks", false)
+                        put("includePreReleases", false)
+                        put("includeLocalConcerts", false)
                     }
                     val result = pathfinderQuery("searchDesktop", SEARCH_HASH, variables)
                     val data = result.optJSONObject("data")?.optJSONObject("searchV2")
@@ -290,10 +307,9 @@ object SpotifyClient {
                                 parsePathfinderTrack(item)?.let(tracks::add)
                             }
                         }
-                        (data.optJSONObject("albumsV2") ?: data.optJSONObject("albums"))?.optJSONArray("items")?.let { items ->
+                        data.optJSONObject("albums")?.optJSONArray("items")?.let { items ->
                             for (i in 0 until items.length()) {
-                                val item = items.optJSONObject(i)?.optJSONObject("data")
-                                    ?: items.optJSONObject(i)?.optJSONObject("item")?.optJSONObject("data") ?: continue
+                                val item = items.optJSONObject(i)?.optJSONObject("data") ?: continue
                                 parsePathfinderAlbum(item)?.let(albums::add)
                             }
                         }

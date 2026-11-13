@@ -144,7 +144,8 @@ object MusicBoxSettings {
         catalogueOptions.forEachIndexed { index, (value, label) ->
             val rb = RadioButton(act).apply {
                 text = label
-                id = index
+                // +1, because RadioGroup reads id 0 as "nothing selected"
+                id = index + 1
                 isChecked = value == currentCatalogue
             }
             catalogueGroup.addView(rb)
@@ -215,67 +216,91 @@ object MusicBoxSettings {
         }
         root.addView(cbYouTube)
 
-        // ========== ZARZ sessions (one per provider) ==========
-        root.addView(header("Mornye Verification (api.zarz.moe)"))
-        root.addView(TextView(act).apply {
-            text = "Each ZARZ provider (Deezer, Tidal, Qobuz, Amazon) needs its own one-time verification. Tap Verify and finish the check in the window that opens."
-            textSize = 12f
-        })
-        for (p in ZarzHub.Provider.values()) {
-            val status = TextView(act).apply { textSize = 13f; setPadding(0, dp(act, 6), 0, 0) }
-            fun refresh() { status.text = "${p.label}: ${ZarzHub.status(p)}" }
-            refresh()
-            root.addView(status)
-            root.addView(Button(act).apply {
-                text = "Verify ${p.label}"
-                isAllCaps = false
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                setOnClickListener {
-                    MusicBoxBrowser.verify(p, act) { msg ->
-                        status.text = msg
-                        Toast.makeText(act, msg, Toast.LENGTH_LONG).show()
-                        refresh()
-                    }
-                }
-            })
-        }
-        root.addView(Button(act).apply {
-            text = "Clear all ZARZ sessions"
-            isAllCaps = false
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setOnClickListener { ZarzHub.clearAll(); Toast.makeText(act, "Sessions cleared", Toast.LENGTH_SHORT).show() }
-        })
+        // ========== ZARZ Session ==========
+        root.addView(header("ZARZ Session (Optional Bonus Resolver)"))
 
-        // ========== Diagnostics ==========
-        root.addView(header("Diagnostics"))
-        val diag = TextView(act).apply { textSize = 12f }
-        root.addView(Button(act).apply {
-            text = "Test connections"
+        val sessionStatus = TextView(act).apply {
+            textSize = 13f
+            setPadding(0, dp(act, 4), 0, dp(act, 4))
+        }
+        root.addView(sessionStatus)
+
+        val session = ZarzSession()
+        val stored = ensurePrefs()?.getString("musicbox_zarz_session", null)
+        session.loadState(stored)
+
+        sessionStatus.text = if (session.record.isUsable()) {
+            "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
+        } else if (session.record.sessionId.isNotBlank()) {
+            "✗ Session expired"
+        } else {
+            "○ No session (musicdl providers work without ZARZ; bootstrap optional)"
+        }
+
+        val btnBootstrap = Button(act).apply {
+            text = "Bootstrap ZARZ Session"
             isAllCaps = false
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setOnClickListener {
-                diag.text = "Testing..."
-                scope.launch {
-                    val lines = StringBuilder()
-                    val sp = try {
-                        val (t, _, _) = SpotifyClient.search("test", 1)
-                        if (t.isNotEmpty()) "OK" else "no results (${SpotifyClient.lastError.ifBlank { "empty" }})"
-                    } catch (e: Exception) { "error: ${e.message}" }
-                    lines.append("Spotify: ").append(sp).append('\n')
-                    for (p in ZarzHub.Provider.values()) {
-                        val r = try {
-                            when (ZarzHub.session(p).bootstrap()) {
-                                ZarzSession.Bootstrap.Ready -> "session OK"
-                                is ZarzSession.Bootstrap.Challenge -> "needs verification"
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        btnBootstrap.setOnClickListener {
+            scope.launch {
+                try {
+                    val url = session.bootstrap()
+                    ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+
+                    withContext(Dispatchers.Main) {
+                        if (url.isBlank()) {
+                            sessionStatus.text = "✓ Session obtained directly!"
+                            Toast.makeText(act, "Session active!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            sessionStatus.text = "⚠ Verification required"
+                            MusicBoxBrowser.openVerification(act, url) { grant ->
+                                scope.launch {
+                                    try {
+                                        session.exchange(grant)
+                                        ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+                                        withContext(Dispatchers.Main) {
+                                            sessionStatus.text = "✓ Session active!"
+                                            Toast.makeText(act, "Verification complete!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            sessionStatus.text = "✗ Exchange failed: ${e.message}"
+                                            Toast.makeText(act, "Exchange failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                }
                             }
-                        } catch (e: Exception) { "error: ${e.message}" }
-                        lines.append("${p.label}: $r\n")
+                        }
                     }
-                    withContext(Dispatchers.Main) { diag.text = lines.toString().trim() }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        sessionStatus.text = "✗ Bootstrap failed: ${e.message}"
+                        Toast.makeText(act, "Bootstrap failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
-        })
-        root.addView(diag)
+        }
+        root.addView(btnBootstrap)
+
+        val btnClear = Button(act).apply {
+            text = "Clear ZARZ Session"
+            isAllCaps = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        btnClear.setOnClickListener {
+            session.record.clear()
+            ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+            sessionStatus.text = "○ Session cleared"
+            Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
+        }
+        root.addView(btnClear)
 
         val scroll = ScrollView(act).apply { addView(root) }
 
@@ -283,7 +308,7 @@ object MusicBoxSettings {
             .setTitle("MusicBox Settings")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                val selectedIdx = catalogueGroup.checkedRadioButtonId
+                val selectedIdx = catalogueGroup.checkedRadioButtonId - 1
                 if (selectedIdx in catalogueOptions.indices) {
                     catalogue = catalogueOptions[selectedIdx].first
                 }

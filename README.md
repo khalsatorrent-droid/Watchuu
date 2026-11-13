@@ -8,7 +8,7 @@
 [![Cloudstream](https://img.shields.io/badge/Cloudstream-repository-blueviolet
 ![Language](https://img.shields.io/badge/Kotlin-2.4-7F52FF
 
-**24 extensions** · movies, TV, anime, short drama, music and NSFW
+**26 extensions** · movies, TV, anime, short drama and music
 
 </div>
 
@@ -34,44 +34,28 @@ Extensions update themselves from the same link — when a site changes and a mo
 
 | Extension | Site | Types | Language |
 |-----------|------|-------|----------|
-| **CineLite** | [cinelite.xyz](https://cinelite.xyz) | Movie · TV Series | 🇬🇧 EN |
-| **MovieNerds** | [movienerds.site](https://movienerds.site) | Movie · TV Series | 🇬🇧 EN |
-| **RedFlix** | [redflix.one](https://redflix.one) | Movie · TV Series · Anime | 🇬🇧 EN · 🇮🇳 HI |
-| **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN |
-| **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN |
 | **Almostott** | [almostott.aethoflix.world](https://almostott.aethoflix.world) | Movie · TV Series · Anime | 🇬🇧 EN |
-| **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | Movie · TV Series | 🇮🇳 HI |
+| **CineLite** | [cinelite.xyz](https://cinelite.xyz) | Movie · TV Series · Anime | 🇬🇧 EN |
+| **Cinesrc** | — | Movie · TV Series | 🇬🇧 EN |
+| **DesireMovies** | — | Movie · TV Series | 🇮🇳 HI |
+| **FlixVision** | — | Movie · TV Series | 🇬🇧 EN |
 | **KiligDrama** | [kiligdrama.com](https://kiligdrama.com) | Short Drama | 🇬🇧 EN |
-| **Vedu** | Vedu app sources (no Bollywood/Pikashow, YouTube or FlixCloud) | Movie · TV Series · Anime · Short Drama | 🇬🇧 EN |
+| **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | Movie · TV Series | 🇬🇧 EN |
+| **MovieNerds** | [movienerds.site](https://movienerds.site) | Movie · TV Series · Anime | 🇬🇧 EN |
+| **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN |
+| **RedFlix** | [redflix.one](https://redflix.one) | Movie · TV Series · Anime | 🇬🇧 EN |
+| **Ssrmovies** | — | Movie · TV Series | 🇮🇳 HI |
+| **Vedu** | Vedu app sources | Movie · TV Series · Anime · Short Drama | 🇬🇧 EN |
+| **Vivarium** | [vivarium.su](https://vivarium.su) | Movie · TV Series · Anime | 🇬🇧 EN |
 
 ### Music
 
 | Extension | Site | Types | Language |
 |-----------|------|-------|----------|
-| **Monochrome** | [monochrome.st](https://monochrome.st) | Music — songs, albums, artists | 🇬🇧 EN |
+| **Monochrome** | [monochrome.st](https://monochrome.st) | Music — lossless, songs/albums/artists | 🇬🇧 EN |
+| **MusicBox** | — | Music — Spotify catalogue, 6 providers | 🇬🇧 EN |
 
-### NSFW
-
-| Extension | Site | Home rows · Search |
-|-----------|------|--------------------|
-| **XXXTube** | [x-x-x.tube](https://x-x-x.tube) | Featured · Latest · Top Rated · Most Popular · search |
-| **Beeg** | [beeg.porn](https://beeg.porn) | Latest · Trending · Best · search |
-| **XFantazy** | [xfantazy.com](https://xfantazy.com) | New · Trending · Most Viewed · search |
-| **LatestPornVideo** | [latestpornvideo.com](https://latestpornvideo.com) | latest · categories · search |
-| **Pornxday** | [pornxday.com](https://pornxday.com) | latest · categories · search |
-| **FamilyPornHD** | [familypornhd.com](https://familypornhd.com) | latest · categories · search |
-| **Freeuseporn** | [freeuseporn.com](https://www.freeuseporn.com) | latest · categories · search |
-| **Taboodaddy** | [taboodaddy.com](https://taboodaddy.com) | Latest · Taboo · Brazzers · BangBros · Naughty America · Reality Kings · Mom & Son · Brother & Sister · search |
-| **Tabooporn** | [tabooporn.to](https://tabooporn.to) | Latest · Most Popular · Top Rated · Latest Updates · search |
-| **Youperv** | [youperv.com](https://youperv.com) | Latest · Anal · Big Dick · Amateur · search |
-| **Porneec** | [porneec.com](https://porneec.com) | Latest · search |
-| **Desihub** | [desihub.sh](https://desihub.sh) | Explore · Feed · search |
-| **SuperJav** | [supjav.com](https://supjav.com) | censored · uncensored · subtitled · search |
-| **Archivebate** | [archivebate.com](https://archivebate.com) | archived cam shows · search |
-
-> Home rows are paginated wherever the site allows it. A few sites build their listing through
-> JavaScript and cannot be paged from a plain request — those modules return the first page only,
-> which is why the row count above is worth reading as a list of what exists, not a promise of depth.
+> Home rows are paginated wherever the site allows it.
 
 ## 🛠 Build
 

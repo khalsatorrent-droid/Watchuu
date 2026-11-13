@@ -1,6 +1,5 @@
 package com.watchuu.musicbox
 
-import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -81,7 +80,7 @@ class MusicBoxProvider : MainAPI() {
                 zarzSession.loadState(null)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to load session: ${e.message}")
+            MusicBoxLog.w(TAG, "Failed to load session: ${e.message}")
             zarzSession.loadState(null)
         }
     }
@@ -94,7 +93,7 @@ class MusicBoxProvider : MainAPI() {
                 ?.putString(PREF_KEY_SESSION, zarzSession.saveState())
                 ?.apply()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to save session: ${e.message}")
+            MusicBoxLog.w(TAG, "Failed to save session: ${e.message}")
         }
     }
 
@@ -309,7 +308,7 @@ class MusicBoxProvider : MainAPI() {
             if (tracks.isNotEmpty()) tracks.map { it.toSearchResponse() }
             else searchAppleTracksOnly(query, limit)
         } catch (e: Exception) {
-            Log.w(TAG, "Spotify track search failed: ${e.message}")
+            MusicBoxLog.w(TAG, "Spotify track search failed: ${e.message}")
             searchAppleTracksOnly(query, limit)
         }
     }
@@ -322,7 +321,7 @@ class MusicBoxProvider : MainAPI() {
             results.addAll(albums.map { it.toSearchResponse() })
             if (results.isNotEmpty()) results else searchApple(query, limit)
         } catch (e: Exception) {
-            Log.w(TAG, "Spotify search failed, falling back: ${e.message}")
+            MusicBoxLog.w(TAG, "Spotify search failed, falling back: ${e.message}")
             searchApple(query, limit)
         }
     }
@@ -604,7 +603,7 @@ class MusicBoxProvider : MainAPI() {
         }
 
         runCatching { zarzSession.refreshIfNeeded() }
-            .onFailure { Log.w(TAG, "Session refresh failed: ${it.message}") }
+            .onFailure { MusicBoxLog.w(TAG, "Session refresh failed: ${it.message}") }
         saveSession()
 
         val searchQuery = "$title $artist".trim()
@@ -712,12 +711,12 @@ class MusicBoxProvider : MainAPI() {
                             ).show()
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Grant exchange failed: ${e.message}")
+                        MusicBoxLog.w(TAG, "Grant exchange failed: ${e.message}")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not open verification: ${e.message}")
+            MusicBoxLog.w(TAG, "Could not open verification: ${e.message}")
         }
     }
 
@@ -748,7 +747,7 @@ class MusicBoxProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "JioSaavn failed: ${e.message}")
+            MusicBoxLog.d(TAG, "JioSaavn failed: ${e.message}")
         }
         return false
     }
@@ -781,7 +780,7 @@ class MusicBoxProvider : MainAPI() {
                 added = true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Tidal Monochrome/GDStudio failed: ${e.message}")
+            MusicBoxLog.d(TAG, "Tidal Monochrome/GDStudio failed: ${e.message}")
         }
 
         // 2. Optional ZARZ Tidal resolver if session is active
@@ -816,7 +815,7 @@ class MusicBoxProvider : MainAPI() {
                 pendingAuthUrl = e.authUrl
                 saveSession()
             } catch (e: Exception) {
-                Log.d(TAG, "Tidal ZARZ failed: ${e.message}")
+                MusicBoxLog.d(TAG, "Tidal ZARZ failed: ${e.message}")
             }
         }
 
@@ -850,7 +849,7 @@ class MusicBoxProvider : MainAPI() {
                 added = true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Deezer musicdl resolvers failed: ${e.message}")
+            MusicBoxLog.d(TAG, "Deezer musicdl resolvers failed: ${e.message}")
         }
 
         // 2. ZARZ Deezer resolver
@@ -864,7 +863,7 @@ class MusicBoxProvider : MainAPI() {
                     descriptor.has("error") || descriptor.has("detail") ||
                     zarzSession.requiresClientDecryption(descriptor)
                 ) {
-                    Log.d(TAG, "Deezer ZARZ: unusable descriptor (encrypted or error)")
+                    MusicBoxLog.d(TAG, "Deezer ZARZ: unusable descriptor (encrypted or error)")
                 } else {
                 val sources = descriptor.optJSONArray("sources")
                 if (sources != null && sources.length() > 0) {
@@ -904,7 +903,7 @@ class MusicBoxProvider : MainAPI() {
                 pendingAuthUrl = e.authUrl
                 saveSession()
             } catch (e: Exception) {
-                Log.d(TAG, "Deezer ZARZ failed: ${e.message}")
+                MusicBoxLog.d(TAG, "Deezer ZARZ failed: ${e.message}")
             }
         }
 
@@ -932,7 +931,7 @@ class MusicBoxProvider : MainAPI() {
                 added = true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Qobuz musicdl failed: ${e.message}")
+            MusicBoxLog.d(TAG, "Qobuz musicdl failed: ${e.message}")
         }
 
         if (!added && zarzSession.record.isUsable()) {
@@ -967,7 +966,7 @@ class MusicBoxProvider : MainAPI() {
                 pendingAuthUrl = e.authUrl
                 saveSession()
             } catch (e: Exception) {
-                Log.d(TAG, "Qobuz ZARZ failed: ${e.message}")
+                MusicBoxLog.d(TAG, "Qobuz ZARZ failed: ${e.message}")
             }
         }
 
@@ -999,7 +998,7 @@ class MusicBoxProvider : MainAPI() {
             }
             return added
         } catch (e: Exception) {
-            Log.d(TAG, "Spotify direct failed: ${e.message}")
+            MusicBoxLog.d(TAG, "Spotify direct failed: ${e.message}")
         }
         return false
     }
@@ -1035,7 +1034,7 @@ class MusicBoxProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "GDStudio failed: ${e.message}")
+            MusicBoxLog.d(TAG, "GDStudio failed: ${e.message}")
         }
         return false
     }
@@ -1070,7 +1069,7 @@ class MusicBoxProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "SoundCloud failed: ${e.message}")
+            MusicBoxLog.d(TAG, "SoundCloud failed: ${e.message}")
         }
         return false
     }
@@ -1095,7 +1094,7 @@ class MusicBoxProvider : MainAPI() {
             }
             return added
         } catch (e: Exception) {
-            Log.d(TAG, "Jamendo failed: ${e.message}")
+            MusicBoxLog.d(TAG, "Jamendo failed: ${e.message}")
         }
         return false
     }
@@ -1115,7 +1114,7 @@ class MusicBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
-        Log.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
+        MusicBoxLog.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
         return false
     }
 
@@ -1211,7 +1210,7 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
         } catch (e: Exception) {
-            Log.d(TAG, "YouTube Music failed: ${e.message}")
+            MusicBoxLog.d(TAG, "YouTube Music failed: ${e.message}")
         }
         return added
     }
@@ -1231,7 +1230,7 @@ class MusicBoxProvider : MainAPI() {
             )
             true
         } catch (e: Exception) {
-            Log.w(TAG, "Apple preview failed: ${e.message}")
+            MusicBoxLog.w(TAG, "Apple preview failed: ${e.message}")
             false
         }
     }

@@ -1,7 +1,6 @@
 package com.watchuu.musicbox
 
 import android.util.Base64
-import android.util.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import okhttp3.MediaType.Companion.toMediaType
@@ -134,7 +133,7 @@ class ZarzSession(
             record.expiresAt = expires
             needsVerification = false
             verificationUrl = ""
-            Log.d(TAG, "Bootstrap: obtained session directly")
+            MusicBoxLog.d(TAG, "Bootstrap: obtained session directly")
             return ""
         }
 
@@ -156,7 +155,7 @@ class ZarzSession(
 
         needsVerification = true
         verificationUrl = authUrl
-        Log.d(TAG, "Bootstrap: verification required at $authUrl")
+        MusicBoxLog.d(TAG, "Bootstrap: verification required at $authUrl")
         return authUrl
     }
 
@@ -210,7 +209,7 @@ class ZarzSession(
         record.expiresAt = expires
         needsVerification = false
         verificationUrl = ""
-        Log.d(TAG, "Exchange: obtained session, expires $expires")
+        MusicBoxLog.d(TAG, "Exchange: obtained session, expires $expires")
     }
 
     suspend fun refreshIfNeeded() {
@@ -233,10 +232,10 @@ class ZarzSession(
                 if (sid.isNotBlank()) record.sessionId = sid
                 if (secret.isNotBlank()) record.sessionSecret = secret
                 if (exp.isNotBlank()) record.expiresAt = exp
-                Log.d(TAG, "Refresh: session updated")
+                MusicBoxLog.d(TAG, "Refresh: session updated")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Refresh failed: ${e.message}")
+            MusicBoxLog.w(TAG, "Refresh failed: ${e.message}")
         }
     }
 

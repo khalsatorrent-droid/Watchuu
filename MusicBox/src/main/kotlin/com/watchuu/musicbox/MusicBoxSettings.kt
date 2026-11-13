@@ -108,6 +108,45 @@ object MusicBoxSettings {
         "gdstudio" to "GDStudio (Multi-Source)",
     )
 
+    /** the buffered log, scrollable, with copy and clear */
+    private fun showLogDialog(act: Activity, onClosed: () -> Unit) {
+        val text = TextView(act).apply {
+            text = MusicBoxLog.dump()
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(dp(act, 12), dp(act, 12), dp(act, 12), dp(act, 12))
+        }
+        val scroller = ScrollView(act).apply { addView(text) }
+
+        val dialog = AlertDialog.Builder(act)
+            .setTitle("MusicBox Log")
+            .setView(scroller)
+            .setPositiveButton("Copy") { _, _ ->
+                runCatching {
+                    val clipboard = act.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(
+                        android.content.ClipData.newPlainText("MusicBox log", MusicBoxLog.dump())
+                    )
+                    Toast.makeText(act, "Log copied", Toast.LENGTH_SHORT).show()
+                }
+                onClosed()
+            }
+            .setNeutralButton("Clear") { _, _ ->
+                MusicBoxLog.clear()
+                Toast.makeText(act, "Log cleared", Toast.LENGTH_SHORT).show()
+                onClosed()
+            }
+            .setNegativeButton("Close") { _, _ -> onClosed() }
+            .create()
+
+        dialog.setOnShowListener {
+            // keep it readable: start at the newest line
+            scroller.post { scroller.fullScroll(android.view.View.FOCUS_DOWN) }
+        }
+        dialog.show()
+    }
+
     fun show(context: Context) {
         val act = (context as? Activity)
             ?: (CommonActivity.activity as? Activity)
@@ -301,6 +340,30 @@ object MusicBoxSettings {
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)
+
+        // ---- Log ----
+        // The reason this exists: every question about this extension has been "which step failed",
+        // and logcat needs a cable. The same lines the provider writes are buffered and shown here.
+        root.addView(header("Log"))
+        val logStatus = TextView(act).apply {
+            textSize = 12f
+            alpha = 0.75f
+            text = "${MusicBoxLog.size()} entries buffered"
+        }
+        root.addView(logStatus)
+
+        val btnLog = Button(act).apply {
+            text = "View Log"
+            isAllCaps = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        btnLog.setOnClickListener {
+            showLogDialog(act) { logStatus.text = "${MusicBoxLog.size()} entries buffered" }
+        }
+        root.addView(btnLog)
 
         val scroll = ScrollView(act).apply { addView(root) }
 

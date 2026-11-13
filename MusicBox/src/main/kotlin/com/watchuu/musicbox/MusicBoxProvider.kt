@@ -500,7 +500,7 @@ class MusicBoxProvider : MainAPI() {
 
     /** a playlist is an album-shaped series, but spotify needs its own query for the contents */
     private suspend fun loadPlaylist(source: String, playlistId: String, extra: List<String>): LoadResponse? {
-        if (source != "spotify") return loadAlbum(source, playlistId, extra)
+        if (source != "spotify") return loadAlbum(source, playlistId, extra, "$mainUrl/playlist/$source/$playlistId")
 
         val name = extra.getOrNull(0)?.decodeUrl()?.ifBlank { null } ?: "Playlist"
         val owner = extra.getOrNull(1)?.decodeUrl().orEmpty()

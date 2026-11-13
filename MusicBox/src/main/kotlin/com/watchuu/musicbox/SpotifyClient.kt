@@ -954,7 +954,9 @@ object SpotifyClient {
             when (node) {
                 is JSONObject -> {
                     val uri = node.optString("uri")
-                    if (uri.startsWith("spotify:track:")) out.add(parseTrack(node))
+                    if (uri.startsWith("spotify:track:")) {
+                        parsePathfinderTrack(node)?.let { out.add(it) }
+                    }
                     for (key in node.keys()) walk(node.opt(key), depth + 1)
                 }
                 is JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), depth + 1)

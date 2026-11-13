@@ -1144,16 +1144,36 @@ class MusicBoxProvider : MainAPI() {
                     }
                 }
 
-                // 2. CloudStream built-in YouTube extractor
-                val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
-                val viaExtractor = mutableListOf<ExtractorLink>()
-                runCatching {
-                    loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
-                        viaExtractor.add(it)
+                // 2. audio-only stream from YouTube's own player endpoint
+                if (!added) {
+                    runCatching { YouTubeMusicApi.audioOnlyStream(videoId) }.getOrNull()?.let { s ->
+                        callback.invoke(
+                            newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
+                                this.quality = s.quality
+                                this.referer = s.referer
+                                this.headers = s.headers
+                            }
+                        )
+                        added = true
                     }
                 }
-                if (viaExtractor.isNotEmpty()) {
-                    viaExtractor.forEach { link ->
+
+                // 3. CloudStream built-in YouTube extractor, audio tracks only. It returns video
+                //    streams too, and emitting those is what played a silent picture instead of a
+                //    song - so a video-only link is dropped rather than offered.
+                if (!added) {
+                    val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
+                    val viaExtractor = mutableListOf<ExtractorLink>()
+                    runCatching {
+                        loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
+                            viaExtractor.add(it)
+                        }
+                    }
+                    val audioOnly = viaExtractor.filter { link ->
+                        val u = link.url.lowercase()
+                        u.contains("mime=audio") || u.contains("audio%2f") || u.contains("mime%3daudio")
+                    }
+                    audioOnly.sortedByDescending { it.quality }.forEach { link ->
                         callback.invoke(
                             newExtractorLink(
                                 "MusicBox",
@@ -1166,14 +1186,15 @@ class MusicBoxProvider : MainAPI() {
                                 this.headers = link.headers
                             }
                         )
+                        added = true
                     }
-                    added = true
                 }
 
                 // 3. ZARZ Cobalt v1 fallback
                 if (!added) {
                     runCatching {
                         val cobalt = zarzSession.resolveYouTubeDownload(youtubeUrl)
+                        // cobalt is asked for audio only; anything else is ignored
                         val url = cobalt.optString("url", "")
                         if (url.isNotBlank()) {
                             callback.invoke(

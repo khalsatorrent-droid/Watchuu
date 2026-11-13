@@ -1820,6 +1820,8 @@ object MP3JuiceApi {
 
 object YouTubeMusicApi {
     private const val BASE = "https://music.youtube.com/youtubei/v1"
+    private const val IOS_UA =
+        "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)"
     private const val API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
     private val context = JSONObject().apply {
@@ -1899,6 +1901,83 @@ object YouTubeMusicApi {
      *  4. GMPion / ezsrv.net (`_parsewithgmpionapi`)
      *  5. MP3Juice / ThetaCloud (`mp3juice.py`)
      */
+    /**
+     * Audio-only stream straight from YouTube's player endpoint.
+     *
+     * The CloudStream extractor hands back every stream it finds, video included, and a video-only
+     * stream plays as a silent picture - which is exactly what was happening. This asks for the
+     * adaptive formats and keeps only `mimeType` audio/*, so what comes back is a song, not a clip.
+     */
+    suspend fun audioOnlyStream(videoId: String): ResolvedStream? {
+        if (videoId.length != 11) return null
+
+        // clients that still answer with direct audio urls
+        val clients = listOf(
+            Triple("ANDROID_MUSIC", "7.27.52", 30),
+            Triple("ANDROID_VR", "1.61.48", 32),
+            Triple("IOS", "19.45.4", 0)
+        )
+
+        for ((clientName, clientVersion, sdk) in clients) {
+            val payload = JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", clientName)
+                        put("clientVersion", clientVersion)
+                        put("hl", "en")
+                        put("gl", "US")
+                        if (sdk > 0) put("androidSdkVersion", sdk)
+                    })
+                })
+                put("videoId", videoId)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+            }
+
+            val json = runCatching {
+                JSONObject(
+                    app.post(
+                        "https://www.youtube.com/youtubei/v1/player?key=$API_KEY&prettyPrint=false",
+                        headers = mapOf(
+                            "Content-Type" to "application/json",
+                            "User-Agent" to if (clientName == "IOS") IOS_UA else DEFAULT_UA,
+                            "Origin" to "https://www.youtube.com",
+                            "Referer" to "https://www.youtube.com/"
+                        ),
+                        requestBody = payload.toString().toRequestBody("application/json".toMediaType()),
+                        timeout = 15L
+                    ).text
+                )
+            }.getOrNull() ?: continue
+
+            val formats = json.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
+                ?: continue
+
+            var best: ResolvedStream? = null
+            var bestRate = -1
+            for (i in 0 until formats.length()) {
+                val f = formats.optJSONObject(i) ?: continue
+                // the whole point: audio formats only, never a video track
+                if (!f.optString("mimeType").startsWith("audio/", ignoreCase = true)) continue
+                val url = f.optString("url").ifBlank { continue }
+                val rate = f.optInt("bitrate", 0)
+                if (rate > bestRate) {
+                    bestRate = rate
+                    val isOpus = f.optString("mimeType").contains("opus", true)
+                    best = ResolvedStream(
+                        url = url,
+                        name = "YouTube Music · audio ${rate / 1000}kbps" + if (isOpus) " opus" else "",
+                        quality = rate / 1000,
+                        referer = "https://music.youtube.com/",
+                        headers = mapOf("User-Agent" to if (clientName == "IOS") IOS_UA else DEFAULT_UA)
+                    )
+                }
+            }
+            if (best != null) return best
+        }
+        return null
+    }
+
     suspend fun resolveStreams(videoId: String, titleHint: String = "track"): List<ResolvedStream> {
         val out = mutableListOf<ResolvedStream>()
         if (videoId.isBlank()) return out

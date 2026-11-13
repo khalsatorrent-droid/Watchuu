@@ -90,6 +90,18 @@ object MusicBoxSettings {
         get() = bool("enable_wikimedia", true)
         set(v) = put { putBoolean("enable_wikimedia", v) }
 
+    var enableBilibili: Boolean
+        get() = bool("enable_bilibili", true)
+        set(v) = put { putBoolean("enable_bilibili", v) }
+
+    var enableFma: Boolean
+        get() = bool("enable_fma", true)
+        set(v) = put { putBoolean("enable_fma", v) }
+
+    var enableOpenGameArt: Boolean
+        get() = bool("enable_opengameart", true)
+        set(v) = put { putBoolean("enable_opengameart", v) }
+
     var enableYouTubeFallback: Boolean
         get() = bool("enable_yt_fallback", true)
         set(v) = put { putBoolean("enable_yt_fallback", v) }
@@ -216,6 +228,24 @@ object MusicBoxSettings {
         }
         root.addView(cbWikimedia)
 
+        val cbBilibili = CheckBox(act).apply {
+            text = "11. Bilibili (public api)"
+            isChecked = enableBilibili
+        }
+        root.addView(cbBilibili)
+
+        val cbFma = CheckBox(act).apply {
+            text = "12. Free Music Archive"
+            isChecked = enableFma
+        }
+        root.addView(cbFma)
+
+        val cbOga = CheckBox(act).apply {
+            text = "13. OpenGameArt"
+            isChecked = enableOpenGameArt
+        }
+        root.addView(cbOga)
+
         // ── ZARZ Session ──────────────────────────────────────────────────────
         root.addView(header("ZARZ Session"))
         root.addView(note("Required for Amazon, Deezer, Tidal, Qobuz, SoundCloud, Beatport (ZARZ)"))
@@ -319,6 +349,9 @@ object MusicBoxSettings {
                 enableJamendo = cbJamendo.isChecked
                 enableCcMixter = cbCcMixter.isChecked
                 enableWikimedia = cbWikimedia.isChecked
+                enableBilibili = cbBilibili.isChecked
+                enableFma = cbFma.isChecked
+                enableOpenGameArt = cbOga.isChecked
                 Toast.makeText(act, "Settings saved", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)

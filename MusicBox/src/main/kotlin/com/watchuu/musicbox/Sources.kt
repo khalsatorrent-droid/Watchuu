@@ -283,6 +283,171 @@ object WikimediaApi {
     }
 }
 
+/**
+ * Bilibili — public JSON api, no login needed for search or the dash audio manifest.
+ *   search  api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=
+ *   cid     api.bilibili.com/x/web-interface/view?bvid=
+ *   audio   api.bilibili.com/x/player/playurl?bvid=&cid=&fnval=16  -> data.dash.audio[].baseUrl
+ */
+object BilibiliApi {
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        "Referer" to "https://www.bilibili.com/",
+        "Accept" to "application/json"
+    )
+
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val url = "https://api.bilibili.com/x/web-interface/search/type?search_type=video" +
+            "&keyword=${query.encodeUrl()}&page=1"
+        val resp = app.get(url, headers = headers)
+        val result = JSONObject(resp.text).optJSONObject("data")?.optJSONArray("result")
+            ?: return emptyList()
+
+        val out = ArrayList<MusicTrack>()
+        for (i in 0 until minOf(result.length(), limit)) {
+            val o = result.optJSONObject(i) ?: continue
+            val bvid = o.optString("bvid").ifBlank { continue }
+            // titles come back with <em class="keyword"> highlighting
+            val title = o.optString("title").replace(Regex("<[^>]+>"), "")
+            out.add(
+                MusicTrack(
+                    id = bvid,
+                    title = title,
+                    artist = o.optString("author"),
+                    duration = parseDuration(o.optString("duration")),
+                    coverUrl = o.optString("pic").let { if (it.startsWith("//")) "https:$it" else it },
+                    source = "bilibili",
+                    sourceId = bvid
+                )
+            )
+        }
+        return out
+    }
+
+    private fun parseDuration(text: String): Int {
+        val parts = text.split(":").mapNotNull { it.trim().toIntOrNull() }
+        return when (parts.size) {
+            2 -> parts[0] * 60 + parts[1]
+            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
+            else -> 0
+        }
+    }
+
+    /** the audio stream from the dash manifest */
+    suspend fun audioUrl(bvid: String): String? {
+        val view = app.get("https://api.bilibili.com/x/web-interface/view?bvid=$bvid", headers = headers)
+        val cid = JSONObject(view.text).optJSONObject("data")?.optLong("cid", 0L) ?: 0L
+        if (cid == 0L) return null
+
+        val play = app.get(
+            "https://api.bilibili.com/x/player/playurl?bvid=$bvid&cid=$cid&fnval=16&fourk=1",
+            headers = headers
+        )
+        val dash = JSONObject(play.text).optJSONObject("data")?.optJSONObject("dash")
+        val audio = dash?.optJSONArray("audio") ?: return null
+
+        // highest bandwidth first
+        var best: String? = null
+        var bestRate = -1
+        for (i in 0 until audio.length()) {
+            val a = audio.optJSONObject(i) ?: continue
+            val url = a.optString("baseUrl").ifBlank { a.optString("base_url") }
+            if (url.isBlank()) continue
+            val rate = a.optInt("bandwidth", 0)
+            if (rate > bestRate) { bestRate = rate; best = url }
+        }
+        return best
+    }
+}
+
+/**
+ * Free Music Archive — https://freemusicarchive.org/
+ * The search page embeds each track's data in a data-track-info attribute, so one request gets both
+ * the metadata and the file url.
+ */
+object FmaApi {
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val html = app.get(
+            "https://freemusicarchive.org/search/?quicksearch=${query.encodeUrl()}",
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+            )
+        ).text
+
+        val out = ArrayList<MusicTrack>()
+        val pattern = Regex("""data-track-info="([^"]+)"""")
+        for (m in pattern.findAll(html)) {
+            if (out.size >= limit) break
+            val raw = m.groupValues[1]
+                .replace("&quot;", "\"")
+                .replace("&amp;", "&")
+            val o = runCatching { JSONObject(raw) }.getOrNull() ?: continue
+            val url = o.optString("fileUrl").ifBlank { o.optString("downloadUrl") }
+                .ifBlank { continue }
+            val title = o.optString("trackTitle").ifBlank { "FMA track" }
+            out.add(
+                MusicTrack(
+                    id = url,
+                    title = title,
+                    artist = o.optString("artistName"),
+                    album = o.optString("albumTitle"),
+                    source = "fma",
+                    sourceId = url,
+                    previewUrl = url
+                )
+            )
+        }
+        return out
+    }
+}
+
+/**
+ * OpenGameArt — https://opengameart.org/
+ * Search gives content pages; the audio file lives on each page, so the page is only read when the
+ * track is actually opened rather than for every search result.
+ */
+object OpenGameArtApi {
+    private val headers = mapOf("User-Agent" to "OGA-Music-Search/1.0")
+
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val html = app.get(
+            "https://opengameart.org/art-search-advanced?keys=${query.encodeUrl()}" +
+                "&field_art_type_tid%5B0%5D=13&items_per_page=24&page=0",
+            headers = headers
+        ).text
+
+        val out = ArrayList<MusicTrack>()
+        for (m in Regex("""href="(/content/[^"]+)"""").findAll(html)) {
+            if (out.size >= limit) break
+            val path = m.groupValues[1]
+            val id = "https://opengameart.org$path"
+            val title = path.substringAfterLast('/').replace('-', ' ')
+            out.add(
+                MusicTrack(
+                    id = id,
+                    title = title,
+                    artist = "OpenGameArt",
+                    source = "opengameart",
+                    sourceId = id
+                )
+            )
+        }
+        return out.distinctBy { it.id }
+    }
+
+    /** read the content page and take its first audio file */
+    suspend fun audioUrl(pageUrl: String): String? {
+        val html = app.get(pageUrl, headers = headers).text
+        return Regex("""https://opengameart\.org/sites/default/files/[^"'\s]+\.(mp3|ogg|oga|flac|m4a|opus)""",
+            RegexOption.IGNORE_CASE).find(html)?.value
+    }
+}
+
 object DeezerApi {
     private const val BASE = "https://api.deezer.com"
 

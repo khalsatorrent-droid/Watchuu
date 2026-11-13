@@ -173,6 +173,9 @@ class MusicBoxProvider : MainAPI() {
                 searchJamendo(query).forEach { merged[it.url] = it }
                 searchCcMixter(query).forEach { merged[it.url] = it }
                 searchWikimedia(query).forEach { merged[it.url] = it }
+                searchBilibili(query).forEach { merged[it.url] = it }
+                searchFma(query).forEach { merged[it.url] = it }
+                searchOpenGameArt(query).forEach { merged[it.url] = it }
                 merged.values.toList()
             }
         }
@@ -219,6 +222,17 @@ class MusicBoxProvider : MainAPI() {
     private suspend fun searchWikimedia(query: String): List<SearchResponse> =
         try { WikimediaApi.search(query, 20).map { it.toSearchResponse() } }
         catch (e: Exception) { Log.w(TAG, "Wikimedia search failed: ${e.message}"); emptyList() }
+    private suspend fun searchBilibili(query: String): List<SearchResponse> =
+        try { BilibiliApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Bilibili search failed: ${e.message}"); emptyList() }
+
+    private suspend fun searchFma(query: String): List<SearchResponse> =
+        try { FmaApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "FMA search failed: ${e.message}"); emptyList() }
+
+    private suspend fun searchOpenGameArt(query: String): List<SearchResponse> =
+        try { OpenGameArtApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "OpenGameArt search failed: ${e.message}"); emptyList() }
     private suspend fun searchJioSaavn(query: String): List<SearchResponse> {
         return try { JioSaavnApi.search(query, 20).map { it.toSearchResponse() } }
         catch (e: Exception) { Log.w(TAG, "JioSaavn search failed: ${e.message}"); emptyList() }

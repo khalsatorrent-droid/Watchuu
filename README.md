@@ -52,7 +52,7 @@ Extensions update themselves from the same link — when a site changes and a mo
 | Extension | Site | Types | Language |
 |-----------|------|-------|----------|
 | **Monochrome** | [monochrome.st](https://monochrome.st) | Music — lossless, songs/albums/artists | 🇬🇧 EN |
-| **MusicBox** | — | Music — Spotify catalogue, 6 providers | 🇬🇧 EN |
+| **MusicBox** | — | Music — multi-catalogue, Deezer/Tidal/Qobuz + musicdl providers | 🇬🇧 EN |
 
 > Home rows are paginated wherever the site allows it.
 

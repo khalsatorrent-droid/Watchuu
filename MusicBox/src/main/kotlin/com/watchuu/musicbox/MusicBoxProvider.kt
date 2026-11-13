@@ -169,6 +169,10 @@ class MusicBoxProvider : MainAPI() {
                 searchSpotify(query).forEach  { merged[it.url] = it }
                 appleRow(query).forEach       { merged[it.url] = it }
                 searchSoundCloud(query).forEach { merged[it.url] = it }
+                searchAudius(query).forEach { merged[it.url] = it }
+                searchJamendo(query).forEach { merged[it.url] = it }
+                searchCcMixter(query).forEach { merged[it.url] = it }
+                searchWikimedia(query).forEach { merged[it.url] = it }
                 merged.values.toList()
             }
         }
@@ -200,6 +204,21 @@ class MusicBoxProvider : MainAPI() {
         catch (e: Exception) { Log.w(TAG, "SoundCloud search failed: ${e.message}"); emptyList() }
     }
 
+    private suspend fun searchAudius(query: String): List<SearchResponse> =
+        try { AudiusApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Audius search failed: ${e.message}"); emptyList() }
+
+    private suspend fun searchJamendo(query: String): List<SearchResponse> =
+        try { JamendoApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Jamendo search failed: ${e.message}"); emptyList() }
+
+    private suspend fun searchCcMixter(query: String): List<SearchResponse> =
+        try { CcMixterApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "ccMixter search failed: ${e.message}"); emptyList() }
+
+    private suspend fun searchWikimedia(query: String): List<SearchResponse> =
+        try { WikimediaApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Wikimedia search failed: ${e.message}"); emptyList() }
     private suspend fun searchJioSaavn(query: String): List<SearchResponse> {
         return try { JioSaavnApi.search(query, 20).map { it.toSearchResponse() } }
         catch (e: Exception) { Log.w(TAG, "JioSaavn search failed: ${e.message}"); emptyList() }
@@ -286,15 +305,19 @@ class MusicBoxProvider : MainAPI() {
     private suspend fun loadAlbum(source: String, albumId: String, extra: List<String>): LoadResponse? {
         val albumTitle = extra.getOrNull(0)?.decodeUrl() ?: "Album"
 
+        // a playlist or album is a series and its tracks are the episodes, which is what makes a
+        // collection browsable in this app instead of a flat list of singles
         val tracks = when (source) {
             "deezer" -> try { DeezerApi.getAlbumTracks(albumId) } catch (_: Exception) { emptyList() }
+            "audius" -> try { AudiusApi.playlistTracks(albumId) } catch (_: Exception) { emptyList() }
+            "jiosaavn" -> try { JioSaavnApi.getAlbumTracks(albumId) } catch (_: Exception) { emptyList() }
             else     -> emptyList()
         }
         if (tracks.isEmpty()) return null
 
         val episodes = tracks.mapIndexed { index, track ->
             val epData = JSONObject().apply {
-                put("source",    "deezer")
+                put("source",    track.source.ifBlank { source })
                 put("id",        track.sourceId)
                 put("title",     track.title)
                 put("artist",    track.artist)
@@ -463,6 +486,50 @@ class MusicBoxProvider : MainAPI() {
 
     // ── Amazon Music ───────────────────────────────────────────────────────────
 
+    private suspend fun tryAudius(
+        id: String,
+        query: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        if (!MusicBoxSettings.enableAudius) return false
+        return try {
+            val trackId = id.ifBlank { AudiusApi.search(query, 1).firstOrNull()?.sourceId ?: "" }
+            if (trackId.isBlank()) return false
+            callback.invoke(
+                newExtractorLink("MusicBox", "Audius", AudiusApi.streamUrl(trackId), ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = "https://audius.co/"
+                }
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Audius play failed: ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun tryJamendo(
+        id: String,
+        query: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        if (!MusicBoxSettings.enableJamendo) return false
+        return try {
+            val trackId = id.ifBlank { JamendoApi.search(query, 1).firstOrNull()?.sourceId ?: "" }
+            if (trackId.isBlank()) return false
+            val url = JamendoApi.streamUrl(trackId) ?: return false
+            callback.invoke(
+                newExtractorLink("MusicBox", "Jamendo", url, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = "https://www.jamendo.com/"
+                }
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Jamendo play failed: ${e.message}")
+            false
+        }
+    }
     private suspend fun tryAmazonMusic(query: String, isrc: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
             val identifier = isrc.ifBlank { query }

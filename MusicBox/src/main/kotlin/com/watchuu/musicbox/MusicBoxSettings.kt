@@ -73,6 +73,23 @@ object MusicBoxSettings {
         get() = bool("enable_beatport", true)
         set(v) = put { putBoolean("enable_beatport", v) }
 
+    // the four public catalogue sources: no key, no session, direct audio
+    var enableAudius: Boolean
+        get() = bool("enable_audius", true)
+        set(v) = put { putBoolean("enable_audius", v) }
+
+    var enableJamendo: Boolean
+        get() = bool("enable_jamendo", true)
+        set(v) = put { putBoolean("enable_jamendo", v) }
+
+    var enableCcMixter: Boolean
+        get() = bool("enable_ccmixter", true)
+        set(v) = put { putBoolean("enable_ccmixter", v) }
+
+    var enableWikimedia: Boolean
+        get() = bool("enable_wikimedia", true)
+        set(v) = put { putBoolean("enable_wikimedia", v) }
+
     var enableYouTubeFallback: Boolean
         get() = bool("enable_yt_fallback", true)
         set(v) = put { putBoolean("enable_yt_fallback", v) }
@@ -175,6 +192,30 @@ object MusicBoxSettings {
         }
         root.addView(cbYouTube)
 
+        val cbAudius = CheckBox(act).apply {
+            text = "7. Audius (public api)"
+            isChecked = enableAudius
+        }
+        root.addView(cbAudius)
+
+        val cbJamendo = CheckBox(act).apply {
+            text = "8. Jamendo (public api)"
+            isChecked = enableJamendo
+        }
+        root.addView(cbJamendo)
+
+        val cbCcMixter = CheckBox(act).apply {
+            text = "9. ccMixter (public api)"
+            isChecked = enableCcMixter
+        }
+        root.addView(cbCcMixter)
+
+        val cbWikimedia = CheckBox(act).apply {
+            text = "10. Wikimedia Commons (public api)"
+            isChecked = enableWikimedia
+        }
+        root.addView(cbWikimedia)
+
         // ── ZARZ Session ──────────────────────────────────────────────────────
         root.addView(header("ZARZ Session"))
         root.addView(note("Required for Amazon, Deezer, Tidal, Qobuz, SoundCloud, Beatport (ZARZ)"))
@@ -274,6 +315,10 @@ object MusicBoxSettings {
                 enableQobuz           = cbQobuz.isChecked
                 enableBeatport        = cbBeatport.isChecked
                 enableYouTubeFallback = cbYouTube.isChecked
+                enableAudius = cbAudius.isChecked
+                enableJamendo = cbJamendo.isChecked
+                enableCcMixter = cbCcMixter.isChecked
+                enableWikimedia = cbWikimedia.isChecked
                 Toast.makeText(act, "Settings saved", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)

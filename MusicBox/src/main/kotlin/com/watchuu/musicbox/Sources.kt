@@ -43,6 +43,246 @@ data class MusicArtist(
 
 // ========== Deezer Public API (catalogue only) ==========
 
+/**
+ * Audius — https://audius.co/
+ *
+ * Taken from musicdl's AudiusMusicClient, which is the cleanest source in that project: a public
+ * JSON api, no key, no session, and a stream endpoint that redirects straight to the audio file.
+ *
+ *   search  https://api.audius.co/v1/tracks/search?query=&limit=&offset=&app_name=musicdl
+ *   stream  https://api.audius.co/v1/tracks/{id}/stream?app_name=musicdl
+ */
+object AudiusApi {
+    private const val BASE = "https://api.audius.co/v1"
+    private const val APP = "musicdl"
+
+    private val headers = mapOf(
+        "accept" to "application/json",
+        "referer" to "https://audius.co/",
+        "user-agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+    )
+
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val url = "$BASE/tracks/search?query=${query.encodeUrl()}&limit=$limit&offset=0&app_name=$APP"
+        val resp = app.get(url, headers = headers)
+        val data = JSONObject(resp.text).optJSONArray("data") ?: return emptyList()
+
+        val out = ArrayList<MusicTrack>()
+        for (i in 0 until data.length()) {
+            val o = data.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            val artwork = o.optJSONObject("artwork")
+            out.add(
+                MusicTrack(
+                    id = id,
+                    title = o.optString("title"),
+                    artist = o.optJSONObject("user")?.optString("name").orEmpty()
+                        .ifBlank { o.optJSONObject("user")?.optString("handle").orEmpty() },
+                    album = o.optString("album_name").ifBlank { o.optString("playlist_name") },
+                    duration = o.optDouble("duration", 0.0).toInt(),
+                    coverUrl = artwork?.optString("1000x1000").orEmpty()
+                        .ifBlank { artwork?.optString("480x480").orEmpty() }
+                        .ifBlank { artwork?.optString("150x150").orEmpty() },
+                    source = "audius",
+                    sourceId = id
+                )
+            )
+        }
+        return out
+    }
+
+    fun streamUrl(id: String): String = "$BASE/tracks/$id/stream?app_name=$APP"
+
+    /** a playlist's tracks, so a playlist can be shown as a series */
+    suspend fun playlistTracks(playlistId: String): List<MusicTrack> {
+        val resp = app.get("$BASE/playlists/$playlistId/tracks?app_name=$APP", headers = headers)
+        val data = JSONObject(resp.text).optJSONArray("data") ?: return emptyList()
+        val out = ArrayList<MusicTrack>()
+        for (i in 0 until data.length()) {
+            val o = data.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            out.add(
+                MusicTrack(
+                    id = id,
+                    title = o.optString("title"),
+                    artist = o.optJSONObject("user")?.optString("name").orEmpty(),
+                    album = o.optString("album_name"),
+                    duration = o.optDouble("duration", 0.0).toInt(),
+                    coverUrl = o.optJSONObject("artwork")?.optString("480x480").orEmpty(),
+                    source = "audius",
+                    sourceId = id
+                )
+            )
+        }
+        return out
+    }
+}
+
+/**
+ * Jamendo — https://www.jamendo.com/
+ *
+ * From musicdl's JamendoMusicClient. Its api wants an x-jam-call header, which is not a secret:
+ * the client makes it itself as sha1(path + random) + "*" + random + "~".
+ */
+object JamendoApi {
+    private const val BASE = "https://www.jamendo.com/api"
+
+    private fun xJam(path: String): String {
+        val rand = java.math.BigDecimal(Math.random()).toPlainString()
+        val sha = java.security.MessageDigest.getInstance("SHA-1")
+            .digest((path + rand).toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return "$sha*$rand~"
+    }
+
+    private val baseHeaders = mapOf(
+        "accept" to "application/json",
+        "referer" to "https://www.jamendo.com/",
+        "user-agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+    )
+
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val url = "$BASE/search?query=${query.encodeUrl()}&type=track&limit=$limit&identities=www&offset=0"
+        val resp = app.get(url, headers = baseHeaders + mapOf("x-jam-call" to xJam("/api/search")))
+        val root = JSONObject(resp.text)
+
+        // the search answer has moved between results/results.tracks/data across versions
+        val arr = root.optJSONArray("results")
+            ?: root.optJSONObject("results")?.optJSONArray("tracks")
+            ?: root.optJSONArray("data")
+            ?: return emptyList()
+
+        val out = ArrayList<MusicTrack>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id").ifBlank { continue }
+            val title = o.optString("name").ifBlank { o.optString("title") }.ifBlank { continue }
+            out.add(
+                MusicTrack(
+                    id = id,
+                    title = title,
+                    artist = o.optJSONObject("artist")?.optString("name").orEmpty(),
+                    album = o.optJSONObject("album")?.optString("name").orEmpty(),
+                    duration = o.optInt("duration", 0),
+                    coverUrl = o.optJSONObject("album")?.optString("image").orEmpty()
+                        .ifBlank { o.optString("image").orEmpty() },
+                    source = "jamendo",
+                    sourceId = id
+                )
+            )
+        }
+        return out
+    }
+
+    /** the track's own file: flac if offered, then mp3 */
+    suspend fun streamUrl(id: String): String? {
+        val resp = app.get(
+            "$BASE/tracks?id[]=$id",
+            headers = baseHeaders + mapOf("x-jam-call" to xJam("/api/tracks"))
+        )
+        val first = JSONObject(resp.text).optJSONArray("results")?.optJSONObject(0)
+            ?: return null
+
+        val candidates = listOf(
+            first.optJSONObject("stream")?.optString("flac"),
+            first.optJSONObject("download")?.optString("flac"),
+            first.optJSONObject("stream")?.optString("mp3"),
+            first.optJSONObject("download")?.optString("mp3"),
+            first.optString("audio"),
+            first.optString("audiodownload")
+        )
+        return candidates.firstOrNull { !it.isNullOrBlank() && it.startsWith("http") }
+    }
+}
+
+/**
+ * ccMixter — https://ccmixter.org/
+ *
+ * From musicdl's CCMixterMusicClient: /api/query with f=xspf answers an XSPF playlist, and each
+ * <location> in it is a direct audio file.
+ */
+object CcMixterApi {
+    private const val BASE = "https://ccmixter.org/api/query"
+
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val url = "$BASE?f=xspf&t=search_uploads&search_type=any&search=${query.encodeUrl()}" +
+            "&limit=$limit&offset=0"
+        val xml = app.get(
+            url,
+            headers = mapOf(
+                "accept" to "application/xspf+xml, application/xml, text/xml, */*",
+                "referer" to "https://ccmixter.org/",
+                "user-agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+            )
+        ).text
+
+        val out = ArrayList<MusicTrack>()
+        // <track><location>URL</location><title>..</title><creator>..</creator></track>
+        for (block in Regex("<track>(.*?)</track>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+            val body = block.groupValues[1]
+            val loc = Regex("<location>(.*?)</location>").find(body)?.groupValues?.get(1)
+                ?.trim()?.takeIf { it.startsWith("http") } ?: continue
+            val title = Regex("<title>(.*?)</title>").find(body)?.groupValues?.get(1)
+                ?.trim().orEmpty().ifBlank { "ccMixter track" }
+            val creator = Regex("<creator>(.*?)</creator>").find(body)?.groupValues?.get(1)
+                ?.trim().orEmpty()
+            out.add(
+                MusicTrack(
+                    id = loc,
+                    title = title,
+                    artist = creator,
+                    source = "ccmixter",
+                    sourceId = loc,
+                    previewUrl = loc
+                )
+            )
+        }
+        return out
+    }
+}
+
+/**
+ * Wikimedia Commons — public domain and freely licensed audio, no key.
+ *   api: https://commons.wikimedia.org/w/api.php?action=query&generator=search…
+ */
+object WikimediaApi {
+    suspend fun search(query: String, limit: Int = 20): List<MusicTrack> {
+        if (query.isBlank()) return emptyList()
+        val url = "https://commons.wikimedia.org/w/api.php?action=query&format=json" +
+            "&generator=search&gsrsearch=${"filetype:audio ".encodeUrl()}${query.encodeUrl()}" +
+            "&gsrlimit=$limit&prop=imageinfo&iiprop=url"
+        val resp = app.get(url, headers = mapOf("user-agent" to "MusicBox/1.0 (Cloudstream extension)"))
+        val pages = JSONObject(resp.text).optJSONObject("query")?.optJSONObject("pages")
+            ?: return emptyList()
+
+        val out = ArrayList<MusicTrack>()
+        for (key in pages.keys()) {
+            val page = pages.optJSONObject(key) ?: continue
+            val file = page.optJSONArray("imageinfo")?.optJSONObject(0)?.optString("url")
+                ?.takeIf { it.startsWith("http") } ?: continue
+            val title = page.optString("title").removePrefix("File:").substringBeforeLast(".")
+            out.add(
+                MusicTrack(
+                    id = file,
+                    title = title.ifBlank { "Commons audio" },
+                    artist = "Wikimedia Commons",
+                    source = "wikimedia",
+                    sourceId = file,
+                    previewUrl = file
+                )
+            )
+        }
+        return out
+    }
+}
+
 object DeezerApi {
     private const val BASE = "https://api.deezer.com"
 
@@ -425,6 +665,27 @@ object JioSaavnApi {
             if (arr.length() > 0) arr.optJSONObject(0) else null
         }
         return songs?.let { parseSaavnTrack(it) }
+    }
+
+    /** an album or playlist's tracks, so it can be shown as a series */
+    suspend fun getAlbumTracks(albumId: String): List<MusicTrack> {
+        val resp = app.get(
+            "$BASE?__call=content.getAlbumDetails&_format=json&_marker=0&cc=in&albumid=$albumId",
+            headers = defaultHeaders
+        )
+        val obj = JSONObject(resp.text)
+        val songs = obj.optJSONArray("songs") ?: obj.optJSONObject("songs")?.optJSONArray("results")
+            ?: return emptyList()
+        val albumName = obj.optString("title").ifBlank { obj.optString("name") }
+        val cover = obj.optString("image").ifBlank { "" }
+
+        return (0 until songs.length()).mapNotNull { i ->
+            val song = songs.optJSONObject(i) ?: return@mapNotNull null
+            parseSaavnTrack(song)?.copy(
+                album = albumName,
+                coverUrl = cover
+            )
+        }
     }
 
     fun decryptMediaUrl(encrypted: String): String {

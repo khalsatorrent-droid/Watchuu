@@ -18,17 +18,23 @@ import org.json.JSONObject
  * MusicBox — a CloudStream music provider.
  *
  * Catalogue: Spotify Web (via anonymous TOTP tokens)
- * Metadata/fallback: Deezer, Apple Music, Tidal, Qobuz, JioSaavn, SoundCloud
- * Downloads: ZARZ-HMAC-V1 signed session → Deezer FLAC / JioSaavn 320kbps / fallback YouTube
+ * Metadata/fallback: Deezer, Apple Music, Tidal, Qobuz, JioSaavn, SoundCloud, Beatport
+ * Downloads (priority order):
+ *   1. Amazon Music   → ZARZ amzn@2.3.19   → /dl/amazeamazeamaze
+ *   2. Deezer         → ZARZ deezer@1.3.11  → /dl/dzr  (+ Blowfish)
+ *   3. JioSaavn       → Direct DES-decrypted URL (no ZARZ)
+ *   4. SoundCloud     → Direct HLS/progressive (no ZARZ, ZARZ /dl/sc as upgrade)
+ *   5. Tidal          → ZARZ tidal-web@1.2.14 → /dl/tid
+ *   6. Qobuz          → ZARZ qobuz-web@1.2.27 → /dl/qbz
+ *   7. YouTube Music  → Cobalt /v1/dl/cobalt (plain POST, no ticket)
+ *   8. Apple preview  → public 30s snippet
+ *   9. Deezer preview → public 30s snippet
  */
 class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://api.deezer.com"
     override var name = "MusicBox"
     override val hasMainPage = true
     override val hasQuickSearch = true
-    // TvType.Others is what makes the provider reachable. Music alone is not a type this app
-    // offers in its filters, so a provider declaring only that never appears in the list - which is
-    // exactly what happened here twice. Monochrome declares both for the same reason.
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     companion object {
@@ -37,16 +43,8 @@ class MusicBoxProvider : MainAPI() {
         private const val PREF_KEY_CATALOGUE = "musicbox_catalogue"
     }
 
-    // ========== Session + state ==========
-
     private val zarzSession = ZarzSession()
 
-    /**
-     * Set when the resolver answers needsVerification. api.zarz.moe is the thing that actually
-     * serves the files - /dl/dzr, /dl/amazeamazeamaze, /dl/tid and /v1/dl/cobalt all sit behind a
-     * ZARZ-HMAC-V1 session - and that session is only issued after a challenge is solved once. So
-     * the url is kept and the challenge is offered, rather than the play failing quietly.
-     */
     @Volatile
     private var pendingAuthUrl: String? = null
 
@@ -85,19 +83,19 @@ class MusicBoxProvider : MainAPI() {
     // ========== Home Page ==========
 
     override val mainPage = mainPageOf(
-        "chart" to "Top Charts",
+        "chart"   to "Top Charts",
         "trending" to "Trending Now",
-        "new" to "New Releases",
+        "new"     to "New Releases",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         loadSession()
 
         val items = when (request.data) {
-            "chart" -> getDeezerChart()
+            "chart"    -> getDeezerChart()
             "trending" -> getSpotifyTrending()
-            "new" -> getDeezerNew()
-            else -> emptyList()
+            "new"      -> getDeezerNew()
+            else       -> emptyList()
         }
 
         return newHomePageResponse(
@@ -107,9 +105,6 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private suspend fun getDeezerChart(): List<SearchResponse> {
-        // Deezer is blocked outright in some countries, so a chart from it alone can come back
-        // empty and leave the row blank. Apple's feed is reachable almost everywhere and needs no
-        // token, so it is the backstop for every row here.
         return try {
             val deezer = DeezerApi.getChart(20).map { it.toSearchResponse() }
             if (deezer.isNotEmpty()) deezer else appleRow("top hits")
@@ -119,7 +114,6 @@ class MusicBoxProvider : MainAPI() {
         }
     }
 
-    /** apple's public catalogue, used wherever another source has nothing to show */
     private suspend fun appleRow(query: String): List<SearchResponse> {
         return try {
             AppleMusicApi.search(query, 20).map { it.toSearchResponse() }
@@ -135,7 +129,6 @@ class MusicBoxProvider : MainAPI() {
             tracks.map { it.toSearchResponse() }
         } catch (e: Exception) {
             Log.w(TAG, "Spotify trending failed: ${e.message}")
-            // Deezer next, then Apple - two fallbacks, because either one can be unreachable
             try {
                 val deezer = DeezerApi.search("top hits", 20).map { it.toSearchResponse() }
                 if (deezer.isNotEmpty()) deezer else appleRow("top hits")
@@ -160,25 +153,24 @@ class MusicBoxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val catalogue = getCatalogue()
         val primary = when (catalogue) {
-            "jiosaavn" -> searchJioSaavn(query)
-            "spotify" -> searchSpotify(query)
-            "apple" -> appleRow(query)
-            "soundcloud" -> searchSoundCloud(query)
-            "deezer" -> searchDeezer(query)
-            // All: every source that can answer, merged. JioSaavn first because it is the one that
-            // actually serves audio here; the others add catalogue breadth on top.
+            "jiosaavn"  -> searchJioSaavn(query)
+            "spotify"   -> searchSpotify(query)
+            "apple"     -> appleRow(query)
+            "soundcloud"-> searchSoundCloud(query)
+            "deezer"    -> searchDeezer(query)
+            "qobuz"     -> searchQobuz(query)
+            "tidal"     -> searchTidal(query)
+            "beatport"  -> searchBeatport(query)
             else -> {
+                // All: JioSaavn first (always plays), then catalogue sources
                 val merged = LinkedHashMap<String, SearchResponse>()
                 searchJioSaavn(query).forEach { merged[it.url] = it }
-                searchSpotify(query).forEach { merged[it.url] = it }
-                appleRow(query).forEach { merged[it.url] = it }
-                searchSoundCloud(query).forEach { merged[it.url] = it }
+                searchSpotify(query).forEach  { merged[it.url] = it }
+                appleRow(query).forEach        { merged[it.url] = it }
+                searchSoundCloud(query).forEach{ merged[it.url] = it }
                 merged.values.toList()
             }
         }
-        // a chosen catalogue that is unreachable must not mean an empty screen: Apple's catalogue
-        // needs no token and answers nearly everywhere, so it stands in when the pick returns
-        // nothing at all
         return primary.ifEmpty { appleRow(query) }
     }
 
@@ -186,11 +178,11 @@ class MusicBoxProvider : MainAPI() {
 
     private suspend fun searchSpotify(query: String): List<SearchResponse> {
         return try {
-            val (tracks, albums, artists) = SpotifyClient.search(query, 15)
-            val results = mutableListOf<SearchResponse>()
-            results.addAll(tracks.map { it.toSearchResponse() })
-            results.addAll(albums.map { it.toSearchResponse() })
-            results
+            val (tracks, albums, _) = SpotifyClient.search(query, 15)
+            buildList {
+                addAll(tracks.map { it.toSearchResponse() })
+                addAll(albums.map { it.toSearchResponse() })
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Spotify search failed, falling back: ${e.message}")
             searchDeezer(query)
@@ -198,30 +190,33 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private suspend fun searchDeezer(query: String): List<SearchResponse> {
-        return try {
-            DeezerApi.search(query, 20).map { it.toSearchResponse() }
-        } catch (e: Exception) {
-            Log.w(TAG, "Deezer search failed: ${e.message}")
-            emptyList()
-        }
+        return try { DeezerApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Deezer search failed: ${e.message}"); emptyList() }
     }
 
     private suspend fun searchSoundCloud(query: String): List<SearchResponse> {
-        return try {
-            SoundCloudApi.search(query, 20).map { it.toSearchResponse() }
-        } catch (e: Exception) {
-            Log.w(TAG, "SoundCloud search failed: ${e.message}")
-            emptyList()
-        }
+        return try { SoundCloudApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "SoundCloud search failed: ${e.message}"); emptyList() }
     }
 
     private suspend fun searchJioSaavn(query: String): List<SearchResponse> {
-        return try {
-            JioSaavnApi.search(query, 20).map { it.toSearchResponse() }
-        } catch (e: Exception) {
-            Log.w(TAG, "JioSaavn search failed: ${e.message}")
-            emptyList()
-        }
+        return try { JioSaavnApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "JioSaavn search failed: ${e.message}"); emptyList() }
+    }
+
+    private suspend fun searchQobuz(query: String): List<SearchResponse> {
+        return try { QobuzApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Qobuz search failed: ${e.message}"); emptyList() }
+    }
+
+    private suspend fun searchTidal(query: String): List<SearchResponse> {
+        return try { TidalApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Tidal search failed: ${e.message}"); emptyList() }
+    }
+
+    private suspend fun searchBeatport(query: String): List<SearchResponse> {
+        return try { BeatportApi.search(query, 20).map { it.toSearchResponse() } }
+        catch (e: Exception) { Log.w(TAG, "Beatport search failed: ${e.message}"); emptyList() }
     }
 
     // ========== Load (detail page) ==========
@@ -229,52 +224,42 @@ class MusicBoxProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         loadSession()
 
-        // URL format: musicbox://track/{source}/{sourceId}/{title}|{artist}
-        // or: musicbox://album/{source}/{albumId}/{title}
         val parts = url.removePrefix("$mainUrl/").split("/", limit = 4)
         if (parts.size < 3) return null
 
-        val kind = parts[0] // "track" or "album"
+        val kind   = parts[0]
         val source = parts[1]
-        val id = parts[2]
-        val extra = parts.getOrNull(3)?.split("|") ?: emptyList()
+        val id     = parts[2]
+        val extra  = parts.getOrNull(3)?.split("|") ?: emptyList()
 
         return when (kind) {
             "track" -> loadTrack(source, id, extra)
             "album" -> loadAlbum(source, id, extra)
-            else -> null
+            else    -> null
         }
     }
 
     private suspend fun loadTrack(source: String, id: String, extra: List<String>): LoadResponse? {
-        val title = extra.getOrNull(0)?.decodeUrl() ?: "Unknown"
+        val title  = extra.getOrNull(0)?.decodeUrl() ?: "Unknown"
         val artist = extra.getOrNull(1)?.decodeUrl() ?: ""
 
-        // Try to get full metadata from Deezer if source is deezer
         val track = when (source) {
             "deezer" -> DeezerApi.getTrack(id)
-            else -> {
-                // Cross-reference with Deezer for metadata
-                try {
-                    val results = DeezerApi.search("$title $artist", 1)
-                    results.firstOrNull()
-                } catch (_: Exception) { null }
-            }
+            else -> try { DeezerApi.search("$title $artist", 1).firstOrNull() } catch (_: Exception) { null }
         }
 
-        val finalTitle = track?.title ?: title
+        val finalTitle  = track?.title  ?: title
         val finalArtist = track?.artist ?: artist
-        val coverUrl = track?.coverUrl ?: ""
-        val duration = track?.duration ?: 0
+        val coverUrl    = track?.coverUrl ?: ""
+        val duration    = track?.duration ?: 0
 
-        // Build the play data that loadLinks will use
         val playData = JSONObject().apply {
-            put("source", source)
-            put("id", id)
-            put("title", finalTitle)
-            put("artist", finalArtist)
+            put("source",    source)
+            put("id",        id)
+            put("title",     finalTitle)
+            put("artist",    finalArtist)
             put("deezer_id", if (source == "deezer") id else (track?.sourceId ?: ""))
-            put("isrc", track?.isrc ?: "")
+            put("isrc",      track?.isrc ?: "")
         }.toString()
 
         return newMovieLoadResponse(
@@ -302,24 +287,23 @@ class MusicBoxProvider : MainAPI() {
 
         val tracks = when (source) {
             "deezer" -> try { DeezerApi.getAlbumTracks(albumId) } catch (_: Exception) { emptyList() }
-            else -> emptyList()
+            else     -> emptyList()
         }
-
         if (tracks.isEmpty()) return null
 
         val episodes = tracks.mapIndexed { index, track ->
             val epData = JSONObject().apply {
-                put("source", "deezer")
-                put("id", track.sourceId)
-                put("title", track.title)
-                put("artist", track.artist)
+                put("source",    "deezer")
+                put("id",        track.sourceId)
+                put("title",     track.title)
+                put("artist",    track.artist)
                 put("deezer_id", track.sourceId)
-                put("isrc", track.isrc)
+                put("isrc",      track.isrc)
             }.toString()
 
             newEpisode(epData) {
-                this.name = track.title
-                this.season = 1
+                this.name    = track.title
+                this.season  = 1
                 this.episode = index + 1
                 this.description = "${track.artist} • ${track.duration / 60}:${"%02d".format(track.duration % 60)}"
                 this.posterUrl = track.coverUrl
@@ -339,18 +323,6 @@ class MusicBoxProvider : MainAPI() {
 
     // ========== Load Links (play) ==========
 
-    /**
-     * Download provider priority (matches Mornye):
-     * 1. Amazon Music   → ZARZ ticket "amazeamazeamaze" → /dl/amazeamazeamaze
-     * 2. Deezer         → ZARZ ticket "dzr"              → /dl/dzr (+ Blowfish)
-     * 3. JioSaavn       → Direct DES-decrypted URL (no ZARZ)
-     * 4. SoundCloud     → Direct HLS/progressive stream (no ZARZ)
-     * 5. Tidal          → ZARZ ticket "tid"              → /dl/tid
-     * 6. YouTube Music  → Cobalt /v1/dl/cobalt (no ticket, plain POST)
-     *
-     * Each provider is tried top-to-bottom. If a track isn't available on one,
-     * the next is tried automatically.
-     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -360,66 +332,67 @@ class MusicBoxProvider : MainAPI() {
         loadSession()
 
         val obj = try { JSONObject(data) } catch (_: Exception) { return false }
-        val title = obj.optString("title", "")
-        val artist = obj.optString("artist", "")
+        val title    = obj.optString("title", "")
+        val artist   = obj.optString("artist", "")
         val deezerId = obj.optString("deezer_id", "")
-        val isrc = obj.optString("isrc", "")
-        val source = obj.optString("source", "")
-        val id = obj.optString("id", "")
+        val isrc     = obj.optString("isrc", "")
+        val source   = obj.optString("source", "")
+        val id       = obj.optString("id", "")
 
         var found = false
         pendingAuthUrl = null
 
-        // a stored session may have aged out; refresh it before anything tries to use it
         runCatching { zarzSession.refreshIfNeeded() }
             .onFailure { Log.w(TAG, "Session refresh failed: ${it.message}") }
         saveSession()
 
         val searchQuery = "$title $artist".trim()
 
-        // JioSaavn first. In this region it is the one source that reliably serves audio without a
-        // signed session, so it is what actually plays; the rest follow for quality and breadth.
-        if (!found) {
+        // 1. JioSaavn — always works without ZARZ, used as reliable floor
+        if (!found && MusicBoxSettings.enableJioSaavn) {
             found = tryJioSaavn(if (source == "jiosaavn") id else "", searchQuery, callback)
         }
 
-        // ---- Amazon Music (ZARZ signed) ----
-        if (!found) {
+        // 2. Amazon Music (ZARZ signed)
+        if (!found && MusicBoxSettings.enableAmazonDownload) {
             found = tryAmazonMusic(searchQuery, isrc, callback)
         }
 
-        // ---- Deezer (ZARZ signed + Blowfish) ----
-        if (!found) {
+        // 3. Deezer (ZARZ signed + Blowfish)
+        if (!found && MusicBoxSettings.enableDeezerDownload) {
             found = tryDeezer(deezerId, searchQuery, callback)
         }
 
-        // ---- SoundCloud (direct stream, no ZARZ) ----
-        if (!found) {
-            found = trySoundCloud(searchQuery, callback)
+        // 4. SoundCloud — tries ZARZ /dl/sc first, then falls back to direct stream
+        if (!found && MusicBoxSettings.enableSoundCloud) {
+            found = trySoundCloud(source, if (source == "soundcloud") id else "", searchQuery, callback)
         }
 
-        // ---- Tidal (ZARZ signed) ----
-        if (!found) {
+        // 5. Tidal (ZARZ signed)
+        if (!found && MusicBoxSettings.enableTidal) {
             found = tryTidal(searchQuery, isrc, callback)
         }
 
-        // ---- YouTube Music ----
-        if (!found) {
+        // 6. Qobuz (ZARZ signed)
+        if (!found && MusicBoxSettings.enableQobuz) {
+            found = tryQobuz(searchQuery, isrc, callback)
+        }
+
+        // 7. YouTube Music (Cobalt → CloudStream extractor)
+        if (!found && MusicBoxSettings.enableYouTubeFallback) {
             found = tryYouTubeMusic(searchQuery, subtitleCallback, callback)
         }
 
-        // ---- Apple's preview: public, no token, and it answers in this region ----
+        // 8. Apple preview (always available, 30s)
         if (!found) {
             found = tryApplePreview(searchQuery, callback)
         }
 
-        // ---- Last resort: Deezer 30s preview ----
+        // 9. Deezer 30s preview
         if (!found && deezerId.isNotBlank()) {
             found = tryDeezerPreview(deezerId, callback)
         }
 
-        // nothing played and the resolver wants a verification: open it now rather than leaving the
-        // user with a silent failure and no idea that api.zarz.moe is the missing piece
         if (!found) {
             pendingAuthUrl?.let { offerVerification(it) }
         }
@@ -427,19 +400,9 @@ class MusicBoxProvider : MainAPI() {
         return found
     }
 
-
-    /**
-     * Opens the resolver's challenge once, exchanges the grant for a session, and tells the user to
-     * press play again. It is deliberately not automatic on every attempt - the dialog is opened at
-     * most once per play, and the session is then reused.
-     */
     private fun offerVerification(authUrl: String) {
         try {
-            val activity = com.lagradost.cloudstream3.CommonActivity.activity
-            if (activity == null) {
-                Log.w(TAG, "Verification needed at $authUrl (no activity to show it in)")
-                return
-            }
+            val activity = com.lagradost.cloudstream3.CommonActivity.activity ?: return
             MusicBoxBrowser.openVerification(activity, authUrl) { grant ->
                 scope.launch {
                     try {
@@ -448,7 +411,7 @@ class MusicBoxProvider : MainAPI() {
                         withContext(Dispatchers.Main) {
                             android.widget.Toast.makeText(
                                 activity,
-                                "MusicBox: resolver verified - press play again for the full file",
+                                "MusicBox: resolver verified — press play again",
                                 android.widget.Toast.LENGTH_LONG
                             ).show()
                         }
@@ -462,31 +425,23 @@ class MusicBoxProvider : MainAPI() {
         }
     }
 
-    // ========== Per-provider download methods ==========
+    // ── Amazon Music ───────────────────────────────────────────────────────────
 
-    private suspend fun tryAmazonMusic(
-        query: String,
-        isrc: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableAmazonDownload) return false
+    private suspend fun tryAmazonMusic(query: String, isrc: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Use ISRC or query as the identifier for Amazon
             val identifier = isrc.ifBlank { query }
             val descriptor = zarzSession.resolveAmazonDownload(identifier)
             saveSession()
 
             val url = extractDownloadUrl(descriptor)
             if (url != null) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", "Amazon Music FLAC", url, ExtractorLinkType.VIDEO) {
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+                callback.invoke(newExtractorLink("MusicBox", "Amazon Music FLAC", url, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                })
                 return true
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
-            Log.w(TAG, "ZARZ verification required for Amazon: ${e.authUrl}")
+            Log.w(TAG, "ZARZ verification required (Amazon): ${e.authUrl}")
             pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
@@ -496,17 +451,11 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
-    private suspend fun tryDeezer(
-        deezerId: String,
-        query: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableDeezerDownload) return false
+    // ── Deezer ─────────────────────────────────────────────────────────────────
 
+    private suspend fun tryDeezer(deezerId: String, query: String, callback: (ExtractorLink) -> Unit): Boolean {
         val trackId = deezerId.ifBlank {
-            try {
-                DeezerApi.search(query, 1).firstOrNull()?.sourceId ?: ""
-            } catch (_: Exception) { "" }
+            try { DeezerApi.search(query, 1).firstOrNull()?.sourceId ?: "" } catch (_: Exception) { "" }
         }
         if (trackId.isBlank()) return false
 
@@ -529,31 +478,27 @@ class MusicBoxProvider : MainAPI() {
                         quality.contains("128", true) -> "128kbps"
                         else -> quality.ifBlank { format }
                     }
-                    callback.invoke(
-                        newExtractorLink("MusicBox", "Deezer $qualityLabel", url, ExtractorLinkType.VIDEO) {
-                            this.quality = when {
-                                format.contains("flac", true) -> Qualities.Unknown.value
-                                quality.contains("320") -> 320
-                                quality.contains("128") -> 128
-                                else -> Qualities.Unknown.value
-                            }
+                    callback.invoke(newExtractorLink("MusicBox", "Deezer $qualityLabel", url, ExtractorLinkType.VIDEO) {
+                        this.quality = when {
+                            format.contains("flac", true) -> Qualities.Unknown.value
+                            quality.contains("320") -> 320
+                            quality.contains("128") -> 128
+                            else -> Qualities.Unknown.value
                         }
-                    )
+                    })
                     return true
                 }
             }
 
             val cdnUrl = descriptor.optString("url", "")
             if (cdnUrl.isNotBlank()) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", "Deezer CDN", cdnUrl, ExtractorLinkType.VIDEO) {
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+                callback.invoke(newExtractorLink("MusicBox", "Deezer CDN", cdnUrl, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                })
                 return true
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
-            Log.w(TAG, "ZARZ verification required for Deezer: ${e.authUrl}")
+            Log.w(TAG, "ZARZ verification required (Deezer): ${e.authUrl}")
             pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
@@ -563,12 +508,9 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
-    private suspend fun tryJioSaavn(
-        saavnId: String,
-        query: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableJioSaavn) return false
+    // ── JioSaavn ───────────────────────────────────────────────────────────────
+
+    private suspend fun tryJioSaavn(saavnId: String, query: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
             val streamUrl = if (saavnId.isNotBlank()) {
                 JioSaavnApi.getStreamUrl(saavnId, "320")
@@ -580,11 +522,9 @@ class MusicBoxProvider : MainAPI() {
                 } else ""
             }
             if (streamUrl.isNotBlank()) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", "JioSaavn 320kbps", streamUrl, ExtractorLinkType.VIDEO) {
-                        this.quality = 320
-                    }
-                )
+                callback.invoke(newExtractorLink("MusicBox", "JioSaavn 320kbps", streamUrl, ExtractorLinkType.VIDEO) {
+                    this.quality = 320
+                })
                 return true
             }
         } catch (e: Exception) {
@@ -593,51 +533,69 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
-    private suspend fun trySoundCloud(
-        query: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableSoundCloud) return false
-        try {
-            val results = SoundCloudApi.search(query, 1)
-            val track = results.firstOrNull() ?: return false
-            // SoundCloud tracks have a progressive or HLS stream URL
-            // We need to resolve it through the API
-            val trackId = track.sourceId
-            if (trackId.isBlank()) return false
+    // ── SoundCloud ────────────────────────────────────────────────────────────
+    // Strategy: try ZARZ /dl/sc first (higher quality), fall back to direct stream.
 
+    private suspend fun trySoundCloud(source: String, scId: String, query: String, callback: (ExtractorLink) -> Unit): Boolean {
+        // Resolve the SoundCloud track ID if we don't have it yet
+        val trackId = if (scId.isNotBlank()) scId else {
+            try { SoundCloudApi.search(query, 1).firstOrNull()?.sourceId ?: "" } catch (_: Exception) { "" }
+        }
+        if (trackId.isBlank()) return false
+
+        // Attempt ZARZ /dl/sc for higher quality
+        try {
+            val descriptor = zarzSession.resolveSoundCloudDownload(trackId)
+            saveSession()
+            val url = extractDownloadUrl(descriptor)
+            if (url != null) {
+                val isHls = url.contains(".m3u8", true)
+                callback.invoke(newExtractorLink(
+                    "MusicBox", "SoundCloud (ZARZ)",
+                    url,
+                    if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                ) {
+                    this.quality = 320
+                })
+                return true
+            }
+        } catch (e: ZarzSession.VerificationRequiredException) {
+            Log.w(TAG, "ZARZ verification required (SoundCloud): ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
+            saveSession()
+            // Fall through to direct stream — don't block playback
+        } catch (e: Exception) {
+            Log.d(TAG, "SoundCloud ZARZ failed, trying direct: ${e.message}")
+            saveSession()
+        }
+
+        // Direct stream fallback (no ZARZ needed)
+        try {
             val streamUrl = SoundCloudApi.getStreamUrl(trackId)
             if (streamUrl.isNotBlank()) {
                 val isHls = streamUrl.contains(".m3u8", true)
-                callback.invoke(
-                    newExtractorLink(
-                        "MusicBox", "SoundCloud",
-                        streamUrl,
-                        if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    ) {
-                        this.quality = 160
-                    }
-                )
+                callback.invoke(newExtractorLink(
+                    "MusicBox", "SoundCloud",
+                    streamUrl,
+                    if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                ) {
+                    this.quality = 160
+                })
                 return true
             }
         } catch (e: Exception) {
-            Log.d(TAG, "SoundCloud failed: ${e.message}")
+            Log.d(TAG, "SoundCloud direct failed: ${e.message}")
         }
         return false
     }
 
-    private suspend fun tryTidal(
-        query: String,
-        isrc: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableTidal) return false
+    // ── Tidal ──────────────────────────────────────────────────────────────────
+
+    private suspend fun tryTidal(query: String, isrc: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Search Tidal for the track to get its ID
             val results = TidalApi.search(query, 1)
             val track = results.firstOrNull() ?: return false
-            val trackId = track.sourceId
-            if (trackId.isBlank()) return false
+            val trackId = track.sourceId.ifBlank { return false }
 
             val descriptor = zarzSession.resolveTidalDownload(trackId)
             saveSession()
@@ -645,19 +603,17 @@ class MusicBoxProvider : MainAPI() {
             val url = extractDownloadUrl(descriptor)
             if (url != null) {
                 val isHls = url.contains(".m3u8", true) || url.contains("manifest", true)
-                callback.invoke(
-                    newExtractorLink(
-                        "MusicBox", "Tidal FLAC",
-                        url,
-                        if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+                callback.invoke(newExtractorLink(
+                    "MusicBox", "Tidal FLAC",
+                    url,
+                    if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                ) {
+                    this.quality = Qualities.Unknown.value
+                })
                 return true
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
-            Log.w(TAG, "ZARZ verification required for Tidal: ${e.authUrl}")
+            Log.w(TAG, "ZARZ verification required (Tidal): ${e.authUrl}")
             pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
@@ -667,24 +623,103 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
+    // ── Qobuz ─────────────────────────────────────────────────────────────────
 
-    /**
-     * Apple's catalogue needs no token and its previews are reachable in this region, so this is
-     * the floor: if every other provider declines, a track still plays 30 seconds.
-     */
-    private suspend fun tryApplePreview(
+    private suspend fun tryQobuz(query: String, isrc: String, callback: (ExtractorLink) -> Unit): Boolean {
+        try {
+            val results = QobuzApi.search(query, 1)
+            val track = results.firstOrNull() ?: return false
+            val trackId = track.sourceId.ifBlank { return false }
+
+            val descriptor = zarzSession.resolveQobuzDownload(trackId)
+            saveSession()
+
+            val url = extractDownloadUrl(descriptor)
+            if (url != null) {
+                callback.invoke(newExtractorLink("MusicBox", "Qobuz FLAC", url, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                })
+                return true
+            }
+        } catch (e: ZarzSession.VerificationRequiredException) {
+            Log.w(TAG, "ZARZ verification required (Qobuz): ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
+            saveSession()
+        } catch (e: Exception) {
+            Log.d(TAG, "Qobuz download failed: ${e.message}")
+            saveSession()
+        }
+        return false
+    }
+
+    // ── YouTube Music ──────────────────────────────────────────────────────────
+
+    private suspend fun tryYouTubeMusic(
         query: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
+        try {
+            val videoId = YouTubeMusicApi.searchVideoId(query) ?: return false
+            val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
+
+            // Try CloudStream's own extractor first (no session needed)
+            val viaExtractor = mutableListOf<ExtractorLink>()
+            try {
+                loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
+                    viaExtractor.add(it)
+                }
+            } catch (_: Exception) {}
+
+            if (viaExtractor.isNotEmpty()) {
+                viaExtractor.forEach { link ->
+                    callback.invoke(newExtractorLink(
+                        "MusicBox", "YouTube Music · ${link.name}",
+                        link.url, link.type,
+                    ) {
+                        this.quality = link.quality
+                        this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
+                        this.headers = link.headers
+                    })
+                }
+                return true
+            }
+
+            // Cobalt (ZARZ API v1) as second option
+            try {
+                val cobalt = zarzSession.resolveYouTubeDownload(youtubeUrl)
+                val url = cobalt.optString("url", "")
+                if (url.isNotBlank()) {
+                    callback.invoke(newExtractorLink("MusicBox", "YouTube Music", url, ExtractorLinkType.VIDEO) {
+                        this.quality = Qualities.Unknown.value
+                    })
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Cobalt failed: ${e.message}")
+            }
+
+            // Final fallback: plain YouTube extractor
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            loadExtractor(watchUrl, subtitleCallback, callback)
+            return true
+
+        } catch (e: Exception) {
+            Log.d(TAG, "YouTube Music failed: ${e.message}")
+        }
+        return false
+    }
+
+    // ── Apple preview ──────────────────────────────────────────────────────────
+
+    private suspend fun tryApplePreview(query: String, callback: (ExtractorLink) -> Unit): Boolean {
         return try {
             val track = AppleMusicApi.search(query, 5).firstOrNull() ?: return false
             val url = track.previewUrl.ifBlank { return false }
-            callback.invoke(
-                newExtractorLink("MusicBox", "Apple Music preview (30s)", url, ExtractorLinkType.VIDEO) {
-                    this.quality = Qualities.Unknown.value
-                    this.referer = "https://music.apple.com/"
-                }
-            )
+            callback.invoke(newExtractorLink("MusicBox", "Apple Music preview (30s)", url, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+                this.referer = "https://music.apple.com/"
+            })
             true
         } catch (e: Exception) {
             Log.w(TAG, "Apple preview failed: ${e.message}")
@@ -692,99 +727,27 @@ class MusicBoxProvider : MainAPI() {
         }
     }
 
-    private suspend fun tryYouTubeMusic(
-        query: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        if (!MusicBoxSettings.enableYouTubeFallback) return false
-        try {
-            val videoId = YouTubeMusicApi.searchVideoId(query)
-            if (videoId != null) {
-                val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
+    // ── Deezer preview ─────────────────────────────────────────────────────────
 
-                // Cloudstream's own extractor first: it solves YouTube's signature itself and needs
-                // no session, so this works even when the resolver does not
-                val viaExtractor = mutableListOf<ExtractorLink>()
-                try {
-                    loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
-                        viaExtractor.add(it)
-                    }
-                } catch (_: Exception) {
-                }
-                if (viaExtractor.isNotEmpty()) {
-                    viaExtractor.forEach { link ->
-                        callback.invoke(
-                            newExtractorLink(
-                                "MusicBox",
-                                "YouTube Music · ${link.name}",
-                                link.url,
-                                link.type,
-                            ) {
-                                this.quality = link.quality
-                                this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
-                                this.headers = link.headers
-                            }
-                        )
-                    }
-                    return true
-                }
-
-                // then Cobalt (ZARZ API v1), for when the extractor is unavailable
-                try {
-                    val cobalt = zarzSession.resolveYouTubeDownload(youtubeUrl)
-                    val url = cobalt.optString("url", "")
-                    if (url.isNotBlank()) {
-                        callback.invoke(
-                            newExtractorLink("MusicBox", "YouTube Music", url, ExtractorLinkType.VIDEO) {
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        return true
-                    }
-                } catch (e: Exception) {
-                    Log.d(TAG, "Cobalt failed, trying extractor: ${e.message}")
-                }
-
-                // Fall back to CloudStream's built-in YouTube extractor
-                val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-                loadExtractor(watchUrl, subtitleCallback, callback)
-                return true
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "YouTube Music failed: ${e.message}")
-        }
-        return false
-    }
-
-    private suspend fun tryDeezerPreview(
-        deezerId: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
+    private suspend fun tryDeezerPreview(deezerId: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
             val track = DeezerApi.getTrack(deezerId)
             if (track != null && track.previewUrl.isNotBlank()) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", "Deezer Preview (30s)", track.previewUrl, ExtractorLinkType.VIDEO) {
-                        this.quality = 128
-                    }
-                )
+                callback.invoke(newExtractorLink("MusicBox", "Deezer Preview (30s)", track.previewUrl, ExtractorLinkType.VIDEO) {
+                    this.quality = 128
+                })
                 return true
             }
         } catch (_: Exception) {}
         return false
     }
 
-    /**
-     * Extract a download URL from a ZARZ download descriptor response.
-     * Different providers return the URL in different fields.
-     */
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
     private fun extractDownloadUrl(descriptor: JSONObject): String? {
-        // Direct URL field
         val url = descriptor.optString("url", "")
         if (url.isNotBlank()) return url
 
-        // Sources array (Deezer style)
         val sources = descriptor.optJSONArray("sources")
         if (sources != null && sources.length() > 0) {
             for (i in 0 until sources.length()) {
@@ -794,11 +757,9 @@ class MusicBoxProvider : MainAPI() {
             }
         }
 
-        // Download URL field
         val dlUrl = descriptor.optString("download_url", descriptor.optString("downloadUrl", ""))
         if (dlUrl.isNotBlank()) return dlUrl
 
-        // Manifest URL (Tidal HLS)
         val manifest = descriptor.optString("manifest", descriptor.optString("manifestUrl", ""))
         if (manifest.isNotBlank()) return manifest
 
@@ -812,20 +773,15 @@ class MusicBoxProvider : MainAPI() {
             "$title - $artist",
             "$mainUrl/track/$source/$sourceId/${title.encodeUrl()}|${artist.encodeUrl()}",
             TvType.Music,
-        ) {
-            this.posterUrl = coverUrl
-        }
+        ) { this.posterUrl = coverUrl }
     }
 
     private fun SpotifyClient.SpotifyTrack.toSearchResponse(): SearchResponse {
-        // Find Deezer ID for this track via ISRC or title+artist
         return newMovieSearchResponse(
             "$name - $artist",
             "$mainUrl/track/spotify/$id/${name.encodeUrl()}|${artist.encodeUrl()}",
             TvType.Music,
-        ) {
-            this.posterUrl = coverUrl
-        }
+        ) { this.posterUrl = coverUrl }
     }
 
     private fun SpotifyClient.SpotifyAlbum.toSearchResponse(): SearchResponse {
@@ -833,9 +789,7 @@ class MusicBoxProvider : MainAPI() {
             "$name - $artist",
             "$mainUrl/album/spotify/$id/${name.encodeUrl()}",
             TvType.Music,
-        ) {
-            this.posterUrl = coverUrl
-        }
+        ) { this.posterUrl = coverUrl }
     }
 
     private fun MusicAlbum.toSearchResponse(): SearchResponse {
@@ -843,12 +797,8 @@ class MusicBoxProvider : MainAPI() {
             "$title - $artist",
             "$mainUrl/album/$source/${id.substringAfter(":")}/${title.encodeUrl()}",
             TvType.Music,
-        ) {
-            this.posterUrl = coverUrl
-        }
+        ) { this.posterUrl = coverUrl }
     }
-
-    // ========== Utilities ==========
 
     private fun String.encodeUrl(): String = java.net.URLEncoder.encode(this, "UTF-8")
     private fun String.decodeUrl(): String = java.net.URLDecoder.decode(this, "UTF-8")

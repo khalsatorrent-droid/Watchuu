@@ -3,12 +3,11 @@ package com.watchuu.musicbox
 import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import org.json.JSONObject
-import java.net.URL
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.net.URL
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -16,21 +15,13 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * ZARZ-HMAC-V1 signed session client.
  *
- * Reverse-engineered from the Mornye Rust backend (rust_backend/crates/extensions/src/signed_session/).
- * Implements the full bootstrap → challenge → exchange → refresh → signedFetch lifecycle.
- *
- * Updated appVersion strings match the registry.json versions as of 2026-11-08:
- *   amazon  → amzn@2.3.19   (was 2.3.12)
- *   deezer  → deezer@1.3.11 (was 1.3.5)
- *   tidal   → tidal-web@1.2.14 (was 1.2.5)
- *
- * FIX: bootstrap() now accepts an optional appVersionOverride so each provider
- *      can bootstrap with its own appVersion, matching what the ZARZ gateway expects.
+ * Implements the full bootstrap -> challenge -> exchange -> refresh -> signedFetch lifecycle,
+ * supporting Deezer, Amazon Music, Tidal, Qobuz, and Cobalt YouTube resolution.
  */
 class ZarzSession(
     private val namespace: String = "zarz-v2",
     private val baseUrl: String = "https://api.zarz.moe/v2",
-    private val appVersion: String = APP_VERSION_DEEZER,
+    private val appVersion: String = "deezer@1.3.5",
     private val platform: String = "extension",
     private val schemeLabel: String = "ZARZ-HMAC-V1",
     private val headerPrefix: String = "X-Zarz-",
@@ -45,17 +36,12 @@ class ZarzSession(
         private const val TAG = "ZarzSession"
         private const val USER_AGENT = "Mornye/ext-1.0"
 
-        // Per-provider appVersion strings — keep in sync with registry.json versions
-        const val APP_VERSION_DEEZER   = "deezer@1.3.11"
-        const val APP_VERSION_AMAZON   = "amzn@2.3.19"
-        const val APP_VERSION_TIDAL    = "tidal-web@1.2.14"
-        const val APP_VERSION_QOBUZ    = "qobuz-web@1.2.27"
-        const val APP_VERSION_YTMUSIC  = "ytmusic-spotiflac@2.4.6"
-        const val APP_VERSION_SC       = "soundcloud@1.0.14"
-        const val APP_VERSION_BEATPORT = "beatport@1.0.1"
+        const val APP_VERSION_DEEZER = "deezer@1.3.5"
+        const val APP_VERSION_AMAZON = "amzn@2.3.12"
+        const val APP_VERSION_TIDAL = "tidal-web@1.2.5"
+        const val APP_VERSION_QOBUZ = "qobuz@1.1.0"
     }
 
-    // Session record - persisted
     data class SessionRecord(
         var installId: String = "",
         var sessionId: String = "",
@@ -75,12 +61,10 @@ class ZarzSession(
         }
     }
 
-    // Mutable session state
     @Volatile
     var record: SessionRecord = SessionRecord()
         private set
 
-    // Whether we need verification (challenge URL pending)
     @Volatile
     var verificationUrl: String = ""
         private set
@@ -89,9 +73,6 @@ class ZarzSession(
     var needsVerification: Boolean = false
         private set
 
-    /**
-     * Load session state from persisted JSON string.
-     */
     fun loadState(json: String?) {
         if (json.isNullOrBlank()) {
             record = SessionRecord(installId = randomHex(16))
@@ -110,9 +91,6 @@ class ZarzSession(
         }
     }
 
-    /**
-     * Serialize session state for persistence.
-     */
     fun saveState(): String {
         return JSONObject().apply {
             put("install_id", record.installId)
@@ -122,23 +100,17 @@ class ZarzSession(
         }.toString()
     }
 
-    /**
-     * Bootstrap - GET /bootstrap to obtain a session or a verification challenge.
-     * Returns empty string if session obtained, or a challenge URL if verification needed.
-     *
-     * FIX: accepts appVersionOverride so provider-specific bootstraps work correctly.
-     */
-    suspend fun bootstrap(appVersionOverride: String? = null): String {
-        val effectiveVersion = appVersionOverride ?: appVersion
+    suspend fun bootstrap(): String {
         val url = resolveEndpoint(bootstrapPath)
-        val fullUrl = "$url?app_version=${effectiveVersion.encodeUrl()}&install_id=${record.installId.encodeUrl()}"
+        val fullUrl = "$url?app_version=${appVersion.encodeUrl()}&install_id=${record.installId.encodeUrl()}"
 
         val response = app.get(
             fullUrl,
             headers = mapOf(
                 "Accept" to "application/json",
                 "User-Agent" to USER_AGENT,
-            )
+            ),
+            timeout = 12L
         )
 
         if (response.code !in 200..299) {
@@ -148,7 +120,6 @@ class ZarzSession(
         val body = response.text
         val obj = JSONObject(body)
 
-        // Check if we got a direct session
         val sid = obj.optString("session_id", "")
         val secret = obj.optString("session_secret", "")
         val expires = obj.optString("expires_at", "")
@@ -163,7 +134,6 @@ class ZarzSession(
             return ""
         }
 
-        // Otherwise we got a challenge
         var authUrl = obj.optString("auth_url", "")
         if (authUrl.isBlank()) authUrl = obj.optString("challenge_url", "")
 
@@ -171,7 +141,9 @@ class ZarzSession(
         if (authUrl.isBlank() && challengeId.isNotBlank()) {
             val challengeEndpoint = resolveEndpoint(challengePath)
             val state = randomHex(16)
-            authUrl = "$challengeEndpoint?id=${challengeId.encodeUrl()}&cb=${"mornye://session-grant?cb_version=v2grant&state=$state".encodeUrl()}"
+            authUrl = "$challengeEndpoint?id=${challengeId.encodeUrl()}&cb=${
+                "mornye://session-grant?cb_version=v2grant&state=$state".encodeUrl()
+            }"
         }
 
         if (authUrl.isBlank()) {
@@ -184,9 +156,6 @@ class ZarzSession(
         return authUrl
     }
 
-    /**
-     * Exchange a verification grant code for a session.
-     */
     suspend fun exchange(grant: String) {
         val url = resolveEndpoint(exchangePath)
         val payload = JSONObject().apply {
@@ -206,7 +175,8 @@ class ZarzSession(
                     "User-Agent" to USER_AGENT,
                 ),
                 requestBody = payload.toString()
-                    .toRequestBody("application/json".toMediaType())
+                    .toRequestBody("application/json".toMediaType()),
+                timeout = 12L
             )
 
             if (response.code == 429 && attempt < 2) {
@@ -239,14 +209,11 @@ class ZarzSession(
         Log.d(TAG, "Exchange: obtained session, expires $expires")
     }
 
-    /**
-     * Refresh the session token if it's expiring soon (within 1 hour).
-     */
     suspend fun refreshIfNeeded() {
         if (refreshPath.isBlank() || !record.isUsable()) return
         val expires = parseTimestamp(record.expiresAt) ?: return
         val now = System.currentTimeMillis()
-        if (now >= expires || expires - now > 3_600_000) return // not due
+        if (now >= expires || expires - now > 3_600_000) return
 
         try {
             val payload = JSONObject().apply { put("install_id", record.installId) }
@@ -269,7 +236,6 @@ class ZarzSession(
         }
     }
 
-    /** Public accessor so MusicBoxProvider can read the header prefix. */
     val headerPrefixPublic: String get() = headerPrefix
 
     suspend fun signedFetch(
@@ -280,8 +246,7 @@ class ZarzSession(
         appVersionOverride: String? = null,
     ): SignedResponse {
         if (!record.isUsable()) {
-            // FIX: pass appVersionOverride to bootstrap so the gateway sees the right version
-            val url = bootstrap(appVersionOverride)
+            val url = bootstrap()
             if (url.isNotEmpty()) {
                 return SignedResponse(
                     ok = false,
@@ -300,15 +265,19 @@ class ZarzSession(
         val response = signedRequest(method, path, body ?: "", extraHeaders, appVersionOverride)
         val responseBody = response.text
 
-        val contract = try { JSONObject(responseBody) } catch (_: Exception) { null }
+        val contract = try {
+            JSONObject(responseBody)
+        } catch (_: Exception) {
+            null
+        }
+
         val errorCode = contract?.optString("code", "")?.uppercase() ?: ""
         val origin = contract?.optString("origin", "")?.lowercase() ?: ""
         val action = contract?.optString("action", "")?.lowercase() ?: ""
 
         if (response.code == 401 && origin == "gateway" && errorCode == "SESSION_INVALID" && action == "bootstrap_session") {
             record.clear()
-            // FIX: pass appVersionOverride to bootstrap on session-invalid retry
-            val url = bootstrap(appVersionOverride)
+            val url = bootstrap()
             if (url.isNotEmpty()) {
                 return SignedResponse(ok = false, needsVerification = true, error = "VERIFY_REQUIRED", authUrl = url)
             }
@@ -323,8 +292,7 @@ class ZarzSession(
         }
 
         if (response.code == 428 && origin == "gateway" && errorCode == "VERIFY_REQUIRED" && action == "verify") {
-            // FIX: pass appVersionOverride to bootstrap on verify-required
-            val url = bootstrap(appVersionOverride)
+            val url = bootstrap()
             if (url.isNotEmpty()) {
                 return SignedResponse(ok = false, needsVerification = true, error = "VERIFY_REQUIRED", authUrl = url)
             }
@@ -352,15 +320,15 @@ class ZarzSession(
             else -> body.toJson()
         }
         val response = signedFetch(method, path, bodyStr, extraHeaders, appVersionOverride)
-        if (response.needsVerification) throw VerificationRequiredException(response.authUrl)
-        if (!response.ok) throw Exception("Signed request failed: HTTP ${response.statusCode} ${response.error}")
+        if (response.needsVerification) {
+            throw VerificationRequiredException(response.authUrl)
+        }
+        if (!response.ok) {
+            throw Exception("Signed request failed: HTTP ${response.statusCode} ${response.error}")
+        }
         return JSONObject(response.body ?: "{}")
     }
 
-    /**
-     * Get a download ticket.
-     * resource_hash = sha256(provider + ":" + type + ":" + id.toLowerCase())
-     */
     suspend fun signedTicket(provider: String, type: String = "track", id: String, appVersionOverride: String? = null): String {
         val resourceHash = sha256Hex("$provider:$type:${id.lowercase()}")
         val payload = JSONObject().apply {
@@ -369,12 +337,11 @@ class ZarzSession(
             put("resource_hash", resourceHash)
         }
         val result = signedJson("POST", "/tickets", payload, appVersionOverride = appVersionOverride)
-        val ticketId = (result.optString("ticket_id", "") ?: result.optString("ticket", "")).trim()
+        val ticketId = (result.optString("ticket_id", "").ifBlank { result.optString("ticket", "") }).trim()
         if (ticketId.isBlank()) throw Exception("Signed ticket response missing ticket_id")
         return ticketId
     }
 
-    // ── Deezer ─────────────────────────────────────────────────────────────────
     suspend fun resolveDownloadDescriptor(trackId: String): JSONObject {
         val trackUrl = "https://www.deezer.com/track/$trackId"
         val ticket = signedTicket("dzr", "track", trackUrl, appVersionOverride = APP_VERSION_DEEZER)
@@ -391,7 +358,6 @@ class ZarzSession(
         )
     }
 
-    // ── Amazon Music ───────────────────────────────────────────────────────────
     suspend fun resolveAmazonDownload(asin: String, codec: String = "flac"): JSONObject {
         val ticket = signedTicket("amazeamazeamaze", "track", asin, appVersionOverride = APP_VERSION_AMAZON)
         return signedJson(
@@ -405,7 +371,6 @@ class ZarzSession(
         )
     }
 
-    // ── Tidal ──────────────────────────────────────────────────────────────────
     suspend fun resolveTidalDownload(trackId: String, quality: String = "LOSSLESS"): JSONObject {
         val ticket = signedTicket("tid", "track", trackId, appVersionOverride = APP_VERSION_TIDAL)
         return signedJson(
@@ -419,48 +384,19 @@ class ZarzSession(
         )
     }
 
-    // ── Qobuz ─────────────────────────────────────────────────────────────────
-    /**
-     * Resolve a Qobuz track download via ZARZ.
-     * Provider code: "qbz", download path: "/dl/qbz"
-     */
     suspend fun resolveQobuzDownload(trackId: String, quality: Int = 27): JSONObject {
         val ticket = signedTicket("qbz", "track", trackId, appVersionOverride = APP_VERSION_QOBUZ)
         return signedJson(
             "POST", "/dl/qbz",
             JSONObject().apply {
                 put("id", trackId)
-                put("quality", quality) // 5=MP3, 6=CD, 7=24/96, 27=24/192
+                put("quality", quality)
             },
             mapOf("${headerPrefix}Ticket" to ticket),
             appVersionOverride = APP_VERSION_QOBUZ,
         )
     }
 
-    // ── SoundCloud ────────────────────────────────────────────────────────────
-    /**
-     * Resolve a SoundCloud track download via ZARZ.
-     * Provider code: "sc", download path: "/dl/sc"
-     * Falls back to direct SoundCloud stream if ZARZ is unavailable.
-     */
-    suspend fun resolveSoundCloudDownload(trackId: String): JSONObject {
-        val ticket = signedTicket("sc", "track", trackId, appVersionOverride = APP_VERSION_SC)
-        return signedJson(
-            "POST", "/dl/sc",
-            JSONObject().apply {
-                put("id", trackId)
-            },
-            mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_SC,
-        )
-    }
-
-    // ── YouTube Music ──────────────────────────────────────────────────────────
-    /**
-     * Resolve a YouTube Music download via Cobalt.
-     * Uses api.zarz.moe/v1/dl/cobalt (NOTE: v1, not v2).
-     * This does NOT use signed session — it's a plain POST.
-     */
     suspend fun resolveYouTubeDownload(youtubeUrl: String): JSONObject {
         val response = app.post(
             "https://api.zarz.moe/v1/dl/cobalt",
@@ -473,36 +409,14 @@ class ZarzSession(
                 put("url", youtubeUrl)
                 put("downloadMode", "audio")
                 put("audioFormat", "best")
-            }.toString().toRequestBody("application/json".toMediaType())
+            }.toString().toRequestBody("application/json".toMediaType()),
+            timeout = 12L
         )
         if (response.code !in 200..299) {
             throw Exception("Cobalt audio failed: HTTP ${response.code}")
         }
         return JSONObject(response.text)
     }
-
-    // ── Beatport ───────────────────────────────────────────────────────────────
-    /**
-     * Resolve a Beatport track download via ZARZ.
-     * Provider code: "bp", download path: "/dl/bp"
-     */
-    suspend fun resolveBeatportDownload(trackId: String, format: String = "flac"): JSONObject {
-        val ticket = signedTicket("bp", "track", trackId, appVersionOverride = APP_VERSION_BEATPORT)
-        return signedJson(
-            "POST", "/dl/bp",
-            JSONObject().apply {
-                put("id", trackId)
-                put("format", format) // "flac" or "aac"
-            },
-            mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_BEATPORT,
-        )
-    }
-
-    // ── JioSaavn (direct, no ZARZ ticket) ─────────────────────────────────────
-    // JioSaavn still uses direct DES-decrypted URL — no ZARZ ticket needed.
-
-    // ========== Internal signing mechanics ==========
 
     private suspend fun signedRequest(
         method: String,
@@ -520,11 +434,21 @@ class ZarzSession(
         headers.putAll(extraHeaders.map { (k, v) -> k.lowercase() to v })
 
         return when (method.uppercase()) {
-            "GET"    -> app.get(url, headers = headers)
-            "POST"   -> app.post(url, headers = headers, requestBody = body.toRequestBody("application/json".toMediaType()))
-            "PUT"    -> app.put(url, headers = headers, requestBody = body.toRequestBody("application/json".toMediaType()))
-            "DELETE" -> app.delete(url, headers = headers)
-            else     -> app.get(url, headers = headers)
+            "GET" -> app.get(url, headers = headers, timeout = 12L)
+            "POST" -> app.post(
+                url,
+                headers = headers,
+                requestBody = body.toRequestBody("application/json".toMediaType()),
+                timeout = 15L
+            )
+            "PUT" -> app.put(
+                url,
+                headers = headers,
+                requestBody = body.toRequestBody("application/json".toMediaType()),
+                timeout = 12L
+            )
+            "DELETE" -> app.delete(url, headers = headers, timeout = 12L)
+            else -> app.get(url, headers = headers, timeout = 12L)
         }
     }
 
@@ -573,13 +497,13 @@ class ZarzSession(
         val signature = hmacSha256Base64(rollingKeyBase64.toByteArray(), stringToSign.toByteArray())
 
         return mapOf(
-            "${headerPrefix}Session"     to record.sessionId,
-            "${headerPrefix}Timestamp"   to timestamp,
-            "${headerPrefix}Nonce"       to nonce,
+            "${headerPrefix}Session" to record.sessionId,
+            "${headerPrefix}Timestamp" to timestamp,
+            "${headerPrefix}Nonce" to nonce,
             "${headerPrefix}Body-SHA256" to bodySha256,
-            "${headerPrefix}Signature"   to signature,
+            "${headerPrefix}Signature" to signature,
             "${headerPrefix}App-Version" to effectiveAppVersion,
-            "${headerPrefix}Platform"    to platform,
+            "${headerPrefix}Platform" to platform,
         )
     }
 

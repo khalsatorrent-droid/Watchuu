@@ -7,6 +7,7 @@ import android.content.SharedPreferences
 import android.graphics.Typeface
 import android.view.ViewGroup
 import android.widget.*
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,96 +18,97 @@ import kotlinx.coroutines.withContext
 /**
  * MusicBox settings dialog.
  *
- * FIX: Uses ZarzSessionManager singleton so bootstrap here is immediately
- *      visible to MusicBoxProvider (they were using separate instances before).
- * FIX: Added Beatport enable/disable toggle (was wired in ZarzSession but
- *      missing from settings, so it was always off in loadLinks).
- * appVersion strings match registry.json 2026-11-08.
+ * - Catalogue source picker (All / JioSaavn / Spotify / Apple Music / Deezer / Tidal / Qobuz / SoundCloud / YouTube Music / Jamendo / GDStudio)
+ * - Download/stream provider toggles (powered by CharlesPikachu/musicdl + Monochrome + ZARZ)
+ * - ZARZ session status and verification challenge launcher
  */
 object MusicBoxSettings {
-    /** ids for the catalogue radio buttons, kept clear of 0 and of generated ids */
+    /** base id for the catalogue radio buttons, clear of 0 and of generated ids */
     private const val RADIO_BASE = 1000
     private const val PREFS_NAME = "musicbox_prefs"
     private var prefs: SharedPreferences? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun init(context: Context) {
-        if (prefs == null) prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs == null) {
+            prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        }
     }
 
-    private fun str(k: String, d: String = "")   = prefs?.getString(k, d) ?: d
-    private fun bool(k: String, d: Boolean)       = prefs?.getBoolean(k, d) ?: d
+    private fun ensurePrefs(): SharedPreferences? {
+        if (prefs == null) {
+            runCatching {
+                CloudStreamApp.context?.applicationContext?.let { ctx ->
+                    prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                }
+            }
+        }
+        return prefs
+    }
+
+    private fun str(k: String, d: String = ""): String = ensurePrefs()?.getString(k, d) ?: d
+    private fun bool(k: String, d: Boolean): Boolean = ensurePrefs()?.getBoolean(k, d) ?: d
     private fun put(block: SharedPreferences.Editor.() -> Unit) {
-        prefs?.edit()?.apply { block(); apply() }
+        ensurePrefs()?.edit()?.apply { block(); apply() }
     }
 
     var catalogue: String
         get() = str("musicbox_catalogue", "all")
         set(v) = put { putString("musicbox_catalogue", v) }
 
-    var enableAmazonDownload: Boolean
-        get() = bool("enable_amazon_dl", true)
-        set(v) = put { putBoolean("enable_amazon_dl", v) }
-
-    var enableDeezerDownload: Boolean
-        get() = bool("enable_deezer_dl", true)
-        set(v) = put { putBoolean("enable_deezer_dl", v) }
-
     var enableJioSaavn: Boolean
         get() = bool("enable_jiosaavn", true)
         set(v) = put { putBoolean("enable_jiosaavn", v) }
-
-    var enableSoundCloud: Boolean
-        get() = bool("enable_soundcloud", true)
-        set(v) = put { putBoolean("enable_soundcloud", v) }
 
     var enableTidal: Boolean
         get() = bool("enable_tidal", true)
         set(v) = put { putBoolean("enable_tidal", v) }
 
+    var enableDeezerDownload: Boolean
+        get() = bool("enable_deezer_dl", true)
+        set(v) = put { putBoolean("enable_deezer_dl", v) }
+
     var enableQobuz: Boolean
-        get() = bool("enable_qobuz", true)
-        set(v) = put { putBoolean("enable_qobuz", v) }
+        get() = bool("enable_qobuz_dl", true)
+        set(v) = put { putBoolean("enable_qobuz_dl", v) }
 
-    // FIX: Beatport toggle was missing — it was listed in ZarzSession and checked in
-    //      the old provider code but was never actually read because there was no
-    //      prefs key for it. Defaults to true so existing users get it immediately.
-    var enableBeatport: Boolean
-        get() = bool("enable_beatport", true)
-        set(v) = put { putBoolean("enable_beatport", v) }
+    var enableSpotifyDownload: Boolean
+        get() = bool("enable_spotify_dl", true)
+        set(v) = put { putBoolean("enable_spotify_dl", v) }
 
-    // the four public catalogue sources: no key, no session, direct audio
-    var enableAudius: Boolean
-        get() = bool("enable_audius", true)
-        set(v) = put { putBoolean("enable_audius", v) }
+    var enableAmazonDownload: Boolean
+        get() = bool("enable_amazon_dl", true)
+        set(v) = put { putBoolean("enable_amazon_dl", v) }
+
+    var enableSoundCloud: Boolean
+        get() = bool("enable_soundcloud", true)
+        set(v) = put { putBoolean("enable_soundcloud", v) }
+
+    var enableGDStudio: Boolean
+        get() = bool("enable_gdstudio", true)
+        set(v) = put { putBoolean("enable_gdstudio", v) }
 
     var enableJamendo: Boolean
         get() = bool("enable_jamendo", true)
         set(v) = put { putBoolean("enable_jamendo", v) }
 
-    var enableCcMixter: Boolean
-        get() = bool("enable_ccmixter", true)
-        set(v) = put { putBoolean("enable_ccmixter", v) }
-
-    var enableWikimedia: Boolean
-        get() = bool("enable_wikimedia", true)
-        set(v) = put { putBoolean("enable_wikimedia", v) }
-
-    var enableBilibili: Boolean
-        get() = bool("enable_bilibili", true)
-        set(v) = put { putBoolean("enable_bilibili", v) }
-
-    var enableFma: Boolean
-        get() = bool("enable_fma", true)
-        set(v) = put { putBoolean("enable_fma", v) }
-
-    var enableOpenGameArt: Boolean
-        get() = bool("enable_opengameart", true)
-        set(v) = put { putBoolean("enable_opengameart", v) }
-
     var enableYouTubeFallback: Boolean
         get() = bool("enable_yt_fallback", true)
         set(v) = put { putBoolean("enable_yt_fallback", v) }
+
+    val catalogueOptions = listOf(
+        "all" to "All Sources (Merged)",
+        "jiosaavn" to "JioSaavn",
+        "spotify" to "Spotify",
+        "apple" to "Apple Music / iTunes",
+        "deezer" to "Deezer",
+        "tidal" to "Tidal / Monochrome",
+        "qobuz" to "Qobuz",
+        "soundcloud" to "SoundCloud",
+        "ytmusic" to "YouTube Music",
+        "jamendo" to "Jamendo",
+        "gdstudio" to "GDStudio (Multi-Source)",
+    )
 
     fun show(context: Context) {
         val act = (context as? Activity)
@@ -121,174 +123,140 @@ object MusicBoxSettings {
         }
 
         fun header(t: String) = TextView(act).apply {
-            text = t; setTypeface(typeface, Typeface.BOLD); textSize = 15f
+            text = t
+            setTypeface(typeface, Typeface.BOLD)
+            textSize = 15f
             setPadding(0, dp(act, 14), 0, dp(act, 4))
         }
+
         fun note(t: String) = TextView(act).apply {
-            text = t; textSize = 12f; alpha = 0.75f
+            text = t
+            textSize = 12f
+            alpha = 0.75f
         }
 
-        // ── Catalogue source ──────────────────────────────────────────────────
+        // ========== Catalogue source ==========
         root.addView(header("Catalogue Source"))
-        root.addView(note("Which service to use for search & browsing"))
+        root.addView(note("Which service to use for home page, search & browsing"))
 
-        val catalogueOptions = listOf(
-            "all"        to "All sources",
-            "jiosaavn"   to "JioSaavn",
-            "spotify"    to "Spotify",
-            "apple"      to "Apple Music",
-            "soundcloud" to "SoundCloud",
-            "deezer"     to "Deezer",
-            "qobuz"      to "Qobuz",
-            "tidal"      to "Tidal",
-            "beatport"   to "Beatport",
-        )
-        val catalogueGroup = RadioGroup(act).apply { orientation = RadioGroup.VERTICAL }
+        val catalogueGroup = RadioGroup(act).apply {
+            orientation = RadioGroup.VERTICAL
+        }
         val currentCatalogue = catalogue
         catalogueOptions.forEachIndexed { index, (value, label) ->
-            catalogueGroup.addView(RadioButton(act).apply {
+            val rb = RadioButton(act).apply {
                 text = label
-                // not `id = index`: the first option would get id 0, which RadioGroup treats as
-                // "no selection", so picking the first entry saved nothing at all
+                // 1000 + index, not index: id 0 is RadioGroup's "no selection", so the first
+                // option could never be saved
                 id = RADIO_BASE + index
                 isChecked = value == currentCatalogue
-            })
+            }
+            catalogueGroup.addView(rb)
         }
         root.addView(catalogueGroup)
 
-        // ── Download sources ──────────────────────────────────────────────────
-        root.addView(header("Download Sources"))
-        root.addView(note("Which services to try for playback (in priority order)"))
-        root.addView(note("ZARZ = needs session bootstrap once; then automatic"))
-
-        val cbAmazon = CheckBox(act).apply {
-            text = "1. Amazon Music (ZARZ — amzn@2.3.19, FLAC)"
-            isChecked = enableAmazonDownload
-        }
-        root.addView(cbAmazon)
-
-        val cbDeezer = CheckBox(act).apply {
-            text = "2. Deezer (ZARZ — deezer@1.3.11, FLAC/320)"
-            isChecked = enableDeezerDownload
-        }
-        root.addView(cbDeezer)
+        // ========== Download sources ==========
+        root.addView(header("Playback & Download Providers"))
+        root.addView(note("Active providers powered by CharlesPikachu/musicdl, Monochrome & ZARZ"))
 
         val cbJioSaavn = CheckBox(act).apply {
-            text = "3. JioSaavn (direct, 320kbps MP3)"
+            text = "1. JioSaavn (Direct 320kbps MP3/M4A)"
             isChecked = enableJioSaavn
         }
         root.addView(cbJioSaavn)
 
-        val cbSoundCloud = CheckBox(act).apply {
-            text = "4. SoundCloud (ZARZ /dl/sc → direct stream fallback)"
-            isChecked = enableSoundCloud
-        }
-        root.addView(cbSoundCloud)
-
         val cbTidal = CheckBox(act).apply {
-            text = "5. Tidal (ZARZ — tidal-web@1.2.14, FLAC)"
+            text = "2. Tidal / Monochrome (Lossless FLAC / GDStudio / ZARZ)"
             isChecked = enableTidal
         }
         root.addView(cbTidal)
 
+        val cbDeezer = CheckBox(act).apply {
+            text = "3. Deezer (musicdl: AnandServer / Deemixer / MusicFab / DeezDL / ZARZ)"
+            isChecked = enableDeezerDownload
+        }
+        root.addView(cbDeezer)
+
         val cbQobuz = CheckBox(act).apply {
-            text = "6. Qobuz (ZARZ — qobuz-web@1.2.27, FLAC)"
+            text = "4. Qobuz (musicdl: AnandServer / DezAlty / GDStudio / ClashFLAC / ZARZ)"
             isChecked = enableQobuz
         }
         root.addView(cbQobuz)
 
-        // FIX: Added Beatport checkbox
-        val cbBeatport = CheckBox(act).apply {
-            text = "7. Beatport (ZARZ — beatport@1.0.1, FLAC)"
-            isChecked = enableBeatport
+        val cbSpotify = CheckBox(act).apply {
+            text = "5. Spotify Direct (musicdl: SpotiDown / RapidAPI / SpotSaver / MusicFab)"
+            isChecked = enableSpotifyDownload
         }
-        root.addView(cbBeatport)
+        root.addView(cbSpotify)
 
-        val cbYouTube = CheckBox(act).apply {
-            text = "8. YouTube Music (Cobalt → CloudStream extractor)"
-            isChecked = enableYouTubeFallback
+        val cbAmazon = CheckBox(act).apply {
+            text = "6. Amazon Music (ZARZ signed - FLAC)"
+            isChecked = enableAmazonDownload
         }
-        root.addView(cbYouTube)
+        root.addView(cbAmazon)
 
-        val cbAudius = CheckBox(act).apply {
-            text = "7. Audius (public api)"
-            isChecked = enableAudius
+        val cbSoundCloud = CheckBox(act).apply {
+            text = "7. SoundCloud (Direct Progressive/HLS + MP3Juice)"
+            isChecked = enableSoundCloud
         }
-        root.addView(cbAudius)
+        root.addView(cbSoundCloud)
+
+        val cbGDStudio = CheckBox(act).apply {
+            text = "8. GDStudio Multi-Source (Netease / Kuwo / Joox / Apple / YTMusic)"
+            isChecked = enableGDStudio
+        }
+        root.addView(cbGDStudio)
 
         val cbJamendo = CheckBox(act).apply {
-            text = "8. Jamendo (public api)"
+            text = "9. Jamendo (Direct FLAC / 320kbps MP3)"
             isChecked = enableJamendo
         }
         root.addView(cbJamendo)
 
-        val cbCcMixter = CheckBox(act).apply {
-            text = "9. ccMixter (public api)"
-            isChecked = enableCcMixter
+        val cbYouTube = CheckBox(act).apply {
+            text = "10. YouTube Music (musicdl: Y2Mate / CnvMP3 / Convert1s / EzSrv / Extractor)"
+            isChecked = enableYouTubeFallback
         }
-        root.addView(cbCcMixter)
+        root.addView(cbYouTube)
 
-        val cbWikimedia = CheckBox(act).apply {
-            text = "10. Wikimedia Commons (public api)"
-            isChecked = enableWikimedia
-        }
-        root.addView(cbWikimedia)
-
-        val cbBilibili = CheckBox(act).apply {
-            text = "11. Bilibili (public api)"
-            isChecked = enableBilibili
-        }
-        root.addView(cbBilibili)
-
-        val cbFma = CheckBox(act).apply {
-            text = "12. Free Music Archive"
-            isChecked = enableFma
-        }
-        root.addView(cbFma)
-
-        val cbOga = CheckBox(act).apply {
-            text = "13. OpenGameArt"
-            isChecked = enableOpenGameArt
-        }
-        root.addView(cbOga)
-
-        // ── ZARZ Session ──────────────────────────────────────────────────────
-        root.addView(header("ZARZ Session"))
-        root.addView(note("Required for Amazon, Deezer, Tidal, Qobuz, SoundCloud, Beatport (ZARZ)"))
+        // ========== ZARZ Session ==========
+        root.addView(header("ZARZ Session (Optional Bonus Resolver)"))
 
         val sessionStatus = TextView(act).apply {
-            textSize = 13f; setPadding(0, dp(act, 4), 0, dp(act, 4))
+            textSize = 13f
+            setPadding(0, dp(act, 4), 0, dp(act, 4))
         }
         root.addView(sessionStatus)
 
-        // FIX: Use the shared singleton session instead of creating a new local instance.
-        //      Bootstrap in Settings is now immediately visible to MusicBoxProvider.
-        val session = ZarzSessionManager.session
-        ZarzSessionManager.load(prefs?.getString("musicbox_zarz_session", null), forceReload = true)
+        val session = ZarzSession()
+        val stored = ensurePrefs()?.getString("musicbox_zarz_session", null)
+        session.loadState(stored)
 
-        fun updateStatus() {
-            sessionStatus.text = when {
-                session.record.isUsable() ->
-                    "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
-                session.record.sessionId.isNotBlank() -> "✗ Session expired — tap Bootstrap"
-                else -> "○ No session — tap Bootstrap"
-            }
+        sessionStatus.text = if (session.record.isUsable()) {
+            "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
+        } else if (session.record.sessionId.isNotBlank()) {
+            "✗ Session expired"
+        } else {
+            "○ No session (musicdl providers work without ZARZ; bootstrap optional)"
         }
-        updateStatus()
 
         val btnBootstrap = Button(act).apply {
-            text = "Bootstrap Session"
+            text = "Bootstrap ZARZ Session"
             isAllCaps = false
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
         btnBootstrap.setOnClickListener {
             scope.launch {
                 try {
                     val url = session.bootstrap()
-                    prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+                    ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+
                     withContext(Dispatchers.Main) {
                         if (url.isBlank()) {
-                            updateStatus()
+                            sessionStatus.text = "✓ Session obtained directly!"
                             Toast.makeText(act, "Session active!", Toast.LENGTH_SHORT).show()
                         } else {
                             sessionStatus.text = "⚠ Verification required"
@@ -296,9 +264,9 @@ object MusicBoxSettings {
                                 scope.launch {
                                     try {
                                         session.exchange(grant)
-                                        prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+                                        ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
                                         withContext(Dispatchers.Main) {
-                                            updateStatus()
+                                            sessionStatus.text = "✓ Session active!"
                                             Toast.makeText(act, "Verification complete!", Toast.LENGTH_SHORT).show()
                                         }
                                     } catch (e: Exception) {
@@ -322,43 +290,41 @@ object MusicBoxSettings {
         root.addView(btnBootstrap)
 
         val btnClear = Button(act).apply {
-            text = "Clear Session"
+            text = "Clear ZARZ Session"
             isAllCaps = false
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
         btnClear.setOnClickListener {
             session.record.clear()
-            prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
-            updateStatus()
+            ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+            sessionStatus.text = "○ Session cleared"
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)
 
         val scroll = ScrollView(act).apply { addView(root) }
+
         AlertDialog.Builder(act)
             .setTitle("MusicBox Settings")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                val checked = catalogueGroup.checkedRadioButtonId
-                val selectedIdx = checked - RADIO_BASE
+                val selectedIdx = catalogueGroup.checkedRadioButtonId - RADIO_BASE
                 if (selectedIdx in catalogueOptions.indices) {
                     catalogue = catalogueOptions[selectedIdx].first
                 }
-                enableAmazonDownload  = cbAmazon.isChecked
-                enableDeezerDownload  = cbDeezer.isChecked
-                enableJioSaavn        = cbJioSaavn.isChecked
-                enableSoundCloud      = cbSoundCloud.isChecked
-                enableTidal           = cbTidal.isChecked
-                enableQobuz           = cbQobuz.isChecked
-                enableBeatport        = cbBeatport.isChecked
-                enableYouTubeFallback = cbYouTube.isChecked
-                enableAudius = cbAudius.isChecked
+                enableJioSaavn = cbJioSaavn.isChecked
+                enableTidal = cbTidal.isChecked
+                enableDeezerDownload = cbDeezer.isChecked
+                enableQobuz = cbQobuz.isChecked
+                enableSpotifyDownload = cbSpotify.isChecked
+                enableAmazonDownload = cbAmazon.isChecked
+                enableSoundCloud = cbSoundCloud.isChecked
+                enableGDStudio = cbGDStudio.isChecked
                 enableJamendo = cbJamendo.isChecked
-                enableCcMixter = cbCcMixter.isChecked
-                enableWikimedia = cbWikimedia.isChecked
-                enableBilibili = cbBilibili.isChecked
-                enableFma = cbFma.isChecked
-                enableOpenGameArt = cbOga.isChecked
+                enableYouTubeFallback = cbYouTube.isChecked
                 Toast.makeText(act, "Settings saved", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)

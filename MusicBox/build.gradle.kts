@@ -4,14 +4,14 @@ dependencies {
 }
 
 // use an integer for version numbers
-version = 23
+version = 24
 
 cloudstream {
     language = "en"
-    description = "Music - Spotify catalogue with 6-provider download: Amazon Music, Deezer, JioSaavn, SoundCloud, Tidal, YouTube Music via ZARZ signed sessions"
+    description = "Music - Multi-catalogue (JioSaavn, Spotify, Apple Music, Deezer, Tidal/Monochrome, Qobuz, SoundCloud, YouTube Music, Jamendo, GDStudio) with CharlesPikachu/musicdl & ZARZ multi-provider playback"
     authors = listOf("khalsatorrent-droid")
 
     status = 1
-    tvTypes = listOf("Music")
+    tvTypes = listOf("Music", "Others")
     iconUrl = "https://www.google.com/s2/favicons?domain=spotify.com&sz=%size%"
 }

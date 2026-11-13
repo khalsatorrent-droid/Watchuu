@@ -228,7 +228,9 @@ object MusicBoxSettings {
         }
         root.addView(sessionStatus)
 
-        val session = ZarzSession()
+        // the same object the provider uses, re-read from disk so the status shown is real
+        ZarzSessionManager.load(prefs?.getString("musicbox_zarz_session", null), forceReload = true)
+        val session = ZarzSessionManager.session
         val stored = ensurePrefs()?.getString("musicbox_zarz_session", null)
         session.loadState(stored)
 

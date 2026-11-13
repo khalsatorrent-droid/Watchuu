@@ -53,6 +53,10 @@ class MusicBoxProvider : MainAPI() {
 
     companion object {
         private const val TAG = "MusicBox"
+
+        /** so the Amazon notice appears once, not on every track */
+        @Volatile
+        private var amazonNoticeShown = false
         private const val PREF_KEY_SESSION = "musicbox_zarz_session"
         private const val PREF_KEY_CATALOGUE = "musicbox_catalogue"
 
@@ -599,11 +603,18 @@ class MusicBoxProvider : MainAPI() {
 
         val emitLink: (ExtractorLink) -> Unit = { link ->
             emittedCount++
+            MusicBoxLog.d(TAG, "link: ${link.name} -> ${hostOf(link.url)}")
             callback.invoke(link)
         }
 
         runCatching { zarzSession.refreshIfNeeded() }
             .onFailure { MusicBoxLog.w(TAG, "Session refresh failed: ${it.message}") }
+
+        val resolverState = if (zarzSession.record.isUsable()) "active" else "not active"
+        MusicBoxLog.d(
+            TAG,
+            "play ${source.ifBlank { "?" }}/$id \"${title.take(40)}\" - resolver $resolverState"
+        )
         saveSession()
 
         val searchQuery = "$title $artist".trim()
@@ -692,8 +703,16 @@ class MusicBoxProvider : MainAPI() {
             pendingAuthUrl?.let { offerVerification(it) }
         }
 
+        MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
         return emittedCount > 0
     }
+
+    /** host and first path segment only: enough to tell sources apart, no tokens in the log */
+    private fun hostOf(url: String): String = runCatching {
+        val u = java.net.URL(url)
+        val path = u.path.orEmpty().trimEnd('/').take(28)
+        "${u.host}$path"
+    }.getOrDefault(url.take(40))
 
     private fun offerVerification(authUrl: String) {
         try {
@@ -1114,7 +1133,10 @@ class MusicBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
-        MusicBoxLog.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
+        if (!amazonNoticeShown) {
+            amazonNoticeShown = true
+            MusicBoxLog.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
+        }
         return false
     }
 

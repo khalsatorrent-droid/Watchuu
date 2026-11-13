@@ -611,7 +611,6 @@ class MusicBoxProvider : MainAPI() {
             runCatching { ZarzSessionManager.session(v).refreshIfNeeded() }
                 .onFailure { MusicBoxLog.w(TAG, "Session refresh failed for $v: ${it.message}") }
         }
-            .onFailure { MusicBoxLog.w(TAG, "Session refresh failed: ${it.message}") }
 
         val resolverState = ZarzSessionManager.versions
             .filter { ZarzSessionManager.isUsable(it) }

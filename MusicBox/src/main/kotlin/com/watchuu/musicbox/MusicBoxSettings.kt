@@ -37,7 +37,7 @@ object MusicBoxSettings {
     }
 
     var catalogue: String
-        get() = str("musicbox_catalogue", "spotify")
+        get() = str("musicbox_catalogue", "all")
         set(v) = put { putString("musicbox_catalogue", v) }
 
     var enableAmazonDownload: Boolean
@@ -93,7 +93,16 @@ object MusicBoxSettings {
         root.addView(header("Catalogue Source"))
         root.addView(note("Which service to use for search & browsing"))
 
-        val catalogueOptions = listOf("spotify" to "Spotify", "deezer" to "Deezer", "jiosaavn" to "JioSaavn")
+        // "All sources" first and the default: one pick should never be able to leave the search
+        // screen empty, and in India Deezer is unreachable while Spotify only supplies metadata
+        val catalogueOptions = listOf(
+            "all" to "All sources",
+            "jiosaavn" to "JioSaavn",
+            "spotify" to "Spotify",
+            "apple" to "Apple Music",
+            "soundcloud" to "SoundCloud",
+            "deezer" to "Deezer",
+        )
         val catalogueGroup = RadioGroup(act).apply {
             orientation = RadioGroup.VERTICAL
         }

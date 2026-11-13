@@ -63,7 +63,7 @@ class MusicBoxProvider : MainAPI() {
     private fun getCatalogue(): String {
         return com.lagradost.cloudstream3.CloudStreamApp.context
             ?.getSharedPreferences("musicbox_prefs", 0)
-            ?.getString(PREF_KEY_CATALOGUE, "spotify") ?: "spotify"
+            ?.getString(PREF_KEY_CATALOGUE, "all") ?: "all"
     }
 
     // ========== Home Page ==========
@@ -144,10 +144,21 @@ class MusicBoxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val catalogue = getCatalogue()
         val primary = when (catalogue) {
-            "spotify" -> searchSpotify(query)
-            "deezer" -> searchDeezer(query)
             "jiosaavn" -> searchJioSaavn(query)
-            else -> searchSpotify(query)
+            "spotify" -> searchSpotify(query)
+            "apple" -> appleRow(query)
+            "soundcloud" -> searchSoundCloud(query)
+            "deezer" -> searchDeezer(query)
+            // All: every source that can answer, merged. JioSaavn first because it is the one that
+            // actually serves audio here; the others add catalogue breadth on top.
+            else -> {
+                val merged = LinkedHashMap<String, SearchResponse>()
+                searchJioSaavn(query).forEach { merged[it.url] = it }
+                searchSpotify(query).forEach { merged[it.url] = it }
+                appleRow(query).forEach { merged[it.url] = it }
+                searchSoundCloud(query).forEach { merged[it.url] = it }
+                merged.values.toList()
+            }
         }
         // a chosen catalogue that is unreachable must not mean an empty screen: Apple's catalogue
         // needs no token and answers nearly everywhere, so it stands in when the pick returns
@@ -175,6 +186,15 @@ class MusicBoxProvider : MainAPI() {
             DeezerApi.search(query, 20).map { it.toSearchResponse() }
         } catch (e: Exception) {
             Log.w(TAG, "Deezer search failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private suspend fun searchSoundCloud(query: String): List<SearchResponse> {
+        return try {
+            SoundCloudApi.search(query, 20).map { it.toSearchResponse() }
+        } catch (e: Exception) {
+            Log.w(TAG, "SoundCloud search failed: ${e.message}")
             emptyList()
         }
     }
@@ -334,34 +354,40 @@ class MusicBoxProvider : MainAPI() {
         var found = false
         val searchQuery = "$title $artist".trim()
 
-        // ---- Provider 1: Amazon Music (ZARZ signed) ----
-        if (!found) {
-            found = tryAmazonMusic(searchQuery, isrc, callback)
-        }
-
-        // ---- Provider 2: Deezer (ZARZ signed + Blowfish) ----
-        if (!found) {
-            found = tryDeezer(deezerId, searchQuery, callback)
-        }
-
-        // ---- Provider 3: JioSaavn (DES decryption, no ZARZ) ----
+        // JioSaavn first. In this region it is the one source that reliably serves audio without a
+        // signed session, so it is what actually plays; the rest follow for quality and breadth.
         if (!found) {
             found = tryJioSaavn(if (source == "jiosaavn") id else "", searchQuery, callback)
         }
 
-        // ---- Provider 4: SoundCloud (direct stream, no ZARZ) ----
+        // ---- Amazon Music (ZARZ signed) ----
+        if (!found) {
+            found = tryAmazonMusic(searchQuery, isrc, callback)
+        }
+
+        // ---- Deezer (ZARZ signed + Blowfish) ----
+        if (!found) {
+            found = tryDeezer(deezerId, searchQuery, callback)
+        }
+
+        // ---- SoundCloud (direct stream, no ZARZ) ----
         if (!found) {
             found = trySoundCloud(searchQuery, callback)
         }
 
-        // ---- Provider 5: Tidal (ZARZ signed) ----
+        // ---- Tidal (ZARZ signed) ----
         if (!found) {
             found = tryTidal(searchQuery, isrc, callback)
         }
 
-        // ---- Provider 6: YouTube Music (Cobalt via ZARZ API) ----
+        // ---- YouTube Music ----
         if (!found) {
             found = tryYouTubeMusic(searchQuery, subtitleCallback, callback)
+        }
+
+        // ---- Apple's preview: public, no token, and it answers in this region ----
+        if (!found) {
+            found = tryApplePreview(searchQuery, callback)
         }
 
         // ---- Last resort: Deezer 30s preview ----
@@ -574,6 +600,31 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
+
+    /**
+     * Apple's catalogue needs no token and its previews are reachable in this region, so this is
+     * the floor: if every other provider declines, a track still plays 30 seconds.
+     */
+    private suspend fun tryApplePreview(
+        query: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        return try {
+            val track = AppleMusicApi.search(query, 5).firstOrNull() ?: return false
+            val url = track.previewUrl.ifBlank { return false }
+            callback.invoke(
+                newExtractorLink("MusicBox", "Apple Music preview (30s)", url, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = "https://music.apple.com/"
+                }
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Apple preview failed: ${e.message}")
+            false
+        }
+    }
+
     private suspend fun tryYouTubeMusic(
         query: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -581,10 +632,38 @@ class MusicBoxProvider : MainAPI() {
     ): Boolean {
         if (!MusicBoxSettings.enableYouTubeFallback) return false
         try {
-            // First try Cobalt (ZARZ API v1) for direct audio download
             val videoId = YouTubeMusicApi.searchVideoId(query)
             if (videoId != null) {
                 val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
+
+                // Cloudstream's own extractor first: it solves YouTube's signature itself and needs
+                // no session, so this works even when the resolver does not
+                val viaExtractor = mutableListOf<ExtractorLink>()
+                try {
+                    loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
+                        viaExtractor.add(it)
+                    }
+                } catch (_: Exception) {
+                }
+                if (viaExtractor.isNotEmpty()) {
+                    viaExtractor.forEach { link ->
+                        callback.invoke(
+                            newExtractorLink(
+                                "MusicBox",
+                                "YouTube Music · ${link.name}",
+                                link.url,
+                                link.type,
+                            ) {
+                                this.quality = link.quality
+                                this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
+                                this.headers = link.headers
+                            }
+                        )
+                    }
+                    return true
+                }
+
+                // then Cobalt (ZARZ API v1), for when the extractor is unavailable
                 try {
                     val cobalt = zarzSession.resolveYouTubeDownload(youtubeUrl)
                     val url = cobalt.optString("url", "")

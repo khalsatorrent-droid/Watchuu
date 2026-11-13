@@ -268,7 +268,7 @@ class MusicBoxProvider : MainAPI() {
 
         return when (kind) {
             "track" -> loadTrack(source, id, extra)
-            "album" -> loadAlbum(source, id, extra)
+            "album", "playlist" -> loadAlbum(source, id, extra)
             else    -> null
         }
     }
@@ -325,8 +325,20 @@ class MusicBoxProvider : MainAPI() {
             "deezer" -> try { DeezerApi.getAlbumTracks(albumId) } catch (_: Exception) { emptyList() }
             "audius" -> try { AudiusApi.playlistTracks(albumId) } catch (_: Exception) { emptyList() }
             "jiosaavn" -> try { JioSaavnApi.getAlbumTracks(albumId) } catch (_: Exception) { emptyList() }
+            "spotify" -> try {
+                // spotify is a catalogue here, so its album tracks are converted to the same shape
+                // and each episode plays through YouTube like a single does
+                SpotifyClient.albumTracks(albumId).map {
+                    MusicTrack(
+                        id = it.id, title = it.name, artist = it.artist, album = it.album,
+                        duration = it.duration / 1000, coverUrl = it.coverUrl,
+                        source = "spotify", sourceId = it.id, isrc = it.isrc
+                    )
+                }
+            } catch (_: Exception) { emptyList() }
             else     -> emptyList()
         }
+        Log.d(TAG, "Album $source/$albumId -> ${tracks.size} tracks")
         if (tracks.isEmpty()) return null
 
         val episodes = tracks.mapIndexed { index, track ->
@@ -820,7 +832,16 @@ class MusicBoxProvider : MainAPI() {
             } catch (_: Exception) {}
 
             if (viaExtractor.isNotEmpty()) {
-                viaExtractor.forEach { link ->
+                // A song must not play as a video. The extractor returns both streams, and YouTube
+                // puts the mime type in the url, so the audio ones are picked out of it. If none is
+                // marked as audio, everything is kept rather than nothing.
+                val audioOnly = viaExtractor.filter { link ->
+                    val u = link.url.lowercase()
+                    u.contains("mime=audio") || u.contains("audio%2f") || u.contains("mime%3daudio")
+                }
+                val chosen = if (audioOnly.isNotEmpty()) audioOnly else viaExtractor
+
+                chosen.sortedByDescending { it.quality }.forEach { link ->
                     callback.invoke(newExtractorLink(
                         "MusicBox", "YouTube Music · ${link.name}",
                         link.url, link.type,
@@ -941,9 +962,12 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private fun MusicAlbum.toSearchResponse(): SearchResponse {
-        return newMovieSearchResponse(
+        // last, not first: a spotify uri is "spotify:album:ID" and substringAfter(":") would leave
+        // "album:ID", which then failed to resolve and left the detail page with a single track
+        val albumId = id.substringAfterLast(":")
+        return newTvSeriesSearchResponse(
             "$title - $artist",
-            "$mainUrl/album/$source/${id.substringAfter(":")}/${title.encodeUrl()}",
+            "$mainUrl/album/$source/$albumId/${title.encodeUrl()}",
             TvType.Music,
         ) { this.posterUrl = coverUrl }
     }

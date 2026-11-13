@@ -24,6 +24,8 @@ import kotlinx.coroutines.withContext
  * appVersion strings match registry.json 2026-11-08.
  */
 object MusicBoxSettings {
+    /** ids for the catalogue radio buttons, kept clear of 0 and of generated ids */
+    private const val RADIO_BASE = 1000
     private const val PREFS_NAME = "musicbox_prefs"
     private var prefs: SharedPreferences? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -145,7 +147,11 @@ object MusicBoxSettings {
         val currentCatalogue = catalogue
         catalogueOptions.forEachIndexed { index, (value, label) ->
             catalogueGroup.addView(RadioButton(act).apply {
-                text = label; id = index; isChecked = value == currentCatalogue
+                text = label
+                // not `id = index`: the first option would get id 0, which RadioGroup treats as
+                // "no selection", so picking the first entry saved nothing at all
+                id = RADIO_BASE + index
+                isChecked = value == currentCatalogue
             })
         }
         root.addView(catalogueGroup)
@@ -333,7 +339,8 @@ object MusicBoxSettings {
             .setTitle("MusicBox Settings")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                val selectedIdx = catalogueGroup.checkedRadioButtonId
+                val checked = catalogueGroup.checkedRadioButtonId
+                val selectedIdx = checked - RADIO_BASE
                 if (selectedIdx in catalogueOptions.indices) {
                     catalogue = catalogueOptions[selectedIdx].first
                 }

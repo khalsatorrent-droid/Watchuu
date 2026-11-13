@@ -215,6 +215,39 @@ object SpotifyClient {
         return Triple(tracks, albums, artists)
     }
 
+    /**
+     * An album's tracks, so an album can be shown as a series of episodes.
+     * Uses the getAlbum persisted query that spotify-web carries.
+     */
+    suspend fun albumTracks(albumId: String): List<SpotifyTrack> {
+        if (albumId.isBlank()) return emptyList()
+        ensureTokens()
+
+        val variables = JSONObject().apply {
+            put("uri", "spotify:album:$albumId")
+            put("locale", "")
+            put("offset", 0)
+            put("limit", 100)
+        }
+        val result = try { pathfinderQuery(ALBUM_HASH, variables) } catch (_: Exception) { return emptyList() }
+
+        val out = ArrayList<SpotifyTrack>()
+        // walk whatever shape the album answer takes and keep every track object
+        fun walk(node: Any?, depth: Int) {
+            if (depth > 10 || out.size >= 200) return
+            when (node) {
+                is JSONObject -> {
+                    val uri = node.optString("uri")
+                    if (uri.startsWith("spotify:track:")) out.add(parseTrack(node))
+                    for (key in node.keys()) walk(node.opt(key), depth + 1)
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), depth + 1)
+            }
+        }
+        walk(result, 0)
+        return out.distinctBy { it.id }
+    }
+
     suspend fun getHomeTracks(): List<SpotifyTrack> {
         // Use search with popular terms as fallback for home page content
         val (tracks, _, _) = search("top hits 2024", 20)
@@ -222,6 +255,8 @@ object SpotifyClient {
     }
 
     // ========== Parsers ==========
+
+    private const val ALBUM_HASH = "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10"
 
     private fun parseTrack(data: JSONObject): SpotifyTrack {
         val uri = data.optString("uri", "")

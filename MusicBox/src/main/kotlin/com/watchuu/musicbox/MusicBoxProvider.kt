@@ -1322,13 +1322,16 @@ class MusicBoxProvider : MainAPI() {
         ).joinToString("|")
 
         val displayTitle = if (artist.isNotBlank()) "$title - $artist" else title
+        // read before the lambda: inside it `year` is the response builder's own Int? property,
+        // which shadows this album's String and has no toIntOrNull()
+        val albumYear = year.toIntOrNull()
         return newTvSeriesSearchResponse(
             displayTitle,
             "$mainUrl/album/$source/${cleanId.encodeUrl()}/$extraPayload",
             TvType.Music,
         ) {
             this.posterUrl = coverUrl
-            this.year = year.toIntOrNull()
+            this.year = albumYear
         }
     }
 

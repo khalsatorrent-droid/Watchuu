@@ -1,6 +1,11 @@
 package com.watchuu.musicbox
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -35,6 +40,17 @@ class MusicBoxProvider : MainAPI() {
     // ========== Session + state ==========
 
     private val zarzSession = ZarzSession()
+
+    /**
+     * Set when the resolver answers needsVerification. api.zarz.moe is the thing that actually
+     * serves the files - /dl/dzr, /dl/amazeamazeamaze, /dl/tid and /v1/dl/cobalt all sit behind a
+     * ZARZ-HMAC-V1 session - and that session is only issued after a challenge is solved once. So
+     * the url is kept and the challenge is offered, rather than the play failing quietly.
+     */
+    @Volatile
+    private var pendingAuthUrl: String? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun loadSession() {
         try {
@@ -352,6 +368,13 @@ class MusicBoxProvider : MainAPI() {
         val id = obj.optString("id", "")
 
         var found = false
+        pendingAuthUrl = null
+
+        // a stored session may have aged out; refresh it before anything tries to use it
+        runCatching { zarzSession.refreshIfNeeded() }
+            .onFailure { Log.w(TAG, "Session refresh failed: ${it.message}") }
+        saveSession()
+
         val searchQuery = "$title $artist".trim()
 
         // JioSaavn first. In this region it is the one source that reliably serves audio without a
@@ -395,7 +418,48 @@ class MusicBoxProvider : MainAPI() {
             found = tryDeezerPreview(deezerId, callback)
         }
 
+        // nothing played and the resolver wants a verification: open it now rather than leaving the
+        // user with a silent failure and no idea that api.zarz.moe is the missing piece
+        if (!found) {
+            pendingAuthUrl?.let { offerVerification(it) }
+        }
+
         return found
+    }
+
+
+    /**
+     * Opens the resolver's challenge once, exchanges the grant for a session, and tells the user to
+     * press play again. It is deliberately not automatic on every attempt - the dialog is opened at
+     * most once per play, and the session is then reused.
+     */
+    private fun offerVerification(authUrl: String) {
+        try {
+            val activity = com.lagradost.cloudstream3.CommonActivity.activity
+            if (activity == null) {
+                Log.w(TAG, "Verification needed at $authUrl (no activity to show it in)")
+                return
+            }
+            MusicBoxBrowser.openVerification(activity, authUrl) { grant ->
+                scope.launch {
+                    try {
+                        zarzSession.exchange(grant)
+                        saveSession()
+                        withContext(Dispatchers.Main) {
+                            android.widget.Toast.makeText(
+                                activity,
+                                "MusicBox: resolver verified - press play again for the full file",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Grant exchange failed: ${e.message}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open verification: ${e.message}")
+        }
     }
 
     // ========== Per-provider download methods ==========
@@ -423,6 +487,7 @@ class MusicBoxProvider : MainAPI() {
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
             Log.w(TAG, "ZARZ verification required for Amazon: ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
             Log.d(TAG, "Amazon Music failed: ${e.message}")
@@ -489,6 +554,7 @@ class MusicBoxProvider : MainAPI() {
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
             Log.w(TAG, "ZARZ verification required for Deezer: ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
             Log.d(TAG, "Deezer download failed: ${e.message}")
@@ -592,6 +658,7 @@ class MusicBoxProvider : MainAPI() {
             }
         } catch (e: ZarzSession.VerificationRequiredException) {
             Log.w(TAG, "ZARZ verification required for Tidal: ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
             saveSession()
         } catch (e: Exception) {
             Log.d(TAG, "Tidal download failed: ${e.message}")

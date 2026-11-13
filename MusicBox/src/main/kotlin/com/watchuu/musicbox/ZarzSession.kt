@@ -43,7 +43,7 @@ class ZarzSession(
     ) {
         fun usable(): Boolean {
             if (sessionId.isBlank() || sessionSecret.isBlank()) return false
-            val exp = parseTs(expiresAt) ?: return true
+            val exp = zzParseTs(expiresAt) ?: return true
             return System.currentTimeMillis() < exp
         }
 
@@ -90,7 +90,7 @@ class ZarzSession(
     suspend fun bootstrap(): Bootstrap {
         if (record.usable()) return Bootstrap.Ready
         pending?.let { if (System.currentTimeMillis() - pendingAt < 180_000) return it }
-        val url = "$NAMESPACE_BASE/bootstrap?app_version=${enc(appVersion)}&install_id=${enc(installIdProvider())}"
+        val url = "$NAMESPACE_BASE/bootstrap?app_version=${zzEnc(appVersion)}&install_id=${zzEnc(installIdProvider())}"
         val resp = app.get(url, headers = mapOf("Accept" to "application/json", "User-Agent" to userAgent))
         if (resp.code !in 200..299) throw Exception("bootstrap HTTP ${resp.code}")
         val o = JSONObject(resp.text)
@@ -104,17 +104,17 @@ class ZarzSession(
             return Bootstrap.Ready
         }
         var auth = o.optString("auth_url").ifBlank { o.optString("challenge_url") }
-        var state = randomHex(16)
+        var state = zzRandomHex(16)
         if (auth.isNotBlank()) {
             val serverState = Regex("[?&]state=([^&#]*)").find(auth)?.groupValues?.get(1)
                 ?.let { java.net.URLDecoder.decode(it, "UTF-8") }?.trim().orEmpty()
             if (serverState.isNotEmpty()) state = serverState
-            else auth += (if (auth.contains("?")) "&" else "?") + "state=" + enc(state)
+            else auth += (if (auth.contains("?")) "&" else "?") + "state=" + zzEnc(state)
         } else {
             val id = o.optString("challenge_id")
             if (id.isBlank()) throw Exception("bootstrap returned neither session nor challenge")
-            val cb = "$CALLBACK?cb_version=v2grant&state=${enc(state)}"
-            auth = "$NAMESPACE_BASE/challenge?id=${enc(id)}&cb=${enc(cb)}"
+            val cb = "$CALLBACK?cb_version=v2grant&state=${zzEnc(state)}"
+            auth = "$NAMESPACE_BASE/challenge?id=${zzEnc(id)}&cb=${zzEnc(cb)}"
         }
         val ch = Bootstrap.Challenge(auth, state)
         pending = ch
@@ -152,7 +152,7 @@ class ZarzSession(
     }
 
     private suspend fun refreshIfDue() {
-        val exp = parseTs(record.expiresAt) ?: return
+        val exp = zzParseTs(record.expiresAt) ?: return
         val now = System.currentTimeMillis()
         if (!record.usable() || exp - now > 3_600_000) return
         try {
@@ -206,7 +206,7 @@ class ZarzSession(
     }
 
     suspend fun ticket(provider: String, resource: String): String {
-        val hash = sha256Hex("$provider:track:${resource.lowercase()}".toByteArray())
+        val hash = zzSha256Hex("$provider:track:${resource.lowercase()}".toByteArray())
         val o = signedJson(
             "POST", "/tickets",
             JSONObject().put("capability", "download_ticket").put("provider", provider).put("resource_hash", hash),
@@ -246,8 +246,8 @@ class ZarzSession(
         val now = System.currentTimeMillis()
         val z = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC)
         val ts = String.format("%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", z.year, z.monthValue, z.dayOfMonth, z.hour, z.minute, z.second, z.nano / 1_000_000)
-        val hash = sha256Hex(body)
-        val nonce = randomHex(12)
+        val hash = zzSha256Hex(body)
+        val nonce = zzRandomHex(12)
         val path = URL(url).path.ifEmpty { "/" }
         val window = now / 1000 / WINDOW
         val rolling = hmac(record.sessionSecret.toByteArray(), "$window:${record.sessionId}".toByteArray())
@@ -267,10 +267,10 @@ class ZarzSession(
     }
 }
 
-private fun parseTs(v: String): Long? = if (v.isBlank()) null else try { java.time.Instant.parse(v).toEpochMilli() } catch (_: Exception) { null }
-private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-private fun sha256Hex(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
-private fun randomHex(n: Int): String {
+private fun zzParseTs(v: String): Long? = if (v.isBlank()) null else try { java.time.Instant.parse(v).toEpochMilli() } catch (_: Exception) { null }
+private fun zzEnc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+private fun zzSha256Hex(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
+private fun zzRandomHex(n: Int): String {
     val b = ByteArray(n); java.security.SecureRandom().nextBytes(b); return b.joinToString("") { "%02x".format(it) }
 }
 
@@ -295,7 +295,7 @@ object ZarzHub {
         val p = prefs()
         val existing = p?.getString("zarz_install_id", null)
         if (!existing.isNullOrBlank()) return existing
-        val id = randomHex(16)
+        val id = zzRandomHex(16)
         p?.edit()?.putString("zarz_install_id", id)?.apply()
         return id
     }

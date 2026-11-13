@@ -778,9 +778,15 @@ class MusicBoxProvider : MainAPI() {
         if (!MusicBoxSettings.enableTidal) return false
         var added = false
 
+        // resolve the tidal id once: the monochrome path and the resolver both need it, and
+        // searching twice under a parallel chain meant the second call often came back empty
+        val resolvedTidalId = tidalId.ifBlank {
+            runCatching { TidalApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
+        }
+
         // 1. Monochrome / GDStudio Tidal lossless FLAC streams
         try {
-            val streams = TidalApi.resolveStreams(tidalId, query)
+            val streams = TidalApi.resolveStreams(resolvedTidalId, query)
             for (s in streams) {
                 callback.invoke(
                     newExtractorLink(
@@ -803,9 +809,7 @@ class MusicBoxProvider : MainAPI() {
         // 2. Optional ZARZ Tidal resolver if session is active
         if (zarzTidal.record.isUsable()) {
             try {
-                val targetId = tidalId.ifBlank {
-                    TidalApi.search(query, 1).firstOrNull()?.sourceId ?: ""
-                }
+                val targetId = resolvedTidalId
                 if (targetId.isNotBlank()) {
                     val descriptor = zarzTidal.resolveTidalDownload(targetId)
                     saveSession()
@@ -945,8 +949,13 @@ class MusicBoxProvider : MainAPI() {
         if (!MusicBoxSettings.enableQobuz) return false
         var added = false
 
+        // one search, shared by the direct path and the resolver
+        val resolvedQobuzId = qobuzId.ifBlank {
+            runCatching { QobuzApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
+        }
+
         try {
-            val streams = QobuzApi.resolveStreams(qobuzId, query)
+            val streams = QobuzApi.resolveStreams(resolvedQobuzId, query)
             for (s in streams) {
                 callback.invoke(
                     newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
@@ -963,8 +972,9 @@ class MusicBoxProvider : MainAPI() {
 
         if (zarzQobuz.record.isUsable()) {
             try {
-                val targetId = qobuzId.ifBlank {
-                    QobuzApi.search(query, 1).firstOrNull()?.sourceId ?: ""
+                val targetId = resolvedQobuzId
+                if (targetId.isBlank()) {
+                    MusicBoxLog.d(TAG, "Qobuz ZARZ: no track id to ask for")
                 }
                 if (targetId.isNotBlank()) {
                     // musicdl's quality chain: hi-res-max, then hi-res, then cd

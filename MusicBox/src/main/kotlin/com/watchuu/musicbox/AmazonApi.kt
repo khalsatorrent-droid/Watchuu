@@ -220,7 +220,10 @@ object AmazonApi {
         val e = norm(expected)
         if (e.isEmpty()) return true
         if (c.isEmpty()) return false
-        return c == e || c.contains(e) || e.contains(c)
+        if (c == e || c.contains(e) || e.contains(c)) return true
+        // "Pritam, Arijit Singh, Badshah" against Amazon's "Arijit Singh" is the same record
+        val parts = e.split(",").map { it.trim() }.filter { it.length > 2 }
+        return parts.any { c.contains(it) || it.contains(c) }
     }
 
     /** Exact-title match on Amazon's catalogue; returns the ASIN or null. */
@@ -242,6 +245,13 @@ object AmazonApi {
                 if (!artistMatches(h.artist, artist)) continue
                 if (durationMs > 0 && h.durationMs > 0 && kotlin.math.abs(durationMs - h.durationMs) > 15_000) continue
                 return h.asin
+            }
+            // relaxed pass: same search, but a hit whose title merely contains the song name.
+            // Returning the closest match beats returning nothing, which is what "no ASIN matched"
+            // meant while the resolver itself was fine.
+            for (h in hits) {
+                val hitTitle = norm(stripAnnotations(h.title))
+                if (hitTitle.contains(titleKey) && artistMatches(h.artist, artist)) return h.asin
             }
         }
         return null

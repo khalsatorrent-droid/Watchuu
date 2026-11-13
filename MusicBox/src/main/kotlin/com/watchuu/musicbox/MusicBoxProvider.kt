@@ -7,10 +7,15 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -53,6 +58,9 @@ class MusicBoxProvider : MainAPI() {
 
     companion object {
         private const val TAG = "MusicBox"
+
+        /** how long any single provider gets before the others carry on without it */
+        private const val PROVIDER_TIMEOUT_MS = 25_000L
 
         /** so the Amazon notice appears once, not on every track */
         @Volatile
@@ -598,11 +606,12 @@ class MusicBoxProvider : MainAPI() {
         val id = obj.optString("id", "")
         val storedPreview = obj.optString("preview_url", "")
 
-        var emittedCount = 0
+        val emitted = java.util.concurrent.atomic.AtomicInteger(0)
+        fun emittedCount(): Int = emitted.get()
         pendingAuthUrl = null
 
         val emitLink: (ExtractorLink) -> Unit = { link ->
-            emittedCount++
+            emitted.incrementAndGet()
             MusicBoxLog.d(TAG, "link: ${link.name} -> ${hostOf(link.url)}")
             callback.invoke(link)
         }
@@ -619,92 +628,82 @@ class MusicBoxProvider : MainAPI() {
 
         val searchQuery = "$title $artist".trim()
 
-        // 0. If the track came from a specific source, try its native provider first with its exact ID!
-        when (source) {
-            "jiosaavn" -> tryJioSaavn(id, searchQuery, emitLink)
-            "tidal" -> tryTidal(id, searchQuery, isrc, emitLink)
-            "deezer" -> tryDeezer(id, searchQuery, emitLink)
-            "qobuz" -> tryQobuz(id, searchQuery, emitLink)
-            "spotify" -> trySpotify(id, searchQuery, emitLink)
-            "soundcloud" -> trySoundCloud(id, searchQuery, emitLink)
-            "jamendo" -> tryJamendo(id, searchQuery, emitLink)
-            "gdstudio" -> tryGDStudio(id, searchQuery, emitLink)
-            "ytmusic" -> tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink)
+        // Every enabled provider runs at once.
+        //
+        // The chain used to be sequential and gated - each step only ran if the previous ones had
+        // produced nothing, or fewer than three links - so one play cost the sum of every source's
+        // latency (46 seconds in the log: first link at +15s, done at +46s) and the lossless
+        // sources were skipped entirely once three MP3 links existed. Running them together makes
+        // the wait the slowest single source, and lets the FLAC providers contribute alongside the
+        // 320kbps ones instead of behind them.
+        coroutineScope {
+            val jobs = mutableListOf<Deferred<Boolean>>()
+
+            val fire: (suspend () -> Boolean) -> Unit = { block ->
+                jobs += async {
+                    // one hanging host must not hold the rest
+                    withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
+                        runCatching { block() }.getOrDefault(false)
+                    } ?: false
+                }
+            }
+
+            // the entry's own service, with its exact id, alongside everything else
+            when (source) {
+                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
+                "tidal" -> fire { tryTidal(id, searchQuery, isrc, emitLink) }
+                "deezer" -> fire { tryDeezer(id, searchQuery, emitLink) }
+                "qobuz" -> fire { tryQobuz(id, searchQuery, emitLink) }
+                "spotify" -> fire { trySpotify(id, searchQuery, emitLink) }
+                "soundcloud" -> fire { trySoundCloud(id, searchQuery, emitLink) }
+                "jamendo" -> fire { tryJamendo(id, searchQuery, emitLink) }
+                "gdstudio" -> fire { tryGDStudio(id, searchQuery, emitLink) }
+                "ytmusic" -> fire { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
+            }
+
+            if (source != "jiosaavn") fire { tryJioSaavn("", searchQuery, emitLink) }
+            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
+            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
+            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
+            if (source != "spotify") fire { trySpotify("", searchQuery, emitLink) }
+            if (source != "gdstudio") fire { tryGDStudio("", searchQuery, emitLink) }
+            if (source != "soundcloud") fire { trySoundCloud("", searchQuery, emitLink) }
+            if (source != "jamendo") fire { tryJamendo("", searchQuery, emitLink) }
+            if (source != "ytmusic") {
+                fire { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
+            }
+            if (zarzSession.record.isUsable()) fire { tryAmazonMusic(searchQuery, isrc, emitLink) }
+
+            jobs.awaitAll()
         }
 
-        // 1. JioSaavn (Direct 320kbps MP3/M4A — fast, reliable in India & globally)
-        if (source != "jiosaavn") {
-            tryJioSaavn("", searchQuery, emitLink)
+        // the 30-second previews are the floor, and only when nothing full-length answered
+        if (emittedCount() == 0 && storedPreview.startsWith("http")) {
+            emitLink(
+                newExtractorLink("MusicBox", "${source.uppercase()} Preview", storedPreview, ExtractorLinkType.VIDEO) {
+                    this.quality = 128
+                }
+            )
         }
-
-        // 2. Tidal / Monochrome (Lossless FLAC via tracks.monochrome.st, GDStudio & ZARZ)
-        if (source != "tidal") {
-            tryTidal("", searchQuery, isrc, emitLink)
-        }
-
-        // 3. Deezer (CharlesPikachu/musicdl: AnandServer FLAC, Deemixer, MusicFab, DeezDownloaders, Antra, ZARZ)
-        if (source != "deezer") {
-            tryDeezer(deezerId, searchQuery, emitLink)
-        }
-
-        // 4. Qobuz (CharlesPikachu/musicdl: AnandServer FLAC, DezAlty, GDStudio, ZARZ)
-        if (source != "qobuz") {
-            tryQobuz("", searchQuery, emitLink)
-        }
-
-        // 5. Spotify Direct (CharlesPikachu/musicdl: SpotiDown, RapidAPI, MusicFab, SpotSaver, SpotifyDownloads)
-        if (source != "spotify" && emittedCount < 3) {
-            trySpotify("", searchQuery, emitLink)
-        }
-
-        // 6. GDStudio Multi-Source Aggregator (CharlesPikachu/musicdl: Netease, Kuwo, Joox, Tidal, Qobuz, YTMusic)
-        if (source != "gdstudio" && emittedCount < 3) {
-            tryGDStudio("", searchQuery, emitLink)
-        }
-
-        // 7. SoundCloud (Direct Progressive/HLS + MP3Juice)
-        if (source != "soundcloud" && emittedCount < 3) {
-            trySoundCloud("", searchQuery, emitLink)
-        }
-
-        // 8. Jamendo (Direct FLAC & 320kbps MP3)
-        if (source != "jamendo" && emittedCount < 2) {
-            tryJamendo("", searchQuery, emitLink)
-        }
-
-        // 9. Amazon Music (ZARZ signed session - only if session is already usable or nothing found yet)
-        if (zarzSession.record.isUsable() || emittedCount == 0) {
-            tryAmazonMusic(searchQuery, isrc, emitLink)
-        }
-
-        // 10. YouTube Music (CharlesPikachu/musicdl: Y2Mate, CnvMP3, YTMP3, MP3Juice, CloudStream Extractor, Cobalt)
-        if (source != "ytmusic" && emittedCount < 3) {
-            tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink)
-        }
-
-        // 11. Fallback 30-second Previews if all full-length providers failed
-        if (emittedCount == 0) {
-            if (storedPreview.startsWith("http")) {
-                emitLink(
-                    newExtractorLink("MusicBox", "${source.uppercase()} Preview", storedPreview, ExtractorLinkType.VIDEO) {
-                        this.quality = 128
+        if (emittedCount() == 0) {
+            coroutineScope {
+                listOf(
+                    async { runCatching { tryApplePreview(searchQuery, emitLink) }.getOrDefault(false) },
+                    async {
+                        if (deezerId.isNotBlank()) {
+                            runCatching { tryDeezerPreview(deezerId, emitLink) }.getOrDefault(false)
+                        } else false
                     }
-                )
-            }
-            if (emittedCount == 0) {
-                tryApplePreview(searchQuery, emitLink)
-            }
-            if (emittedCount == 0 && deezerId.isNotBlank()) {
-                tryDeezerPreview(deezerId, emitLink)
+                ).awaitAll()
             }
         }
 
-        if (emittedCount == 0) {
+        if (emittedCount() == 0) {
             pendingAuthUrl?.let { offerVerification(it) }
         }
 
-        MusicBoxLog.d(TAG, "done: $emittedCount link(s)")
-        return emittedCount > 0
+        MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
+        return emittedCount() > 0
     }
 
     /** host and first path segment only: enough to tell sources apart, no tokens in the log */

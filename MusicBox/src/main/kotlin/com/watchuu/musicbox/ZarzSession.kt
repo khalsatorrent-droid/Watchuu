@@ -413,8 +413,21 @@ class ZarzSession(
 
     /** musicdl's descriptorurl(): direct_downloadable first, then download_url, then direct */
     fun descriptorUrl(descriptor: JSONObject): String? {
-        val direct = descriptor.optString("direct_download_url", "").trim()
-        val normal = descriptor.optString("download_url", "").trim()
+        val nested = descriptor.optJSONObject("data")
+        val direct = (descriptor.optString("direct_download_url", "").ifBlank {
+            nested?.optString("direct_download_url", "").orEmpty()
+        }).trim()
+        val normal = (descriptor.optString("download_url", "").ifBlank {
+            nested?.optString("download_url", "").orEmpty()
+        }).trim()
+        val link = (descriptor.optString("link", "").ifBlank {
+            nested?.optString("link", "").orEmpty()
+        }).trim()
+        val plain = (descriptor.optString("url", "").ifBlank {
+            nested?.optString("url", "").orEmpty()
+        }).trim()
+        if (link.startsWith("http")) return link
+        if (plain.startsWith("http") && !plain.contains("manifest")) return plain
         val directOk = if (descriptor.has("direct_downloadable")) {
             descriptor.optBoolean("direct_downloadable")
         } else null

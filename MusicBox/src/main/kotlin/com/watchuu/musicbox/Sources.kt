@@ -1906,7 +1906,7 @@ object YouTubeMusicApi {
      *
      * The CloudStream extractor hands back every stream it finds, video included, and a video-only
      * stream plays as a silent picture - which is exactly what was happening. This asks for the
-     * adaptive formats and keeps only `mimeType` audio/*, so what comes back is a song, not a clip.
+     * adaptive formats and keeps only the audio mime types, so what comes back is a song, not a clip.
      */
     suspend fun audioOnlyStream(videoId: String): ResolvedStream? {
         if (videoId.length != 11) return null

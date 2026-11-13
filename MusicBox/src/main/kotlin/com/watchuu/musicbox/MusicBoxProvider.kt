@@ -941,9 +941,19 @@ class MusicBoxProvider : MainAPI() {
                     QobuzApi.search(query, 1).firstOrNull()?.sourceId ?: ""
                 }
                 if (targetId.isNotBlank()) {
-                    val descriptor = zarzSession.resolveQobuzDownload(targetId)
+                    // musicdl's quality chain: hi-res-max, then hi-res, then cd
+                    var descriptor: JSONObject? = null
+                    for (quality in listOf(27, 7, 6)) {
+                        val attempt = runCatching {
+                            zarzSession.resolveQobuzDownload(targetId, quality)
+                        }.getOrNull()
+                        if (attempt != null && extractDownloadUrl(attempt) != null) {
+                            descriptor = attempt
+                            break
+                        }
+                    }
                     saveSession()
-                    val url = extractDownloadUrl(descriptor)
+                    val url = descriptor?.let { extractDownloadUrl(it) }
                     if (url != null) {
                         callback.invoke(
                             newExtractorLink("MusicBox", "Qobuz · ZARZ FLAC", url, ExtractorLinkType.VIDEO) {
@@ -956,7 +966,9 @@ class MusicBoxProvider : MainAPI() {
             } catch (e: ZarzSession.VerificationRequiredException) {
                 pendingAuthUrl = e.authUrl
                 saveSession()
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                Log.d(TAG, "Qobuz ZARZ failed: ${e.message}")
+            }
         }
 
         return added
@@ -1088,33 +1100,22 @@ class MusicBoxProvider : MainAPI() {
         return false
     }
 
+    /**
+     * Amazon is deliberately not attempted through the resolver.
+     *
+     * musicdl's zarz.py implements exactly three download clients - deezer, qobuz and tidal-web -
+     * and its amazon.py goes through Amazon's own a2z skill api with a registered device. The
+     * /dl/amazeamazeamaze path this used to call appears nowhere in either, so every attempt was a
+     * guaranteed failure that still cost a round trip.
+     */
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun tryAmazonMusic(
         query: String,
         isrc: String,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
-        try {
-            val identifier = isrc.ifBlank { query }
-            val descriptor = zarzSession.resolveAmazonDownload(identifier)
-            saveSession()
-
-            val url = extractDownloadUrl(descriptor)
-            if (url != null) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", "Amazon Music FLAC", url, ExtractorLinkType.VIDEO) {
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                return true
-            }
-        } catch (e: ZarzSession.VerificationRequiredException) {
-            pendingAuthUrl = e.authUrl
-            saveSession()
-        } catch (e: Exception) {
-            Log.d(TAG, "Amazon Music failed: ${e.message}")
-            saveSession()
-        }
+        Log.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
         return false
     }
 
@@ -1190,10 +1191,12 @@ class MusicBoxProvider : MainAPI() {
                     }
                 }
 
-                // 3. ZARZ Cobalt v1 fallback
+                // 4. ZARZ Cobalt v1 fallback
                 if (!added) {
                     runCatching {
-                        val cobalt = zarzSession.resolveYouTubeDownload(youtubeUrl)
+                        val cobalt = zarzSession.resolveYouTubeDownload(
+                            "https://music.youtube.com/watch?v=$videoId"
+                        )
                         // cobalt is asked for audio only; anything else is ignored
                         val url = cobalt.optString("url", "")
                         if (url.isNotBlank()) {

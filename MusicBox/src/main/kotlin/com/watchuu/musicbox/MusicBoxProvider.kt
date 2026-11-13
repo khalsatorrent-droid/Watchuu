@@ -802,7 +802,7 @@ class MusicBoxProvider : MainAPI() {
         }
 
         // 2. Optional ZARZ Tidal resolver if session is active
-        if (!added && zarzSession.record.isUsable()) {
+        if (zarzSession.record.isUsable()) {
             try {
                 val targetId = tidalId.ifBlank {
                     TidalApi.search(query, 1).firstOrNull()?.sourceId ?: ""
@@ -827,7 +827,11 @@ class MusicBoxProvider : MainAPI() {
                             }
                         )
                         added = true
+                    } else {
+                        MusicBoxLog.d(TAG, "Tidal ZARZ: descriptor had no playable url (preview or empty)")
                     }
+                } else {
+                    MusicBoxLog.d(TAG, "Tidal ZARZ: no track id to ask for")
                 }
             } catch (e: ZarzSession.VerificationRequiredException) {
                 pendingAuthUrl = e.authUrl
@@ -871,9 +875,15 @@ class MusicBoxProvider : MainAPI() {
         }
 
         // 2. ZARZ Deezer resolver
-        if (!added && zarzSession.record.isUsable()) {
+        if (zarzSession.record.isUsable()) {
+            val deezerTarget = trackId.ifBlank {
+                runCatching { DeezerApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
+            }
+            if (deezerTarget.isBlank()) {
+                MusicBoxLog.d(TAG, "Deezer ZARZ: no track id to ask for")
+            } else
             try {
-                val descriptor = zarzSession.resolveDownloadDescriptor(trackId)
+                val descriptor = zarzSession.resolveDownloadDescriptor(deezerTarget)
                 saveSession()
                 // an error envelope or a Blowfish-encrypted stream is not playable, and handing
                 // one to the player is how deezer tracks used to fail after "succeeding"
@@ -952,7 +962,7 @@ class MusicBoxProvider : MainAPI() {
             MusicBoxLog.d(TAG, "Qobuz musicdl failed: ${e.message}")
         }
 
-        if (!added && zarzSession.record.isUsable()) {
+        if (zarzSession.record.isUsable()) {
             try {
                 val targetId = qobuzId.ifBlank {
                     QobuzApi.search(query, 1).firstOrNull()?.sourceId ?: ""
@@ -971,6 +981,9 @@ class MusicBoxProvider : MainAPI() {
                     }
                     saveSession()
                     val url = descriptor?.let { extractDownloadUrl(it) }
+                    if (url == null) {
+                        MusicBoxLog.d(TAG, "Qobuz ZARZ: every quality came back without a url")
+                    }
                     if (url != null) {
                         callback.invoke(
                             newExtractorLink("MusicBox", "Qobuz · ZARZ FLAC", url, ExtractorLinkType.VIDEO) {
@@ -1042,6 +1055,7 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
             val resolved = GDStudioApi.resolveBestStream(query)
+            if (resolved == null) MusicBoxLog.d(TAG, "GDStudio: nothing matched for this track")
             if (resolved != null) {
                 callback.invoke(
                     newExtractorLink("MusicBox", resolved.name, resolved.url, ExtractorLinkType.VIDEO) {
@@ -1100,6 +1114,8 @@ class MusicBoxProvider : MainAPI() {
         if (!MusicBoxSettings.enableJamendo) return false
         try {
             val streams = JamendoApi.resolveStreams(jamendoId, query)
+                .distinctBy { it.url.substringBefore('?') }
+                .sortedByDescending { it.quality }
             var added = false
             for (s in streams) {
                 callback.invoke(
@@ -1110,6 +1126,7 @@ class MusicBoxProvider : MainAPI() {
                 )
                 added = true
             }
+            if (!added) MusicBoxLog.d(TAG, "Jamendo: no stream for this track")
             return added
         } catch (e: Exception) {
             MusicBoxLog.d(TAG, "Jamendo failed: ${e.message}")

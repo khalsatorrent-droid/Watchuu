@@ -23,6 +23,9 @@ import javax.crypto.spec.SecretKeySpec
  *   amazon  → amzn@2.3.19   (was 2.3.12)
  *   deezer  → deezer@1.3.11 (was 1.3.5)
  *   tidal   → tidal-web@1.2.14 (was 1.2.5)
+ *
+ * FIX: bootstrap() now accepts an optional appVersionOverride so each provider
+ *      can bootstrap with its own appVersion, matching what the ZARZ gateway expects.
  */
 class ZarzSession(
     private val namespace: String = "zarz-v2",
@@ -43,12 +46,12 @@ class ZarzSession(
         private const val USER_AGENT = "Mornye/ext-1.0"
 
         // Per-provider appVersion strings — keep in sync with registry.json versions
-        const val APP_VERSION_DEEZER  = "deezer@1.3.11"
-        const val APP_VERSION_AMAZON  = "amzn@2.3.19"
-        const val APP_VERSION_TIDAL   = "tidal-web@1.2.14"
-        const val APP_VERSION_QOBUZ   = "qobuz-web@1.2.27"
-        const val APP_VERSION_YTMUSIC = "ytmusic-spotiflac@2.4.6"
-        const val APP_VERSION_SC      = "soundcloud@1.0.14"
+        const val APP_VERSION_DEEZER   = "deezer@1.3.11"
+        const val APP_VERSION_AMAZON   = "amzn@2.3.19"
+        const val APP_VERSION_TIDAL    = "tidal-web@1.2.14"
+        const val APP_VERSION_QOBUZ    = "qobuz-web@1.2.27"
+        const val APP_VERSION_YTMUSIC  = "ytmusic-spotiflac@2.4.6"
+        const val APP_VERSION_SC       = "soundcloud@1.0.14"
         const val APP_VERSION_BEATPORT = "beatport@1.0.1"
     }
 
@@ -122,10 +125,13 @@ class ZarzSession(
     /**
      * Bootstrap - GET /bootstrap to obtain a session or a verification challenge.
      * Returns empty string if session obtained, or a challenge URL if verification needed.
+     *
+     * FIX: accepts appVersionOverride so provider-specific bootstraps work correctly.
      */
-    suspend fun bootstrap(): String {
+    suspend fun bootstrap(appVersionOverride: String? = null): String {
+        val effectiveVersion = appVersionOverride ?: appVersion
         val url = resolveEndpoint(bootstrapPath)
-        val fullUrl = "$url?app_version=${appVersion.encodeUrl()}&install_id=${record.installId.encodeUrl()}"
+        val fullUrl = "$url?app_version=${effectiveVersion.encodeUrl()}&install_id=${record.installId.encodeUrl()}"
 
         val response = app.get(
             fullUrl,
@@ -274,7 +280,8 @@ class ZarzSession(
         appVersionOverride: String? = null,
     ): SignedResponse {
         if (!record.isUsable()) {
-            val url = bootstrap()
+            // FIX: pass appVersionOverride to bootstrap so the gateway sees the right version
+            val url = bootstrap(appVersionOverride)
             if (url.isNotEmpty()) {
                 return SignedResponse(
                     ok = false,
@@ -300,7 +307,8 @@ class ZarzSession(
 
         if (response.code == 401 && origin == "gateway" && errorCode == "SESSION_INVALID" && action == "bootstrap_session") {
             record.clear()
-            val url = bootstrap()
+            // FIX: pass appVersionOverride to bootstrap on session-invalid retry
+            val url = bootstrap(appVersionOverride)
             if (url.isNotEmpty()) {
                 return SignedResponse(ok = false, needsVerification = true, error = "VERIFY_REQUIRED", authUrl = url)
             }
@@ -315,7 +323,8 @@ class ZarzSession(
         }
 
         if (response.code == 428 && origin == "gateway" && errorCode == "VERIFY_REQUIRED" && action == "verify") {
-            val url = bootstrap()
+            // FIX: pass appVersionOverride to bootstrap on verify-required
+            val url = bootstrap(appVersionOverride)
             if (url.isNotEmpty()) {
                 return SignedResponse(ok = false, needsVerification = true, error = "VERIFY_REQUIRED", authUrl = url)
             }

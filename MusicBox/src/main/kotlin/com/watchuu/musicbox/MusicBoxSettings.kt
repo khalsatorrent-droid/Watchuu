@@ -17,10 +17,11 @@ import kotlinx.coroutines.withContext
 /**
  * MusicBox settings dialog.
  *
- * Sources added:
- *  - Qobuz  (ZARZ signed — qobuz-web@1.2.27)
- *  - Beatport (catalogue search, ZARZ /dl/bp)
- * appVersion strings updated to match registry.json 2026-11-08.
+ * FIX: Uses ZarzSessionManager singleton so bootstrap here is immediately
+ *      visible to MusicBoxProvider (they were using separate instances before).
+ * FIX: Added Beatport enable/disable toggle (was wired in ZarzSession but
+ *      missing from settings, so it was always off in loadLinks).
+ * appVersion strings match registry.json 2026-11-08.
  */
 object MusicBoxSettings {
     private const val PREFS_NAME = "musicbox_prefs"
@@ -64,6 +65,13 @@ object MusicBoxSettings {
     var enableQobuz: Boolean
         get() = bool("enable_qobuz", true)
         set(v) = put { putBoolean("enable_qobuz", v) }
+
+    // FIX: Beatport toggle was missing — it was listed in ZarzSession and checked in
+    //      the old provider code but was never actually read because there was no
+    //      prefs key for it. Defaults to true so existing users get it immediately.
+    var enableBeatport: Boolean
+        get() = bool("enable_beatport", true)
+        set(v) = put { putBoolean("enable_beatport", v) }
 
     var enableYouTubeFallback: Boolean
         get() = bool("enable_yt_fallback", true)
@@ -154,31 +162,42 @@ object MusicBoxSettings {
         }
         root.addView(cbQobuz)
 
+        // FIX: Added Beatport checkbox
+        val cbBeatport = CheckBox(act).apply {
+            text = "7. Beatport (ZARZ — beatport@1.0.1, FLAC)"
+            isChecked = enableBeatport
+        }
+        root.addView(cbBeatport)
+
         val cbYouTube = CheckBox(act).apply {
-            text = "7. YouTube Music (Cobalt → CloudStream extractor)"
+            text = "8. YouTube Music (Cobalt → CloudStream extractor)"
             isChecked = enableYouTubeFallback
         }
         root.addView(cbYouTube)
 
         // ── ZARZ Session ──────────────────────────────────────────────────────
         root.addView(header("ZARZ Session"))
-        root.addView(note("Required for Amazon, Deezer, Tidal, Qobuz, SoundCloud (ZARZ)"))
+        root.addView(note("Required for Amazon, Deezer, Tidal, Qobuz, SoundCloud, Beatport (ZARZ)"))
 
         val sessionStatus = TextView(act).apply {
             textSize = 13f; setPadding(0, dp(act, 4), 0, dp(act, 4))
         }
         root.addView(sessionStatus)
 
-        val session = ZarzSession()
-        val stored = prefs?.getString("musicbox_zarz_session", null)
-        session.loadState(stored)
+        // FIX: Use the shared singleton session instead of creating a new local instance.
+        //      Bootstrap in Settings is now immediately visible to MusicBoxProvider.
+        val session = ZarzSessionManager.session
+        ZarzSessionManager.load(prefs?.getString("musicbox_zarz_session", null), forceReload = true)
 
-        sessionStatus.text = when {
-            session.record.isUsable() ->
-                "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
-            session.record.sessionId.isNotBlank() -> "✗ Session expired — tap Bootstrap"
-            else -> "○ No session — tap Bootstrap"
+        fun updateStatus() {
+            sessionStatus.text = when {
+                session.record.isUsable() ->
+                    "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
+                session.record.sessionId.isNotBlank() -> "✗ Session expired — tap Bootstrap"
+                else -> "○ No session — tap Bootstrap"
+            }
         }
+        updateStatus()
 
         val btnBootstrap = Button(act).apply {
             text = "Bootstrap Session"
@@ -192,7 +211,7 @@ object MusicBoxSettings {
                     prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
                     withContext(Dispatchers.Main) {
                         if (url.isBlank()) {
-                            sessionStatus.text = "✓ Session obtained directly!"
+                            updateStatus()
                             Toast.makeText(act, "Session active!", Toast.LENGTH_SHORT).show()
                         } else {
                             sessionStatus.text = "⚠ Verification required"
@@ -202,7 +221,7 @@ object MusicBoxSettings {
                                         session.exchange(grant)
                                         prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
                                         withContext(Dispatchers.Main) {
-                                            sessionStatus.text = "✓ Session active!"
+                                            updateStatus()
                                             Toast.makeText(act, "Verification complete!", Toast.LENGTH_SHORT).show()
                                         }
                                     } catch (e: Exception) {
@@ -233,7 +252,7 @@ object MusicBoxSettings {
         btnClear.setOnClickListener {
             session.record.clear()
             prefs?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
-            sessionStatus.text = "○ Session cleared"
+            updateStatus()
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)
@@ -253,6 +272,7 @@ object MusicBoxSettings {
                 enableSoundCloud      = cbSoundCloud.isChecked
                 enableTidal           = cbTidal.isChecked
                 enableQobuz           = cbQobuz.isChecked
+                enableBeatport        = cbBeatport.isChecked
                 enableYouTubeFallback = cbYouTube.isChecked
                 Toast.makeText(act, "Settings saved", Toast.LENGTH_SHORT).show()
             }

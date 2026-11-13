@@ -26,9 +26,16 @@ import org.json.JSONObject
  *   4. SoundCloud     → Direct HLS/progressive (no ZARZ, ZARZ /dl/sc as upgrade)
  *   5. Tidal          → ZARZ tidal-web@1.2.14 → /dl/tid
  *   6. Qobuz          → ZARZ qobuz-web@1.2.27 → /dl/qbz
- *   7. YouTube Music  → Cobalt /v1/dl/cobalt (plain POST, no ticket)
- *   8. Apple preview  → public 30s snippet
- *   9. Deezer preview → public 30s snippet
+ *   7. Beatport       → ZARZ beatport@1.0.1   → /dl/bp
+ *   8. YouTube Music  → Cobalt /v1/dl/cobalt (plain POST, no ticket)
+ *   9. Apple preview  → public 30s snippet
+ *  10. Deezer preview → public 30s snippet
+ *
+ * FIX: Uses ZarzSessionManager singleton so bootstrap survives across
+ *      MusicBoxProvider instances and is shared with MusicBoxSettings.
+ * FIX: loadLinks proactively bootstraps the ZARZ session before attempting
+ *      ZARZ sources, so the first call doesn't silently fail.
+ * FIX: Beatport added to download chain (was wired in settings but never tried).
  */
 class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://api.deezer.com"
@@ -39,11 +46,11 @@ class MusicBoxProvider : MainAPI() {
 
     companion object {
         private const val TAG = "MusicBox"
-        private const val PREF_KEY_SESSION = "musicbox_zarz_session"
-        private const val PREF_KEY_CATALOGUE = "musicbox_catalogue"
     }
 
-    private val zarzSession = ZarzSession()
+    // FIX: Use the singleton session manager so the session is shared with
+    //      MusicBoxSettings and persists across provider instantiations.
+    private val zarzSession get() = ZarzSessionManager.session
 
     @Volatile
     private var pendingAuthUrl: String? = null
@@ -51,15 +58,11 @@ class MusicBoxProvider : MainAPI() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun loadSession() {
-        try {
-            val stored = com.lagradost.cloudstream3.CloudStreamApp.context
+        ZarzSessionManager.load(
+            com.lagradost.cloudstream3.CloudStreamApp.context
                 ?.getSharedPreferences("musicbox_prefs", 0)
-                ?.getString(PREF_KEY_SESSION, null)
-            zarzSession.loadState(stored)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to load session: ${e.message}")
-            zarzSession.loadState(null)
-        }
+                ?.getString("musicbox_zarz_session", null)
+        )
     }
 
     private fun saveSession() {
@@ -67,7 +70,7 @@ class MusicBoxProvider : MainAPI() {
             com.lagradost.cloudstream3.CloudStreamApp.context
                 ?.getSharedPreferences("musicbox_prefs", 0)
                 ?.edit()
-                ?.putString(PREF_KEY_SESSION, zarzSession.saveState())
+                ?.putString("musicbox_zarz_session", zarzSession.saveState())
                 ?.apply()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save session: ${e.message}")
@@ -75,17 +78,15 @@ class MusicBoxProvider : MainAPI() {
     }
 
     private fun getCatalogue(): String {
-        return com.lagradost.cloudstream3.CloudStreamApp.context
-            ?.getSharedPreferences("musicbox_prefs", 0)
-            ?.getString(PREF_KEY_CATALOGUE, "all") ?: "all"
+        return MusicBoxSettings.catalogue
     }
 
     // ========== Home Page ==========
 
     override val mainPage = mainPageOf(
-        "chart"   to "Top Charts",
+        "chart"    to "Top Charts",
         "trending" to "Trending Now",
-        "new"     to "New Releases",
+        "new"      to "New Releases",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -153,21 +154,21 @@ class MusicBoxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val catalogue = getCatalogue()
         val primary = when (catalogue) {
-            "jiosaavn"  -> searchJioSaavn(query)
-            "spotify"   -> searchSpotify(query)
-            "apple"     -> appleRow(query)
-            "soundcloud"-> searchSoundCloud(query)
-            "deezer"    -> searchDeezer(query)
-            "qobuz"     -> searchQobuz(query)
-            "tidal"     -> searchTidal(query)
-            "beatport"  -> searchBeatport(query)
+            "jiosaavn"   -> searchJioSaavn(query)
+            "spotify"    -> searchSpotify(query)
+            "apple"      -> appleRow(query)
+            "soundcloud" -> searchSoundCloud(query)
+            "deezer"     -> searchDeezer(query)
+            "qobuz"      -> searchQobuz(query)
+            "tidal"      -> searchTidal(query)
+            "beatport"   -> searchBeatport(query)
             else -> {
                 // All: JioSaavn first (always plays), then catalogue sources
                 val merged = LinkedHashMap<String, SearchResponse>()
                 searchJioSaavn(query).forEach { merged[it.url] = it }
                 searchSpotify(query).forEach  { merged[it.url] = it }
-                appleRow(query).forEach        { merged[it.url] = it }
-                searchSoundCloud(query).forEach{ merged[it.url] = it }
+                appleRow(query).forEach       { merged[it.url] = it }
+                searchSoundCloud(query).forEach { merged[it.url] = it }
                 merged.values.toList()
             }
         }
@@ -342,9 +343,39 @@ class MusicBoxProvider : MainAPI() {
         var found = false
         pendingAuthUrl = null
 
-        runCatching { zarzSession.refreshIfNeeded() }
-            .onFailure { Log.w(TAG, "Session refresh failed: ${it.message}") }
-        saveSession()
+        // FIX: Proactively refresh if due, then try a one-shot bootstrap if the
+        //      session is missing/expired — this avoids every ZARZ source spending a
+        //      round-trip just to discover they need to bootstrap.
+        val anyZarzEnabled = MusicBoxSettings.enableAmazonDownload
+            || MusicBoxSettings.enableDeezerDownload
+            || MusicBoxSettings.enableSoundCloud
+            || MusicBoxSettings.enableTidal
+            || MusicBoxSettings.enableQobuz
+            || MusicBoxSettings.enableBeatport
+
+        if (anyZarzEnabled) {
+            if (zarzSession.record.isUsable()) {
+                runCatching { zarzSession.refreshIfNeeded() }
+                    .onFailure { Log.w(TAG, "Session refresh failed: ${it.message}") }
+                saveSession()
+            } else {
+                // Session missing or expired — bootstrap eagerly before source attempts.
+                // If verification is required the challenge URL is captured here and
+                // offerVerification is called below; sources will also catch their own
+                // VerificationRequiredException in case the session expires mid-flight.
+                try {
+                    val authUrl = zarzSession.bootstrap()
+                    saveSession()
+                    if (authUrl.isNotEmpty()) {
+                        pendingAuthUrl = authUrl
+                        Log.d(TAG, "loadLinks: ZARZ verification required at $authUrl")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "loadLinks: ZARZ bootstrap failed: ${e.message}")
+                    saveSession()
+                }
+            }
+        }
 
         val searchQuery = "$title $artist".trim()
 
@@ -378,17 +409,22 @@ class MusicBoxProvider : MainAPI() {
             found = tryQobuz(searchQuery, isrc, callback)
         }
 
-        // 7. YouTube Music (Cobalt → CloudStream extractor)
+        // 7. Beatport (ZARZ signed) — FIX: was wired in settings but never attempted
+        if (!found && MusicBoxSettings.enableBeatport) {
+            found = tryBeatport(if (source == "beatport") id else "", searchQuery, callback)
+        }
+
+        // 8. YouTube Music (Cobalt → CloudStream extractor)
         if (!found && MusicBoxSettings.enableYouTubeFallback) {
             found = tryYouTubeMusic(searchQuery, subtitleCallback, callback)
         }
 
-        // 8. Apple preview (always available, 30s)
+        // 9. Apple preview (always available, 30s)
         if (!found) {
             found = tryApplePreview(searchQuery, callback)
         }
 
-        // 9. Deezer 30s preview
+        // 10. Deezer 30s preview
         if (!found && deezerId.isNotBlank()) {
             found = tryDeezerPreview(deezerId, callback)
         }
@@ -647,6 +683,37 @@ class MusicBoxProvider : MainAPI() {
             saveSession()
         } catch (e: Exception) {
             Log.d(TAG, "Qobuz download failed: ${e.message}")
+            saveSession()
+        }
+        return false
+    }
+
+    // ── Beatport ───────────────────────────────────────────────────────────────
+    // FIX: Beatport was set up in settings and ZarzSession but never tried in loadLinks.
+
+    private suspend fun tryBeatport(beatportId: String, query: String, callback: (ExtractorLink) -> Unit): Boolean {
+        try {
+            val trackId = if (beatportId.isNotBlank()) beatportId else {
+                try { BeatportApi.search(query, 1).firstOrNull()?.sourceId ?: "" } catch (_: Exception) { "" }
+            }
+            if (trackId.isBlank()) return false
+
+            val descriptor = zarzSession.resolveBeatportDownload(trackId)
+            saveSession()
+
+            val url = extractDownloadUrl(descriptor)
+            if (url != null) {
+                callback.invoke(newExtractorLink("MusicBox", "Beatport FLAC", url, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                })
+                return true
+            }
+        } catch (e: ZarzSession.VerificationRequiredException) {
+            Log.w(TAG, "ZARZ verification required (Beatport): ${e.authUrl}")
+            pendingAuthUrl = e.authUrl
+            saveSession()
+        } catch (e: Exception) {
+            Log.d(TAG, "Beatport download failed: ${e.message}")
             saveSession()
         }
         return false

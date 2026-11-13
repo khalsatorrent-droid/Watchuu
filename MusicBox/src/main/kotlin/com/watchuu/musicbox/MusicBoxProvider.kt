@@ -703,7 +703,7 @@ class MusicBoxProvider : MainAPI() {
             pendingAuthUrl?.let { offerVerification(it) }
         }
 
-        MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
+        MusicBoxLog.d(TAG, "done: $emittedCount link(s)")
         return emittedCount > 0
     }
 

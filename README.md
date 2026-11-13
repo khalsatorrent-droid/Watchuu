@@ -97,8 +97,20 @@ Two habits that save a lot of time:
 - If a sibling module for a similar site already works, read it first and copy its approach. Several bugs here came from treating a new site as an unknown when a working pattern was sitting in the same repo.
 - Prefer the app's own machinery over hand-rolled parsing. Cloudstream already ships extractors for most embed hosts, and a site's own player config usually states the real stream URL rather than something you have to reconstruct.
 
-## ⚠️ Disclaimer
+---
 
-These extensions only index content hosted by third-party sites. The authors host no media and are not responsible for it.
+## ⚖️ Legal Disclaimer
+
+> **These extensions do not host, store, upload, or distribute any media content of any kind.**
+
+They work exactly like a web browser: they connect to publicly accessible third-party websites, read the HTML those sites serve to any visitor, and display the results inside the Cloudstream app. Every video, thumbnail, and piece of metadata comes entirely from those external third-party sources — this repository never touches it.
+
+- The developer **does not** own, operate, control, or endorse any of the third-party websites these extensions access.
+- The developer **bears no responsibility** for the content, legality, accuracy, or availability of anything served by those third-party sites.
+- The developer **makes no warranties** of any kind regarding this software.
+- **You are solely responsible** for ensuring your use of this software complies with the laws of your jurisdiction.
+- If you are a rights holder and believe a linked third-party site infringes your intellectual property, contact that site directly — this repository has no control over third-party content.
+
+By installing or using these extensions, you acknowledge and accept the above.
 
 <div align="center">Made with ❤️ by <a href="https://github.com/khalsatorrent-droid">khalsatorrent-droid</a></div>

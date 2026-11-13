@@ -6,6 +6,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -162,27 +165,39 @@ class MusicBoxProvider : MainAPI() {
             "qobuz"      -> searchQobuz(query)
             "tidal"      -> searchTidal(query)
             "beatport"   -> searchBeatport(query)
-            else -> {
-                // All: JioSaavn first (always plays), then catalogue sources
-                val merged = LinkedHashMap<String, SearchResponse>()
-                searchJioSaavn(query).forEach { merged[it.url] = it }
-                searchSpotify(query).forEach  { merged[it.url] = it }
-                appleRow(query).forEach       { merged[it.url] = it }
-                searchSoundCloud(query).forEach { merged[it.url] = it }
-                searchAudius(query).forEach { merged[it.url] = it }
-                searchJamendo(query).forEach { merged[it.url] = it }
-                searchCcMixter(query).forEach { merged[it.url] = it }
-                searchWikimedia(query).forEach { merged[it.url] = it }
-                searchBilibili(query).forEach { merged[it.url] = it }
-                searchFma(query).forEach { merged[it.url] = it }
-                searchOpenGameArt(query).forEach { merged[it.url] = it }
-                merged.values.toList()
-            }
+            else -> searchEverything(query)
         }
         return primary.ifEmpty { appleRow(query) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
+
+    /**
+     * Every source at once, each capped, instead of eleven awaits in a row. With one dead host the
+     * old version could sit for minutes before showing anything.
+     */
+    private suspend fun searchEverything(query: String): List<SearchResponse> = coroutineScope {
+        val jobs = listOf(
+            async { searchJioSaavn(query) },
+            async { searchSpotify(query) },
+            async { appleRow(query) },
+            async { searchSoundCloud(query) },
+            async { searchAudius(query) },
+            async { searchJamendo(query) },
+            async { searchCcMixter(query) },
+            async { searchWikimedia(query) },
+            async { searchBilibili(query) },
+            async { searchFma(query) },
+            async { searchOpenGameArt(query) },
+        ).map { it }
+
+        val merged = LinkedHashMap<String, SearchResponse>()
+        for (job in jobs) {
+            val part = withTimeoutOrNull(15_000L) { job.await() } ?: emptyList()
+            part.forEach { merged[it.url] = it }
+        }
+        merged.values.toList()
+    }
 
     private suspend fun searchSpotify(query: String): List<SearchResponse> {
         return try {
@@ -292,8 +307,13 @@ class MusicBoxProvider : MainAPI() {
             put("id",        id)
             put("title",     finalTitle)
             put("artist",    finalArtist)
-            put("deezer_id", if (source == "deezer") id else (track?.sourceId ?: ""))
+            // only a real deezer id here: filling this from a title search made the deezer step
+            // download whatever it happened to match instead of the track that was opened
+            put("deezer_id", if (source == "deezer") id else "")
             put("isrc",      track?.isrc ?: "")
+            // jiosaavn hands back a decrypted url at search time; carrying it means play does not
+            // depend on a second call that can fail
+            put("url",       track?.previewUrl?.takeIf { it.startsWith("http") } ?: "")
         }.toString()
 
         return newMovieLoadResponse(
@@ -347,8 +367,9 @@ class MusicBoxProvider : MainAPI() {
                 put("id",        track.sourceId)
                 put("title",     track.title)
                 put("artist",    track.artist)
-                put("deezer_id", track.sourceId)
+                put("deezer_id", if (track.source == "deezer") track.sourceId else "")
                 put("isrc",      track.isrc)
+                put("url",       track.previewUrl.takeIf { it.startsWith("http") } ?: "")
             }.toString()
 
             newEpisode(epData) {
@@ -428,12 +449,57 @@ class MusicBoxProvider : MainAPI() {
 
         val searchQuery = "$title $artist".trim()
 
+        // 0. a url the entry already carried - no network, cannot fail
+        val carriedUrl = obj.optString("url", "")
+        if (carriedUrl.startsWith("http")) {
+            callback.invoke(newExtractorLink("MusicBox", "Direct", carriedUrl, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+            })
+            found = true
+        }
+
         // 1. JioSaavn — always works without ZARZ, used as reliable floor
         if (!found && MusicBoxSettings.enableJioSaavn) {
             found = tryJioSaavn(if (source == "jiosaavn") id else "", searchQuery, callback)
         }
 
-        // 2. Amazon Music (ZARZ signed)
+        // 2. the entry's own source, when it can serve the file without a session. These were
+        //    written but never called, which is why Audius and Jamendo results never played.
+        if (!found && MusicBoxSettings.enableAudius) {
+            found = tryAudius(if (source == "audius") id else "", searchQuery, callback)
+        }
+        if (!found && MusicBoxSettings.enableJamendo) {
+            found = tryJamendo(if (source == "jamendo") id else "", searchQuery, callback)
+        }
+        if (!found && MusicBoxSettings.enableBilibili && source == "bilibili") {
+            runCatching { BilibiliApi.audioUrl(id) }.getOrNull()?.let {
+                callback.invoke(newExtractorLink("MusicBox", "Bilibili", it, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = "https://www.bilibili.com/"
+                })
+                found = true
+            }
+        }
+        if (!found && MusicBoxSettings.enableOpenGameArt && source == "opengameart") {
+            runCatching { OpenGameArtApi.audioUrl(id) }.getOrNull()?.let {
+                callback.invoke(newExtractorLink("MusicBox", "OpenGameArt", it, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                })
+                found = true
+            }
+        }
+        // ccMixter, FMA and Wikimedia hand back the file url as the id, so there is nothing to
+        // resolve at all
+        if (!found && (source == "ccmixter" || source == "fma" || source == "wikimedia") &&
+            id.startsWith("http")
+        ) {
+            callback.invoke(newExtractorLink("MusicBox", source, id, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+            })
+            found = true
+        }
+
+        // 3. Amazon Music (ZARZ signed)
         if (!found && MusicBoxSettings.enableAmazonDownload) {
             found = tryAmazonMusic(searchQuery, isrc, callback)
         }

@@ -617,7 +617,8 @@ class MusicBoxProvider : MainAPI() {
 
         // several providers emit at the same time, so this is atomic rather than a plain var
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
-        val emittedCount: Int get() = emitted.get()
+        // a local property cannot have a getter, so this is a function
+        fun emittedCount(): Int = emitted.get()
         pendingAuthUrl = null
 
         val emitLink: (ExtractorLink) -> Unit = { link ->
@@ -679,19 +680,19 @@ class MusicBoxProvider : MainAPI() {
         }
 
         // Amazon needs the signed session, so it is only worth a try when nothing else answered
-        if (emittedCount == 0 && !zarzSession.record.isUsable()) {
+        if (emittedCount() == 0 && !zarzSession.record.isUsable()) {
             runCatching { tryAmazonMusic(searchQuery, isrc, emitLink) }
         }
 
         // Previews are the floor, and only when the full-length attempts all came back empty
-        if (emittedCount == 0 && storedPreview.startsWith("http")) {
+        if (emittedCount() == 0 && storedPreview.startsWith("http")) {
             emitLink(
                 newExtractorLink("MusicBox", "${source.uppercase()} Preview", storedPreview, ExtractorLinkType.VIDEO) {
                     this.quality = 128
                 }
             )
         }
-        if (emittedCount == 0) {
+        if (emittedCount() == 0) {
             coroutineScope {
                 val previews = listOf(
                     async { runCatching { tryApplePreview(searchQuery, emitLink) }.getOrDefault(false) },
@@ -705,11 +706,11 @@ class MusicBoxProvider : MainAPI() {
             }
         }
 
-        if (emittedCount == 0) {
+        if (emittedCount() == 0) {
             pendingAuthUrl?.let { offerVerification(it) }
         }
 
-        return emittedCount > 0
+        return emittedCount() > 0
     }
 
     private fun offerVerification(authUrl: String) {

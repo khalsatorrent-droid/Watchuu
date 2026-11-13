@@ -8,7 +8,7 @@
 [![Cloudstream](https://img.shields.io/badge/Cloudstream-repository-blueviolet
 ![Language](https://img.shields.io/badge/Kotlin-2.4-7F52FF
 
-**26 extensions** · movies, TV, anime, short drama and music
+**25 extensions** · movies, TV, anime, short drama and music
 
 </div>
 
@@ -40,7 +40,6 @@ Extensions update themselves from the same link — when a site changes and a mo
 | **DesireMovies** | — | Movie · TV Series | 🇮🇳 HI |
 | **FlixVision** | — | Movie · TV Series | 🇬🇧 EN |
 | **KiligDrama** | [kiligdrama.com](https://kiligdrama.com) | Short Drama | 🇬🇧 EN |
-| **Mmsvibex** | [mmsvibex.fit](https://mmsvibex.fit) | Movie · TV Series | 🇬🇧 EN |
 | **MovieNerds** | [movienerds.site](https://movienerds.site) | Movie · TV Series · Anime | 🇬🇧 EN |
 | **NartoDrama** | [narto-drama.com](https://narto-drama.com) | Short Drama · Movie · Anime | 🇬🇧 EN |
 | **RedFlix** | [redflix.one](https://redflix.one) | Movie · TV Series · Anime | 🇬🇧 EN |

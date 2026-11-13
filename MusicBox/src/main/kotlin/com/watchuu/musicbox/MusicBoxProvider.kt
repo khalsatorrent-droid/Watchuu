@@ -622,7 +622,23 @@ class MusicBoxProvider : MainAPI() {
         )
         saveSession()
 
-        val searchQuery = "$title $artist".trim()
+        val cleanTitle = title
+            .replace(
+                Regex(
+                    """\s*[\(\[]\s*(?:from|feat\.?|ft\.?|featuring|with|prod\.?)[^)\]]*[\)\]]""",
+                    RegexOption.IGNORE_CASE
+                ),
+                " "
+            )
+            .replace(Regex("""\s{2,}"""), " ")
+            .trim()
+            .ifBlank { title }
+        val primaryArtist = artist.split(Regex("""\s*[,;/&]\s*"""))
+            .firstOrNull().orEmpty().trim()
+        val searchQuery = listOf(cleanTitle, primaryArtist)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .trim()
 
         // Every enabled provider runs at once.
         //
@@ -811,7 +827,25 @@ class MusicBoxProvider : MainAPI() {
             try {
                 val targetId = resolvedTidalId
                 if (targetId.isNotBlank()) {
-                    val descriptor = zarzTidal.resolveTidalDownload(targetId)
+                    var descriptor: JSONObject? = null
+                    var lastError = ""
+                    for (quality in listOf("LOSSLESS", "HIGH", "LOW")) {
+                        val attempt = runCatching {
+                            zarzTidal.resolveTidalDownload(targetId, quality)
+                        }
+                        val error = attempt.exceptionOrNull()
+                        if (error == null) {
+                            descriptor = attempt.getOrNull()
+                            break
+                        }
+                        lastError = error.message.orEmpty()
+                        MusicBoxLog.d(TAG, "Tidal ZARZ $quality: ${error.message}")
+                        if (!lastError.contains("503") && !lastError.contains("PROVIDER_UNAVAILABLE")) break
+                    }
+                    if (descriptor == null) {
+                        MusicBoxLog.w(TAG, "Tidal ZARZ: every quality refused ($lastError)")
+                        return added
+                    }
                     saveSession()
                     // TIDAL answers a base64 dash manifest, not a link. Decode it and take the
                     // audio url; a PREVIEW asset is rejected outright, as musicdl does.

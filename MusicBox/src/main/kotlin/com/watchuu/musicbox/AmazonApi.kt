@@ -237,9 +237,13 @@ object AmazonApi {
         queries.add(title.trim())
         queries.add(stripped)
         for (q in queries) {
-            val data = try { showSearch(q) } catch (_: Exception) { null } ?: continue
+            val data = try { showSearch(q) } catch (e: Exception) {
+                MusicBoxLog.w("AmazonApi", "search \"$q\" threw: ${e.message}")
+                null
+            } ?: continue
             val hits = ArrayList<Hit>()
             collect(data, hits)
+            MusicBoxLog.d("AmazonApi", "search \"$q\" -> ${hits.size} hit(s)")
             for (h in hits) {
                 if (norm(stripAnnotations(h.title)) != titleKey) continue
                 if (!artistMatches(h.artist, artist)) continue

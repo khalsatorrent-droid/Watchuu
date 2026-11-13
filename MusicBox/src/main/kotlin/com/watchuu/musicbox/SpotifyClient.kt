@@ -33,6 +33,8 @@ object SpotifyClient {
         94, 102, 43, 69, 49, 120, 118, 80, 64, 78
     )
     private const val TOTP_VERSION = 61
+    /** the web player build spotify-web reports on clienttoken and pathfinder */
+    private const val SPOTIFY_APP_VERSION = "1.2.52.442.g0f1fed8b"
     private const val SEARCH_HASH = "fcad5a3e0d5af727fb76966f06971c19cfa2275e6ff7671196753e008611873c"
 
     private const val BASE_URL = "https://api-partner.spotify.com"
@@ -40,7 +42,7 @@ object SpotifyClient {
     private const val AUTH_URL = "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"
     private const val API_TOKEN_URL = "https://open.spotify.com/api/token"
     private const val CLIENT_TOKEN_URL = "https://clienttoken.spotify.com/v1/clienttoken"
-    private const val PATHFINDER_URL = "$BASE_URL/pathfinder/v1/query"
+    private const val PATHFINDER_URL = "$BASE_URL/pathfinder/v2/query"
 
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
@@ -103,6 +105,25 @@ object SpotifyClient {
 
     // ========== TOTP implementation ==========
 
+    /**
+     * The TOTP key is not the secret array itself.
+     *
+     * spotify-web builds it at runtime: each byte is xored with (i % 33) + 9, the results are joined
+     * as decimal strings, that string is read as hex pairs, and the bytes are round-tripped through
+     * base32. Signing with the raw array produces a code Spotify rejects, which is why the token
+     * request failed and every Spotify search came back empty.
+     */
+    private fun totpKey(): ByteArray {
+        val transformed = IntArray(TOTP_SECRET.size) { i -> TOTP_SECRET[i] xor ((i % 33) + 9) }
+        val joined = transformed.joinToString("") { it.toString() }
+        val hex = joined.map { "%02x".format(it.code) }.joinToString("")
+        val raw = ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+        // base32Encode then decode is the identity, so `raw` is the key the extension ends up with
+        return raw
+    }
+
     private fun generateTOTP(timestampMs: Long = System.currentTimeMillis()): String {
         val timeStep = timestampMs / 30000
         val timeBytes = ByteArray(8)
@@ -112,7 +133,7 @@ object SpotifyClient {
             t = t shr 8
         }
 
-        val secretBytes = ByteArray(TOTP_SECRET.size) { TOTP_SECRET[it].toByte() }
+        val secretBytes = totpKey()
         val mac = Mac.getInstance("HmacSHA1")
         mac.init(SecretKeySpec(secretBytes, "HmacSHA1"))
         val hash = mac.doFinal(timeBytes)
@@ -185,7 +206,7 @@ object SpotifyClient {
                 val totp = generateTOTP()
                 val clientTokenPayload = JSONObject().apply {
                     put("client_data", JSONObject().apply {
-                        put("client_version", "1.2.52.442.g0f1fed8b")
+                        put("client_version", SPOTIFY_APP_VERSION)
                         put("client_id", "d8a5ed958d274c2e8ee717e6a4b0971d")
                         put("js_sdk_data", JSONObject().apply {
                             put("device_brand", "unknown")
@@ -236,19 +257,33 @@ object SpotifyClient {
         return map
     }
 
+    /**
+     * spotify-web posts the query as a json body to /pathfinder/v2/query, with the persisted-query
+     * hash in extensions. A GET with the same fields in the query string is not what the endpoint
+     * expects, and v1 does not serve these hashes at all.
+     */
     private suspend fun pathfinderQuery(operationName: String, hash: String, variables: JSONObject): JSONObject {
-        val url = "$PATHFINDER_URL?operationName=$operationName" +
-                "&variables=${URLEncoder.encode(variables.toString(), "UTF-8")}" +
-                "&extensions=${URLEncoder.encode(
-                    JSONObject().apply {
-                        put("persistedQuery", JSONObject().apply {
-                            put("version", 1)
-                            put("sha256Hash", hash)
-                        })
-                    }.toString(), "UTF-8"
-                )}"
+        val payload = JSONObject().apply {
+            put("variables", variables)
+            put("operationName", operationName)
+            put("extensions", JSONObject().apply {
+                put("persistedQuery", JSONObject().apply {
+                    put("version", 1)
+                    put("sha256Hash", hash)
+                })
+            })
+        }
 
-        val resp = app.get(url, headers = authHeaders(), timeout = 15L)
+        val headers = authHeaders().toMutableMap()
+        headers["Content-Type"] = "application/json"
+        headers["Spotify-App-Version"] = SPOTIFY_APP_VERSION
+
+        val resp = app.post(
+            PATHFINDER_URL,
+            headers = headers,
+            requestBody = payload.toString().toRequestBody("application/json".toMediaType()),
+            timeout = 15L
+        )
         return JSONObject(resp.text)
     }
 

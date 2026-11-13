@@ -1312,7 +1312,9 @@ object JioSaavnApi {
             if (decrypted.startsWith("http")) {
                 val has320 = moreInfo?.optString("320kbps", "true") != "false"
                 val targetQuality = if (quality == "320" && !has320) "160" else quality
-                return decrypted.replace("_96.", "_${targetQuality}.")
+                // the decrypted url carries whatever bitrate the server chose - 96, 160 or 320 -
+                // so the number itself has to be replaced, not the literal "_96."
+                return Regex("""_\d+\.mp4""").replace(decrypted, "_${targetQuality}.mp4")
             }
 
             // 2. Fallback to song.generateAuthToken API
@@ -1366,7 +1368,9 @@ object JioSaavnApi {
             coverUrl = imageUrl,
             source = "jiosaavn",
             sourceId = id,
-            previewUrl = if (encryptedUrl.isNotBlank()) decryptMediaUrl(encryptedUrl).replace("_96.", "_320.") else "",
+            previewUrl = if (encryptedUrl.isNotBlank()) {
+                Regex("""_\d+\.mp4""").replace(decryptMediaUrl(encryptedUrl), "_320.mp4")
+            } else "",
         )
     }
 

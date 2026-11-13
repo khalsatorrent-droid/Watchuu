@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -61,10 +62,6 @@ class MusicBoxProvider : MainAPI() {
 
         /** how long any single provider gets before the others carry on without it */
         private const val PROVIDER_TIMEOUT_MS = 25_000L
-
-        /** so the Amazon notice appears once, not on every track */
-        @Volatile
-        private var amazonNoticeShown = false
         private const val PREF_KEY_SESSION = "musicbox_zarz_session"
         private const val PREF_KEY_CATALOGUE = "musicbox_catalogue"
 
@@ -659,6 +656,7 @@ class MusicBoxProvider : MainAPI() {
                 "jamendo" -> fire { tryJamendo(id, searchQuery, emitLink) }
                 "gdstudio" -> fire { tryGDStudio(id, searchQuery, emitLink) }
                 "ytmusic" -> fire { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
+                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
             }
 
             if (source != "jiosaavn") fire { tryJioSaavn("", searchQuery, emitLink) }
@@ -672,7 +670,9 @@ class MusicBoxProvider : MainAPI() {
             if (source != "ytmusic") {
                 fire { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
             }
-            if (zarzSession.record.isUsable()) fire { tryAmazonMusic(searchQuery, isrc, emitLink) }
+            if (zarzSession.record.isUsable() && source != "amazon") {
+                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+            }
 
             jobs.awaitAll()
         }
@@ -1118,25 +1118,92 @@ class MusicBoxProvider : MainAPI() {
     }
 
     /**
-     * Amazon is deliberately not attempted through the resolver.
+     * Amazon Music, through the resolver the official extension uses.
      *
-     * musicdl's zarz.py implements exactly three download clients - deezer, qobuz and tidal-web -
-     * and its amazon.py goes through Amazon's own a2z skill api with a registered device. The
-     * /dl/amazeamazeamaze path this used to call appears nowhere in either, so every attempt was a
-     * guaranteed failure that still cost a round trip.
+     * I had this disabled because musicdl has no such client - but Mornye-Extension's amazon source
+     * does, and it is the better reference:
+     *
+     *   ticket  sha256("amazeamazeamaze:track:<asin>") via POST /tickets
+     *   body    POST /dl/amazeamazeamaze  {asin, codec}   header X-Zarz-Ticket
+     *   reply   an ARRAY: [{audio: {url, key, codec, sampleRate}, cover: …}]
+     *
+     * The array is why this never worked: the old parser read the body as a JSONObject, which throws
+     * on an array, and looked for a `url` field that does not exist at the top level.
+     *
+     * Amazon also returns a CENC key with the file. When one is present the audio is downloaded,
+     * decrypted and served from a loopback server, so the player gets a plain playable stream.
      */
-    @Suppress("UNUSED_PARAMETER")
     private suspend fun tryAmazonMusic(
-        query: String,
+        title: String,
+        artist: String,
         isrc: String,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
-        if (!amazonNoticeShown) {
-            amazonNoticeShown = true
-            MusicBoxLog.d(TAG, "Amazon: no resolver endpoint exists (musicdl uses the a2z skill api) - skipped")
+        if (!zarzSession.record.isUsable()) return false
+
+        return try {
+            val asin = AmazonApi.findAsin(title, artist) ?: run {
+                MusicBoxLog.d(TAG, "Amazon: no ASIN matched for \"${title.take(40)}\"")
+                return false
+            }
+
+            val ticket = zarzSession.signedTicket(
+                "amazeamazeamaze", "track", asin, ZarzSession.APP_VERSION_AMAZON
+            )
+            val body = JSONObject().apply {
+                put("asin", asin)
+                put("codec", "flac")
+            }.toString()
+
+            val resp = zarzSession.signedFetch(
+                "POST", "/dl/amazeamazeamaze", body,
+                mapOf("X-Zarz-Ticket" to ticket),
+                ZarzSession.APP_VERSION_AMAZON
+            )
+            if (!resp.ok) {
+                MusicBoxLog.w(TAG, "Amazon: resolver HTTP ${resp.statusCode} ${resp.error}")
+                return false
+            }
+
+            // the reply is an array of one
+            val text = resp.body.orEmpty().trim()
+            val first = if (text.startsWith("[")) JSONArray(text).optJSONObject(0)
+            else runCatching { JSONObject(text) }.getOrNull()
+            val audio = first?.optJSONObject("audio")
+            val direct = audio?.optString("url").orEmpty()
+            if (direct.isBlank()) {
+                MusicBoxLog.w(TAG, "Amazon: reply had no audio url")
+                return false
+            }
+
+            val key = audio?.optString("key").orEmpty()
+            val codec = audio?.optString("codec").orEmpty().ifBlank { "flac" }
+            val playable = if (key.isNotBlank()) {
+                runCatching { AmazonProxy.prepare(direct, key) }.getOrElse {
+                    MusicBoxLog.w(TAG, "Amazon: decrypt failed (${it.message})")
+                    return false
+                }
+            } else direct
+
+            MusicBoxLog.d(
+                TAG,
+                "Amazon: asin=$asin codec=$codec encrypted=${key.isNotBlank()} isrc=${isrc.ifBlank { "-" }}"
+            )
+            callback.invoke(
+                newExtractorLink("MusicBox", "Amazon Music ${codec.uppercase()}", playable, ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            true
+        } catch (e: ZarzSession.VerificationRequiredException) {
+            pendingAuthUrl = e.authUrl
+            saveSession()
+            false
+        } catch (e: Exception) {
+            MusicBoxLog.w(TAG, "Amazon failed: ${e.message}")
+            false
         }
-        return false
     }
 
     private suspend fun tryYouTubeMusic(

@@ -318,10 +318,12 @@ class MusicBoxProvider : MainAPI() {
 
     private suspend fun searchSpotify(query: String, limit: Int = 15): List<SearchResponse> {
         return try {
-            val (tracks, albums, _) = SpotifyClient.search(query, limit)
+            val (tracks, albums, artists) = SpotifyClient.search(query, limit)
             val results = mutableListOf<SearchResponse>()
             results.addAll(tracks.map { it.toSearchResponse() })
             results.addAll(albums.map { it.toSearchResponse() })
+            results.addAll(artists.map { it.toSearchResponse() })
+            results.addAll(SpotifyClient.searchPlaylists(query, 8).map { it.toSearchResponse() })
             if (results.isNotEmpty()) results else searchApple(query, limit)
         } catch (e: Exception) {
             MusicBoxLog.w(TAG, "Spotify search failed, falling back: ${e.message}")
@@ -398,6 +400,8 @@ class MusicBoxProvider : MainAPI() {
         return when (kind) {
             "track" -> loadTrack(source, id, extra, url)
             "album" -> loadAlbum(source, id, extra, url)
+            "playlist" -> loadPlaylist(source, id, extra)
+            "artist" -> loadArtist(source, id, extra)
             else -> null
         }
     }
@@ -491,6 +495,87 @@ class MusicBoxProvider : MainAPI() {
                 source.uppercase(),
                 finalAlbum.ifBlank { null },
             )
+        }
+    }
+
+    /** a playlist is an album-shaped series, but spotify needs its own query for the contents */
+    private suspend fun loadPlaylist(source: String, playlistId: String, extra: List<String>): LoadResponse? {
+        if (source != "spotify") return loadAlbum(source, playlistId, extra)
+
+        val name = extra.getOrNull(0)?.decodeUrl()?.ifBlank { null } ?: "Playlist"
+        val owner = extra.getOrNull(1)?.decodeUrl().orEmpty()
+        val cover = extra.getOrNull(2)?.decodeUrl().orEmpty()
+
+        val tracks = runCatching { SpotifyClient.playlistTracks(playlistId) }.getOrDefault(emptyList())
+        MusicBoxLog.d(TAG, "Playlist spotify/$playlistId -> ${tracks.size} tracks")
+        if (tracks.isEmpty()) return null
+
+        val episodes = tracks.mapIndexed { index, t ->
+            val data = JSONObject().apply {
+                put("source", "spotify")
+                put("id", t.id)
+                put("title", t.name)
+                put("artist", t.artist)
+                put("album", t.album)
+                put("deezer_id", "")
+                put("isrc", t.isrc)
+                put("preview_url", t.previewUrl)
+            }.toString()
+            newEpisode(data) {
+                this.name = t.name
+                this.season = 1
+                this.episode = index + 1
+                this.posterUrl = t.coverUrl.ifBlank { cover }
+            }
+        }
+
+        return newTvSeriesLoadResponse(
+            if (owner.isNotBlank()) "$name · $owner" else name,
+            "$mainUrl/playlist/$source/$playlistId/${name.encodeUrl()}",
+            TvType.Music,
+            episodes,
+        ) {
+            this.posterUrl = cover.ifBlank { tracks.firstOrNull()?.coverUrl }
+            this.plot = "${tracks.size} tracks" + if (owner.isNotBlank()) " · $owner" else ""
+        }
+    }
+
+    /** an artist page: their best known tracks as episodes */
+    private suspend fun loadArtist(source: String, artistId: String, extra: List<String>): LoadResponse? {
+        val name = extra.getOrNull(0)?.decodeUrl()?.ifBlank { null } ?: "Artist"
+        if (source != "spotify") return null
+
+        val tracks = runCatching { SpotifyClient.artistTracks(name, 25) }.getOrDefault(emptyList())
+        MusicBoxLog.d(TAG, "Artist spotify/$artistId -> ${tracks.size} tracks")
+        if (tracks.isEmpty()) return null
+
+        val episodes = tracks.mapIndexed { index, t ->
+            val data = JSONObject().apply {
+                put("source", "spotify")
+                put("id", t.id)
+                put("title", t.name)
+                put("artist", t.artist)
+                put("album", t.album)
+                put("deezer_id", "")
+                put("isrc", t.isrc)
+                put("preview_url", t.previewUrl)
+            }.toString()
+            newEpisode(data) {
+                this.name = t.name
+                this.season = 1
+                this.episode = index + 1
+                this.posterUrl = t.coverUrl
+            }
+        }
+
+        return newTvSeriesLoadResponse(
+            name,
+            "$mainUrl/artist/$source/$artistId/${name.encodeUrl()}",
+            TvType.Music,
+            episodes,
+        ) {
+            this.posterUrl = tracks.firstOrNull()?.coverUrl
+            this.plot = "${tracks.size} tracks by $name"
         }
     }
 
@@ -1481,6 +1566,33 @@ class MusicBoxProvider : MainAPI() {
             year = year,
         )
         return ma.toSearchResponse()
+    }
+
+    /** a playlist is a series like an album, opened through the same loader */
+    private fun SpotifyClient.SpotifyPlaylist.toSearchResponse(): SearchResponse {
+        val extra = listOf(
+            name.encodeUrl(),
+            owner.encodeUrl(),
+            coverUrl.encodeUrl(),
+        ).joinToString("|")
+        return newTvSeriesSearchResponse(
+            if (owner.isNotBlank()) "$name · $owner" else name,
+            "$mainUrl/playlist/spotify/${id.encodeUrl()}/$extra",
+            TvType.Music,
+        ) {
+            this.posterUrl = coverUrl
+        }
+    }
+
+    /** an artist opens as their best known tracks */
+    private fun SpotifyClient.SpotifyArtist.toSearchResponse(): SearchResponse {
+        return newTvSeriesSearchResponse(
+            name,
+            "$mainUrl/artist/spotify/${id.encodeUrl()}/${name.encodeUrl()}",
+            TvType.Music,
+        ) {
+            this.posterUrl = imageUrl
+        }
     }
 
     private fun MusicAlbum.toSearchResponse(): SearchResponse {

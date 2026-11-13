@@ -36,6 +36,9 @@ object SpotifyClient {
     /** the web player build spotify-web reports on clienttoken and pathfinder */
     private const val SPOTIFY_APP_VERSION = "1.2.52.442.g0f1fed8b"
     private const val SEARCH_HASH = "fcad5a3e0d5af727fb76966f06971c19cfa2275e6ff7671196753e008611873c"
+    /** spotify-web's persisted queries for a playlist and its contents */
+    private const val PLAYLIST_HASH = "bb67e0af06e8d6f52b531f97468ee4acd44cd0f82b988e15c2ea47b1148efc77"
+    private const val ALBUM_HASH = "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10"
 
     private const val BASE_URL = "https://api-partner.spotify.com"
     private const val WEB_API_URL = "https://api.spotify.com/v1"
@@ -94,6 +97,14 @@ object SpotifyClient {
         val id: String,
         val name: String,
         val imageUrl: String,
+    )
+
+    data class SpotifyPlaylist(
+        val id: String,
+        val name: String,
+        val owner: String,
+        val coverUrl: String,
+        val trackCount: Int = 0,
     )
 
     data class SpotifyStreamResult(
@@ -876,4 +887,85 @@ object SpotifyClient {
 
         return SpotifyArtist(id = id, name = name, imageUrl = imageUrl)
     }
+
+    /**
+     * Playlists from the same searchDesktop answer.
+     *
+     * The shape, from spotify-web: data.searchV2.playlists.items[].item.data, with the id in the
+     * `uri` ("spotify:playlist:…"), the name in `name`, the owner under ownerV2.data.name and the
+     * cover under images.items[0] or images[0].
+     */
+    suspend fun searchPlaylists(query: String, limit: Int = 8): List<SpotifyPlaylist> {
+        if (query.isBlank() || !ensureTokens()) return emptyList()
+
+        val variables = JSONObject().apply {
+            put("searchTerm", query)
+            put("offset", 0)
+            put("limit", limit)
+            put("numberOfTopResults", 5)
+            put("includeAudiobooks", false)
+            put("includePreReleases", false)
+            put("includeLocalConcerts", false)
+        }
+
+        val result = runCatching { pathfinderQuery("searchDesktop", SEARCH_HASH, variables) }
+            .getOrNull() ?: return emptyList()
+        val data = result.optJSONObject("data")?.optJSONObject("searchV2") ?: return emptyList()
+
+        var items = data.optJSONObject("playlists")?.optJSONArray("items")
+            ?: data.optJSONObject("playlistsV2")?.optJSONArray("items")
+            ?: return emptyList()
+
+        val out = ArrayList<SpotifyPlaylist>()
+        for (i in 0 until items.length()) {
+            val wrapper = items.optJSONObject(i) ?: continue
+            val p = wrapper.optJSONObject("item")?.optJSONObject("data")
+                ?: wrapper.optJSONObject("data")
+                ?: wrapper
+            val id = p.optString("uri").substringAfterLast(":").ifBlank { continue }
+            val name = p.optString("name").ifBlank { continue }
+            val owner = p.optJSONObject("ownerV2")?.optJSONObject("data")?.optString("name")
+                ?: p.optJSONObject("owner")?.optString("name").orEmpty()
+            val cover = p.optJSONObject("images")?.optJSONArray("items")?.optJSONObject(0)
+                ?.optString("url")
+                ?: p.optJSONArray("images")?.optJSONObject(0)?.optString("url").orEmpty()
+            val count = p.optJSONObject("content")?.optInt("totalCount", 0) ?: 0
+            out.add(SpotifyPlaylist(id, name, owner, cover, count))
+        }
+        return out
+    }
+
+    /** a playlist's tracks, via the fetchPlaylist persisted query */
+    suspend fun playlistTracks(playlistId: String): List<SpotifyTrack> {
+        if (playlistId.isBlank() || !ensureTokens()) return emptyList()
+
+        val variables = JSONObject().apply {
+            put("uri", "spotify:playlist:$playlistId")
+            put("offset", 0)
+            put("limit", 200)
+            put("enableWatchFeedEntrypoint", false)
+        }
+        val result = runCatching { pathfinderQuery("fetchPlaylist", PLAYLIST_HASH, variables) }
+            .getOrNull() ?: return emptyList()
+
+        val out = ArrayList<SpotifyTrack>()
+        fun walk(node: Any?, depth: Int) {
+            if (depth > 12 || out.size >= 400) return
+            when (node) {
+                is JSONObject -> {
+                    val uri = node.optString("uri")
+                    if (uri.startsWith("spotify:track:")) out.add(parseTrack(node))
+                    for (key in node.keys()) walk(node.opt(key), depth + 1)
+                }
+                is JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), depth + 1)
+            }
+        }
+        walk(result, 0)
+        return out.distinctBy { it.id }
+    }
+
+    /** an artist's best known tracks, for the artist cards in search */
+    suspend fun artistTracks(artistName: String, limit: Int = 20): List<SpotifyTrack> =
+        search(artistName, limit).first
+
 }

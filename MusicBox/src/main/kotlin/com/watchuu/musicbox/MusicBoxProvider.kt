@@ -78,34 +78,23 @@ class MusicBoxProvider : MainAPI() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Fills the shared session from disk. Deliberately not "load whatever is on disk": a session
+     * bootstrapped in settings lives in memory until it is persisted, and the old code called
+     * loadState(null) whenever the disk read came back empty, wiping it on the next search.
+     */
     private fun loadSession() {
-        try {
-            val context = CloudStreamApp.context
-            if (context != null) {
-                MusicBoxSettings.init(context)
-                val stored = context
-                    .getSharedPreferences("musicbox_prefs", 0)
-                    ?.getString(PREF_KEY_SESSION, null)
-                zarzSession.loadState(stored)
-            } else {
-                zarzSession.loadState(null)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to load session: ${e.message}")
-            zarzSession.loadState(null)
-        }
+        val ctx = CloudStreamApp.context ?: return
+        runCatching {
+            MusicBoxSettings.init(ctx)
+            ZarzSessionManager.loadFromPrefs(ctx)
+        }.onFailure { Log.w(TAG, "Session load failed: ${it.message}") }
     }
 
+    /** persists the same session settings shows, under the same key */
     private fun saveSession() {
-        try {
-            CloudStreamApp.context
-                ?.getSharedPreferences("musicbox_prefs", 0)
-                ?.edit()
-                ?.putString(PREF_KEY_SESSION, zarzSession.saveState())
-                ?.apply()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to save session: ${e.message}")
-        }
+        runCatching { ZarzSessionManager.persist() }
+            .onFailure { Log.w(TAG, "Failed to save session: ${it.message}") }
     }
 
     private fun getCatalogue(): String {

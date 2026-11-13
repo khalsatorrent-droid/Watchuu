@@ -228,19 +228,13 @@ object MusicBoxSettings {
         }
         root.addView(sessionStatus)
 
-        // the same object the provider uses, re-read from disk so the status shown is real
-        ZarzSessionManager.load(prefs?.getString("musicbox_zarz_session", null), forceReload = true)
+        // the same object the provider uses. loadFromPrefs never discards a usable session, so
+        // opening this screen cannot wipe one that playback is relying on
+        ensurePrefs()
+        ZarzSessionManager.loadFromPrefs(act)
         val session = ZarzSessionManager.session
-        val stored = ensurePrefs()?.getString("musicbox_zarz_session", null)
-        session.loadState(stored)
 
-        sessionStatus.text = if (session.record.isUsable()) {
-            "✓ Session active (expires: ${session.record.expiresAt.take(19).replace("T", " ")})"
-        } else if (session.record.sessionId.isNotBlank()) {
-            "✗ Session expired"
-        } else {
-            "○ No session (musicdl providers work without ZARZ; bootstrap optional)"
-        }
+        sessionStatus.text = ZarzSessionManager.statusText()
 
         val btnBootstrap = Button(act).apply {
             text = "Bootstrap ZARZ Session"
@@ -254,7 +248,7 @@ object MusicBoxSettings {
             scope.launch {
                 try {
                     val url = session.bootstrap()
-                    ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+                    ZarzSessionManager.persist(act)
 
                     withContext(Dispatchers.Main) {
                         if (url.isBlank()) {
@@ -266,7 +260,7 @@ object MusicBoxSettings {
                                 scope.launch {
                                     try {
                                         session.exchange(grant)
-                                        ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+                                        ZarzSessionManager.persist(act)
                                         withContext(Dispatchers.Main) {
                                             sessionStatus.text = "✓ Session active!"
                                             Toast.makeText(act, "Verification complete!", Toast.LENGTH_SHORT).show()
@@ -301,7 +295,7 @@ object MusicBoxSettings {
         }
         btnClear.setOnClickListener {
             session.record.clear()
-            ensurePrefs()?.edit()?.putString("musicbox_zarz_session", session.saveState())?.apply()
+            ZarzSessionManager.persist(act)
             sessionStatus.text = "○ Session cleared"
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }

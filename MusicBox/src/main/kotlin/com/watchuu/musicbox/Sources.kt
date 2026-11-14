@@ -1000,7 +1000,7 @@ object QobuzApi {
         for (appId in APP_IDS) {
             runCatching {
                 val resp = app.get(
-                    "$BASE/track/search?query=${query.encodeUrl()}&limit=$limit",
+                    "$BASE/track/search?query=${query.encodeUrl()}&limit=$limit&app_id=$appId",
                     headers = headers(appId),
                     timeout = 10L
                 )
@@ -1020,7 +1020,7 @@ object QobuzApi {
         for (appId in APP_IDS) {
             runCatching {
                 val resp = app.get(
-                    "$BASE/album/get?album_id=${albumId.encodeUrl()}",
+                    "$BASE/album/get?album_id=${albumId.encodeUrl()}&app_id=$appId",
                     headers = headers(appId),
                     timeout = 10L
                 )

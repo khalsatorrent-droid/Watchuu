@@ -1301,15 +1301,35 @@ class MusicBoxProvider : MainAPI() {
                 put("codec", "flac")
             }.toString()
 
-            val resp = zarzAmazon.signedFetch(
-                "POST", "/dl/amazeamazeamaze", body,
-                mapOf("X-Zarz-Ticket" to ticket),
-                ZarzSession.APP_VERSION_AMAZON
-            )
-            if (!resp.ok) {
-                MusicBoxLog.w(TAG, "Amazon: resolver HTTP ${resp.statusCode} ${resp.error}")
+            // the ticket is minted for provider "amazeamazeamaze"; the route itself has moved
+            // between builds, so try the ones it has used and keep the first that answers
+            var resp: ZarzSession.SignedResponse? = null
+            var usedPath = ""
+            for (path in listOf("/dl/amazeamazeamaze", "/dl/amz", "/dl/amazon")) {
+                val attempt = runCatching {
+                    zarzAmazon.signedFetch(
+                        "POST", path, body,
+                        mapOf("X-Zarz-Ticket" to ticket),
+                        ZarzSession.APP_VERSION_AMAZON
+                    )
+                }.getOrNull() ?: continue
+                if (attempt.ok) {
+                    resp = attempt
+                    usedPath = path
+                    break
+                }
+                MusicBoxLog.d(TAG, "Amazon: $path -> HTTP ${attempt.statusCode}")
+                if (attempt.statusCode != 404) {
+                    resp = attempt
+                    usedPath = path
+                    break
+                }
+            }
+            if (resp == null || !resp.ok) {
+                MusicBoxLog.w(TAG, "Amazon: no route answered (tried 3, last ${resp?.statusCode})")
                 return false
             }
+            MusicBoxLog.d(TAG, "Amazon: route $usedPath answered")
 
             // the reply is an array of one
             val text = resp.body.orEmpty().trim()

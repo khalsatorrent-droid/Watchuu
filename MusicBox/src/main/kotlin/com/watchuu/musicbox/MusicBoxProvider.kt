@@ -1322,65 +1322,48 @@ class MusicBoxProvider : MainAPI() {
         }
 
         return try {
-            val asin = AmazonApi.findAsin(title, artist) ?: run {
+            val asins = AmazonApi.findAsins(title, artist)
+            if (asins.isEmpty()) {
                 MusicBoxLog.d(TAG, "Amazon: no ASIN matched for \"${title.take(40)}\"")
                 return false
             }
 
-            val ticket = zarzAmazon.signedTicket(
-                "amazeamazeamaze", "track", asin, ZarzSession.APP_VERSION_AMAZON
-            )
-            val body = JSONObject().apply {
-                put("asin", asin)
-                put("codec", "flac")
-            }.toString()
-
-            // the ticket is minted for provider "amazeamazeamaze". The route moved: the first
-            // answers 404, the second 400 - which means it exists but wants more in the body, so
-            // the richer shape the other providers use is sent there too.
-            val trackUrl = "https://music.amazon.com/tracks/$asin"
-            val richBody = JSONObject().apply {
-                put("asin", asin)
-                put("codec", "flac")
-                put("id", asin)
-                put("type", "track")
-                put("url", trackUrl)
-            }.toString()
-
+            // 404 {"error":"Upstream request failed"} means the resolver could not fetch THAT asin
+            // (Amazon lists one song under several albums and only some are served) - not that the
+            // route moved. So the next candidate is tried, each with its own one-use ticket.
             var resp: ZarzSession.SignedResponse? = null
-            var usedPath = ""
-            for ((path, payload) in listOf(
-                "/dl/amazeamazeamaze" to body,
-                "/dl/amz" to richBody,
-                "/dl/amazon" to richBody
-            )) {
-                val attempt = runCatching {
-                    zarzAmazon.signedFetch(
-                        "POST", path, payload,
-                        mapOf("X-Zarz-Ticket" to ticket),
-                        ZarzSession.APP_VERSION_AMAZON
-                    )
-                }.getOrNull() ?: continue
+            var asin = ""
+            for (cand in asins) {
+                val ticket = zarzAmazon.signedTicket(
+                    "amazeamazeamaze", "track", cand, ZarzSession.APP_VERSION_AMAZON
+                )
+                val body = JSONObject().apply {
+                    put("asin", cand)
+                    put("codec", "flac")
+                }.toString()
+                val attempt = zarzAmazon.signedFetch(
+                    "POST", "/dl/amazeamazeamaze", body,
+                    mapOf("X-Zarz-Ticket" to ticket),
+                    ZarzSession.APP_VERSION_AMAZON
+                )
                 if (attempt.ok) {
                     resp = attempt
-                    usedPath = path
+                    asin = cand
                     break
                 }
-                // the error body is the useful part on a 400 - it names the missing field
-                val detail = attempt.body.orEmpty().trim().take(160)
-                MusicBoxLog.d(TAG, "Amazon: $path -> HTTP ${attempt.statusCode} $detail")
-                if (attempt.statusCode != 404) {
-                    resp = attempt
-                    usedPath = path
-                    break
-                }
+                MusicBoxLog.d(
+                    TAG,
+                    "Amazon: $cand -> HTTP ${attempt.statusCode} ${attempt.body.orEmpty().trim().take(160)}"
+                )
+                resp = attempt
+                if (attempt.statusCode != 404) break // 5xx / 429 / 401: another asin will not help
             }
             if (resp == null || !resp.ok) {
-                MusicBoxLog.w(TAG, "Amazon: no route answered (tried 3, last ${resp?.statusCode})")
-                if (resp?.statusCode == 404 || resp?.statusCode == 400) markUpstreamDown("amazon")
+                MusicBoxLog.w(TAG, "Amazon: resolver refused ${asins.size} candidate(s), last HTTP ${resp?.statusCode}")
+                // only a service-level failure pauses Amazon; a per-track 404 must not
+                if ((resp?.statusCode ?: 0) >= 500 || resp?.statusCode == 429) markUpstreamDown("amazon")
                 return false
             }
-            MusicBoxLog.d(TAG, "Amazon: route $usedPath answered")
 
             // the reply is an array of one
             val text = resp.body.orEmpty().trim()

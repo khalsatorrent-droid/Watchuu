@@ -226,16 +226,25 @@ object AmazonApi {
         return parts.any { c.contains(it) || it.contains(c) }
     }
 
-    /** Exact-title match on Amazon's catalogue; returns the ASIN or null. */
-    suspend fun findAsin(title: String, artist: String, durationMs: Long = 0): String? {
+    /** Best match first; null when nothing matched. */
+    suspend fun findAsin(title: String, artist: String, durationMs: Long = 0): String? =
+        findAsins(title, artist, durationMs).firstOrNull()
+
+    /**
+     * Ranked ASIN candidates (exact title matches first, then relaxed ones). Amazon lists the same song
+     * on several albums, and the resolver only serves some of those ASINs, so callers try the next
+     * candidate when one answers 404.
+     */
+    suspend fun findAsins(title: String, artist: String, durationMs: Long = 0, limit: Int = 4): List<String> {
         val stripped = stripAnnotations(title)
         val titleKey = norm(stripped)
-        if (titleKey.isEmpty()) return null
+        if (titleKey.isEmpty()) return emptyList()
         val primary = artist.split(Regex("""\s*[,;]\s*|\s+(?:feat\.?|ft\.?|featuring)\s+""", RegexOption.IGNORE_CASE)).firstOrNull().orEmpty().trim()
         val queries = LinkedHashSet<String>()
         queries.add("$stripped $primary".trim())
         queries.add(title.trim())
         queries.add(stripped)
+        val out = LinkedHashSet<String>()
         for (q in queries) {
             val data = try { showSearch(q) } catch (e: Exception) {
                 MusicBoxLog.w("AmazonApi", "search \"$q\" threw: ${e.message}")
@@ -248,16 +257,14 @@ object AmazonApi {
                 if (norm(stripAnnotations(h.title)) != titleKey) continue
                 if (!artistMatches(h.artist, artist)) continue
                 if (durationMs > 0 && h.durationMs > 0 && kotlin.math.abs(durationMs - h.durationMs) > 15_000) continue
-                return h.asin
+                out.add(h.asin)
             }
-            // relaxed pass: same search, but a hit whose title merely contains the song name.
-            // Returning the closest match beats returning nothing, which is what "no ASIN matched"
-            // meant while the resolver itself was fine.
             for (h in hits) {
                 val hitTitle = norm(stripAnnotations(h.title))
-                if (hitTitle.contains(titleKey) && artistMatches(h.artist, artist)) return h.asin
+                if (hitTitle.contains(titleKey) && artistMatches(h.artist, artist)) out.add(h.asin)
             }
+            if (out.size >= limit) break
         }
-        return null
+        return out.take(limit)
     }
 }

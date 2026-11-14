@@ -15,6 +15,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -726,14 +728,18 @@ class MusicBoxProvider : MainAPI() {
         val storedPreview = obj.optString("preview_url", "")
 
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
-        // set the moment a lossless link is emitted, so phase 2 can be skipped entirely
+        // set the moment a lossless link is emitted; the chain stops waiting when it flips
         val flacFound = java.util.concurrent.atomic.AtomicBoolean(false)
+        val flacSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
         fun emittedCount(): Int = emitted.get()
         pendingAuthUrl = null
 
         val emitLink: (ExtractorLink) -> Unit = { link ->
             emitted.incrementAndGet()
-            if (isLossless(link)) flacFound.set(true)
+            if (isLossless(link)) {
+                flacFound.set(true)
+                if (!flacSignal.isCompleted) flacSignal.complete(Unit)
+            }
             MusicBoxLog.d(TAG, "link: ${link.name} -> ${hostOf(link.url)}")
             callback.invoke(link)
         }
@@ -778,7 +784,13 @@ class MusicBoxProvider : MainAPI() {
         // skipped - there is nothing a 320kbps MP3 can add to a FLAC. Only when none of them
         // answers do the lossy sources run, and then they run together as before.
 
-        // ---- phase 1: the lossless providers ----
+        // One phase: every provider at once, and the first lossless answer ends the search.
+        //
+        // The previous version ran the lossless providers first and only fell back to the lossy
+        // ones, which made a track with no FLAC wait for phase 1 to finish before phase 2 even
+        // started. Now everything is fired together: whichever answers first, answers first, and if
+        // one of them is a FLAC (or 999kbps and up) the remaining requests are cancelled on the spot
+        // because nothing better is coming. If no lossless link appears, the whole list arrives.
         coroutineScope {
             val jobs = mutableListOf<Deferred<Boolean>>()
             val fire: (suspend () -> Boolean) -> Unit = { task ->
@@ -790,48 +802,24 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
 
+            // the entry's own service, with its exact id, alongside everything else
             when (source) {
+                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
                 "tidal" -> fire { tryTidal(id, searchQuery, isrc, emitLink) }
                 "deezer" -> fire { tryDeezer(id, searchQuery, emitLink) }
                 "qobuz" -> fire { tryQobuz(id, searchQuery, emitLink) }
-                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
-            }
-            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
-            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
-            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
-            if (ZarzSessionManager.anyUsable() && source != "amazon") {
-                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
-            }
-            jobs.awaitAll()
-        }
-
-        if (flacFound.get()) {
-            MusicBoxLog.d(TAG, "FLAC found - not searching the lossy sources")
-            MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
-            return true
-        }
-
-        // ---- phase 2: everything else, only when no lossless answer arrived ----
-        coroutineScope {
-            val jobs = mutableListOf<Deferred<Boolean>>()
-            val fire: (suspend () -> Boolean) -> Unit = { task ->
-                jobs += async {
-                    withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
-                        runCatching { task() }.getOrDefault(false)
-                    } ?: false
-                }
-            }
-
-            when (source) {
-                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
                 "spotify" -> fire { trySpotify(id, searchQuery, emitLink) }
                 "soundcloud" -> fire { trySoundCloud(id, searchQuery, emitLink) }
                 "jamendo" -> fire { tryJamendo(id, searchQuery, emitLink) }
                 "gdstudio" -> fire { tryGDStudio(id, searchQuery, emitLink) }
                 "ytmusic" -> fire { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
+                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
             }
 
             if (source != "jiosaavn") fire { tryJioSaavn("", searchQuery, emitLink) }
+            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
+            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
+            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
             if (source != "spotify") fire { trySpotify("", searchQuery, emitLink) }
             if (source != "gdstudio") fire { tryGDStudio("", searchQuery, emitLink) }
             if (source != "soundcloud") fire { trySoundCloud("", searchQuery, emitLink) }
@@ -839,7 +827,21 @@ class MusicBoxProvider : MainAPI() {
             if (source != "ytmusic") {
                 fire { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
             }
-            jobs.awaitAll()
+            if (ZarzSessionManager.anyUsable() && source != "amazon") {
+                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+            }
+
+            // stop at the first lossless link, otherwise wait for every provider
+            val allDone = launch { jobs.joinAll() }
+            val gotFlac = launch { flacSignal.await() }
+            select<Unit> {
+                allDone.onJoin { }
+                gotFlac.onJoin { }
+            }
+            if (flacFound.get()) {
+                jobs.forEach { it.cancel() }
+                MusicBoxLog.d(TAG, "FLAC found - stopped searching the rest")
+            }
         }
 
         // the 30-second previews are the floor, and only when nothing full-length answered

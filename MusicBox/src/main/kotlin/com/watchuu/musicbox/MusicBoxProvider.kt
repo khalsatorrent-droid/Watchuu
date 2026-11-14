@@ -1333,30 +1333,38 @@ class MusicBoxProvider : MainAPI() {
             // route moved. So the next candidate is tried, each with its own one-use ticket.
             var resp: ZarzSession.SignedResponse? = null
             var asin = ""
-            for (cand in asins) {
-                val ticket = zarzAmazon.signedTicket(
-                    "amazeamazeamaze", "track", cand, ZarzSession.APP_VERSION_AMAZON
-                )
-                val body = JSONObject().apply {
-                    put("asin", cand)
-                    put("codec", "flac")
-                }.toString()
-                val attempt = zarzAmazon.signedFetch(
-                    "POST", "/dl/amazeamazeamaze", body,
-                    mapOf("X-Zarz-Ticket" to ticket),
-                    ZarzSession.APP_VERSION_AMAZON
-                )
-                if (attempt.ok) {
+            val startedAt = System.currentTimeMillis()
+            val tried = HashSet<String>()
+            outer@ for (cand in asins.take(3)) {
+                // the catalogue's own ASIN first (what the official extension downloads), then the raw one
+                val canonical = AmazonApi.canonicalAsin(cand)
+                if (canonical != null && canonical != cand) MusicBoxLog.d(TAG, "Amazon: $cand is canonically $canonical")
+                for (id in listOfNotNull(canonical, cand).distinct()) {
+                    if (!tried.add(id)) continue
+                    if (System.currentTimeMillis() - startedAt > 14_000) break@outer
+                    val ticket = zarzAmazon.signedTicket(
+                        "amazeamazeamaze", "track", id, ZarzSession.APP_VERSION_AMAZON
+                    )
+                    val body = JSONObject().apply {
+                        put("asin", id)
+                        put("codec", "flac")
+                    }.toString()
+                    val attempt = zarzAmazon.signedFetch(
+                        "POST", "/dl/amazeamazeamaze", body,
+                        mapOf("X-Zarz-Ticket" to ticket),
+                        ZarzSession.APP_VERSION_AMAZON
+                    )
                     resp = attempt
-                    asin = cand
-                    break
+                    if (attempt.ok) {
+                        asin = id
+                        break@outer
+                    }
+                    MusicBoxLog.d(
+                        TAG,
+                        "Amazon: $id -> HTTP ${attempt.statusCode} ${attempt.body.orEmpty().trim().take(160)}"
+                    )
+                    if (attempt.statusCode != 404) break@outer
                 }
-                MusicBoxLog.d(
-                    TAG,
-                    "Amazon: $cand -> HTTP ${attempt.statusCode} ${attempt.body.orEmpty().trim().take(160)}"
-                )
-                resp = attempt
-                if (attempt.statusCode != 404) break // 5xx / 429 / 401: another asin will not help
             }
             if (resp == null || !resp.ok) {
                 MusicBoxLog.w(TAG, "Amazon: resolver refused ${asins.size} candidate(s), last HTTP ${resp?.statusCode}")

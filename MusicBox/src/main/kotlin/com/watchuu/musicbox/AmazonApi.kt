@@ -228,6 +228,49 @@ object AmazonApi {
         return parts.any { c.contains(it) || it.contains(c) }
     }
 
+    private val RESOLVED_URL = Regex(
+        """https?://music\.amazon\.[a-z.]+/(?:tracks/|albums/[^"\\?\s]+\?trackAsin=)(B[0-9A-Z]{9})""", RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * The catalogue's own ASIN for a track. Search hands back regional / per-album ASINs that the ZARZ
+     * resolver 404s on; the official extension asks displayCatalogTrack and downloads the ASIN found in
+     * the MusicRecording's own url instead. Null when the lookup fails or yields nothing.
+     */
+    suspend fun canonicalAsin(asin: String): String? {
+        return try {
+            initSession()
+            val pageUrl = "$BASE/tracks/$asin"
+            val body = JSONObject()
+                .put("id", asin)
+                .put("userHash", JSONObject().put("level", "LIBRARY_MEMBER").toString())
+                .put("headers", headersJson(pageUrl))
+                .toString()
+            val res = app.post(
+                "$SKILL/cosmicTrack/displayCatalogTrack",
+                headers = mapOf("User-Agent" to UA, "Origin" to BASE, "Referer" to "$BASE/", "Cookie" to cookieHeader())
+                    .filterValues { it.isNotEmpty() },
+                requestBody = body.toRequestBody("text/plain;charset=UTF-8".toMediaType()),
+            )
+            if (res.code !in 200..299) {
+                MusicBoxLog.d("AmazonApi", "canonical $asin: HTTP ${res.code}")
+                return null
+            }
+            val raw = res.text
+            var idx = raw.indexOf("MusicRecording")
+            while (idx != -1) {
+                val m = RESOLVED_URL.find(raw.substring(idx, minOf(raw.length, idx + 3000).coerceAtLeast(idx)).replace("\\/", "/"))
+                if (m != null) return m.groupValues[1].uppercase()
+                idx = raw.indexOf("MusicRecording", idx + 1)
+            }
+            MusicBoxLog.d("AmazonApi", "canonical $asin: no MusicRecording url in reply")
+            null
+        } catch (e: Exception) {
+            MusicBoxLog.d("AmazonApi", "canonical $asin threw: ${e.message}")
+            null
+        }
+    }
+
     /** Best match first; null when nothing matched. */
     suspend fun findAsin(title: String, artist: String, durationMs: Long = 0): String? =
         findAsins(title, artist, durationMs).firstOrNull()

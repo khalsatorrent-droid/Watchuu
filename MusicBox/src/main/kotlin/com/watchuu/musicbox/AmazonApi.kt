@@ -220,6 +220,8 @@ object AmazonApi {
         val e = norm(expected)
         if (e.isEmpty()) return true
         if (c.isEmpty()) return false
+        if (e.split(" ").filter { it.length > 2 }.any { w -> c.split(" ").contains(w) } &&
+            norm(expected).split(" ").size <= 3) return true
         if (c == e || c.contains(e) || e.contains(c)) return true
         // "Pritam, Arijit Singh, Badshah" against Amazon's "Arijit Singh" is the same record
         val parts = e.split(",").map { it.trim() }.filter { it.length > 2 }
@@ -253,6 +255,7 @@ object AmazonApi {
             val hits = ArrayList<Hit>()
             collect(data, hits)
             MusicBoxLog.d("AmazonApi", "search \"$q\" -> ${hits.size} hit(s)")
+            hits.take(5).forEach { MusicBoxLog.d("AmazonApi", "  hit ${it.asin} \"${it.title.take(50)}\" / \"${it.artist.take(50)}\" ${it.durationMs / 1000}s") }
             for (h in hits) {
                 if (norm(stripAnnotations(h.title)) != titleKey) continue
                 if (!artistMatches(h.artist, artist)) continue
@@ -264,6 +267,21 @@ object AmazonApi {
                 if (hitTitle.contains(titleKey) && artistMatches(h.artist, artist)) out.add(h.asin)
             }
             if (out.size >= limit) break
+        }
+        if (out.isEmpty()) {
+            // last resort: the song title is identical but the artist string differs ("Song • Artist",
+            // credits in another order, transliteration). Better to try the resolver than give up.
+            for (q in queries) {
+                val data = try { showSearch(q) } catch (_: Exception) { null } ?: continue
+                val hits = ArrayList<Hit>()
+                collect(data, hits)
+                for (h in hits) {
+                    if (norm(stripAnnotations(h.title)) != titleKey) continue
+                    if (durationMs > 0 && h.durationMs > 0 && kotlin.math.abs(durationMs - h.durationMs) > 15_000) continue
+                    out.add(h.asin)
+                }
+                if (out.isNotEmpty()) break
+            }
         }
         return out.take(limit)
     }

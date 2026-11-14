@@ -726,11 +726,14 @@ class MusicBoxProvider : MainAPI() {
         val storedPreview = obj.optString("preview_url", "")
 
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
+        // set the moment a lossless link is emitted, so phase 2 can be skipped entirely
+        val flacFound = java.util.concurrent.atomic.AtomicBoolean(false)
         fun emittedCount(): Int = emitted.get()
         pendingAuthUrl = null
 
         val emitLink: (ExtractorLink) -> Unit = { link ->
             emitted.incrementAndGet()
+            if (isLossless(link)) flacFound.set(true)
             MusicBoxLog.d(TAG, "link: ${link.name} -> ${hostOf(link.url)}")
             callback.invoke(link)
         }
@@ -768,44 +771,67 @@ class MusicBoxProvider : MainAPI() {
             .joinToString(" ")
             .trim()
 
-        // Every enabled provider runs at once.
+        // FLAC first, and stop as soon as one arrives.
         //
-        // The chain used to be sequential and gated - each step only ran if the previous ones had
-        // produced nothing, or fewer than three links - so one play cost the sum of every source's
-        // latency (46 seconds in the log: first link at +15s, done at +46s) and the lossless
-        // sources were skipped entirely once three MP3 links existed. Running them together makes
-        // the wait the slowest single source, and lets the FLAC providers contribute alongside the
-        // 320kbps ones instead of behind them.
+        // Amazon, Deezer, Qobuz and Tidal are the providers that can hand back a lossless file.
+        // They run first, together; the moment any of them produces one, the rest of the chain is
+        // skipped - there is nothing a 320kbps MP3 can add to a FLAC. Only when none of them
+        // answers do the lossy sources run, and then they run together as before.
+
+        // ---- phase 1: the lossless providers ----
         coroutineScope {
             val jobs = mutableListOf<Deferred<Boolean>>()
-
-            val fire: (suspend () -> Boolean) -> Unit = { block ->
+            val fire: (suspend () -> Boolean) -> Unit = { task ->
                 jobs += async {
                     // one hanging host must not hold the rest
                     withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
-                        runCatching { block() }.getOrDefault(false)
+                        runCatching { task() }.getOrDefault(false)
                     } ?: false
                 }
             }
 
-            // the entry's own service, with its exact id, alongside everything else
             when (source) {
-                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
                 "tidal" -> fire { tryTidal(id, searchQuery, isrc, emitLink) }
                 "deezer" -> fire { tryDeezer(id, searchQuery, emitLink) }
                 "qobuz" -> fire { tryQobuz(id, searchQuery, emitLink) }
+                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+            }
+            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
+            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
+            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
+            if (ZarzSessionManager.anyUsable() && source != "amazon") {
+                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+            }
+            jobs.awaitAll()
+        }
+
+        if (flacFound.get()) {
+            MusicBoxLog.d(TAG, "FLAC found - not searching the lossy sources")
+            MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
+            return true
+        }
+
+        // ---- phase 2: everything else, only when no lossless answer arrived ----
+        coroutineScope {
+            val jobs = mutableListOf<Deferred<Boolean>>()
+            val fire: (suspend () -> Boolean) -> Unit = { task ->
+                jobs += async {
+                    withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
+                        runCatching { task() }.getOrDefault(false)
+                    } ?: false
+                }
+            }
+
+            when (source) {
+                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
                 "spotify" -> fire { trySpotify(id, searchQuery, emitLink) }
                 "soundcloud" -> fire { trySoundCloud(id, searchQuery, emitLink) }
                 "jamendo" -> fire { tryJamendo(id, searchQuery, emitLink) }
                 "gdstudio" -> fire { tryGDStudio(id, searchQuery, emitLink) }
                 "ytmusic" -> fire { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
-                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
             }
 
             if (source != "jiosaavn") fire { tryJioSaavn("", searchQuery, emitLink) }
-            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
-            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
-            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
             if (source != "spotify") fire { trySpotify("", searchQuery, emitLink) }
             if (source != "gdstudio") fire { tryGDStudio("", searchQuery, emitLink) }
             if (source != "soundcloud") fire { trySoundCloud("", searchQuery, emitLink) }
@@ -813,10 +839,6 @@ class MusicBoxProvider : MainAPI() {
             if (source != "ytmusic") {
                 fire { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
             }
-            if (ZarzSessionManager.anyUsable() && source != "amazon") {
-                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
-            }
-
             jobs.awaitAll()
         }
 
@@ -847,6 +869,16 @@ class MusicBoxProvider : MainAPI() {
 
         MusicBoxLog.d(TAG, "done: ${emittedCount()} link(s)")
         return emittedCount() > 0
+    }
+
+    /**
+     * A link counts as lossless when the provider says so or reports a CD-quality figure.
+     * Names in play: "Qobuz · ZARZ FLAC", "Tidal · Monochrome FLAC (Lossless)",
+     * "Amazon Music FLAC", "Deezer · AnandServer FLAC", "Jamendo · Direct FLAC".
+     */
+    private fun isLossless(link: ExtractorLink): Boolean {
+        val name = link.name.lowercase()
+        return name.contains("flac") || name.contains("lossless") || link.quality >= 999
     }
 
     /** host and first path segment only: enough to tell sources apart, no tokens in the log */

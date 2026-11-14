@@ -1301,14 +1301,28 @@ class MusicBoxProvider : MainAPI() {
                 put("codec", "flac")
             }.toString()
 
-            // the ticket is minted for provider "amazeamazeamaze"; the route itself has moved
-            // between builds, so try the ones it has used and keep the first that answers
+            // the ticket is minted for provider "amazeamazeamaze". The route moved: the first
+            // answers 404, the second 400 - which means it exists but wants more in the body, so
+            // the richer shape the other providers use is sent there too.
+            val trackUrl = "https://music.amazon.com/tracks/$asin"
+            val richBody = JSONObject().apply {
+                put("asin", asin)
+                put("codec", "flac")
+                put("id", asin)
+                put("type", "track")
+                put("url", trackUrl)
+            }.toString()
+
             var resp: ZarzSession.SignedResponse? = null
             var usedPath = ""
-            for (path in listOf("/dl/amazeamazeamaze", "/dl/amz", "/dl/amazon")) {
+            for ((path, payload) in listOf(
+                "/dl/amazeamazeamaze" to body,
+                "/dl/amz" to richBody,
+                "/dl/amazon" to richBody
+            )) {
                 val attempt = runCatching {
                     zarzAmazon.signedFetch(
-                        "POST", path, body,
+                        "POST", path, payload,
                         mapOf("X-Zarz-Ticket" to ticket),
                         ZarzSession.APP_VERSION_AMAZON
                     )
@@ -1318,7 +1332,9 @@ class MusicBoxProvider : MainAPI() {
                     usedPath = path
                     break
                 }
-                MusicBoxLog.d(TAG, "Amazon: $path -> HTTP ${attempt.statusCode}")
+                // the error body is the useful part on a 400 - it names the missing field
+                val detail = attempt.body.orEmpty().trim().take(160)
+                MusicBoxLog.d(TAG, "Amazon: $path -> HTTP ${attempt.statusCode} $detail")
                 if (attempt.statusCode != 404) {
                     resp = attempt
                     usedPath = path

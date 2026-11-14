@@ -1009,8 +1009,11 @@ object QobuzApi {
                     if (tracks != null && tracks.length() > 0) {
                         return (0 until tracks.length()).mapNotNull { parseTrack(tracks.optJSONObject(it)) }
                     }
+                    MusicBoxLog.d("QobuzApi", "app_id $appId: no items (${resp.text.take(120)})")
+                } else {
+                    MusicBoxLog.d("QobuzApi", "app_id $appId: HTTP ${resp.code} ${resp.text.take(120)}")
                 }
-            }
+            }.onFailure { MusicBoxLog.d("QobuzApi", "app_id $appId threw: ${it.message}") }
         }
         // Fallback to GDStudio Qobuz search (from `qobuz.py` / `gdstudio.py`)
         return GDStudioApi.search(query, "qobuz", limit)

@@ -84,6 +84,19 @@ class MusicBoxProvider : MainAPI() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Providers whose upstream is currently down, and until when.
+     *
+     * Tidal answers 503 PROVIDER_UNAVAILABLE and Amazon's upstream fails; retrying both on every
+     * play costs several seconds each time for a result that cannot change. A short cooldown keeps
+     * the play fast, and the log still says the provider is being skipped and why.
+     */
+    private val upstreamDownUntil = ConcurrentHashMap<String, Long>()
+    private fun upstreamDown(key: String) = (upstreamDownUntil[key] ?: 0L) > System.currentTimeMillis()
+    private fun markUpstreamDown(key: String, seconds: Long = 600) {
+        upstreamDownUntil[key] = System.currentTimeMillis() + seconds * 1000
+    }
+
     private fun loadSession() {
         val context = CloudStreamApp.context ?: return
         runCatching { MusicBoxSettings.init(context) }
@@ -877,6 +890,10 @@ class MusicBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableTidal) return false
+        if (upstreamDown("tidal")) {
+            MusicBoxLog.d(TAG, "Tidal ZARZ: skipped, upstream unavailable (retrying later)")
+            return false
+        }
         var added = false
 
         // resolve the tidal id once: the monochrome path and the resolver both need it, and
@@ -929,6 +946,9 @@ class MusicBoxProvider : MainAPI() {
                     }
                     if (descriptor == null) {
                         MusicBoxLog.w(TAG, "Tidal ZARZ: every quality refused ($lastError)")
+                        if (lastError.contains("503") || lastError.contains("PROVIDER_UNAVAILABLE")) {
+                            markUpstreamDown("tidal")
+                        }
                         return added
                     }
                     saveSession()
@@ -1296,6 +1316,10 @@ class MusicBoxProvider : MainAPI() {
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
         if (!zarzAmazon.record.isUsable()) return false
+        if (upstreamDown("amazon")) {
+            MusicBoxLog.d(TAG, "Amazon: skipped, upstream unavailable (retrying later)")
+            return false
+        }
 
         return try {
             val asin = AmazonApi.findAsin(title, artist) ?: run {
@@ -1353,6 +1377,7 @@ class MusicBoxProvider : MainAPI() {
             }
             if (resp == null || !resp.ok) {
                 MusicBoxLog.w(TAG, "Amazon: no route answered (tried 3, last ${resp?.statusCode})")
+                if (resp?.statusCode == 404 || resp?.statusCode == 400) markUpstreamDown("amazon")
                 return false
             }
             MusicBoxLog.d(TAG, "Amazon: route $usedPath answered")

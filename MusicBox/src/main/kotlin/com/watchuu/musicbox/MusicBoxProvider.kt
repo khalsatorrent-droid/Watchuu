@@ -356,12 +356,18 @@ class MusicBoxProvider : MainAPI() {
     private suspend fun searchSpotify(query: String, limit: Int = 15): List<SearchResponse> {
         return try {
             val (tracks, albums, artists) = SpotifyClient.search(query, limit)
-            val results = mutableListOf<SearchResponse>()
-            results.addAll(tracks.map { it.toSearchResponse() })
-            results.addAll(albums.map { it.toSearchResponse() })
-            results.addAll(artists.map { it.toSearchResponse() })
-            results.addAll(SpotifyClient.searchPlaylists(query, 8).map { it.toSearchResponse() })
-            if (results.isNotEmpty()) results else searchApple(query, limit)
+            // artists and playlists first: searching a name should open the artist / their playlists,
+            // not bury them under a screenful of individual songs
+            val results = LinkedHashMap<String, SearchResponse>()
+            fun add(r: SearchResponse) { results.putIfAbsent(r.url, r) }
+            artists.take(3).forEach { add(it.toSearchResponse()) }
+            val lists = listOf(query, "This Is $query")
+                .amap { q -> runCatching { SpotifyClient.searchPlaylists(q, 8) }.getOrDefault(emptyList()) }
+            val thisIs = lists.getOrNull(1).orEmpty().filter { it.name.startsWith("This Is", true) }
+            (thisIs + lists.flatten()).distinctBy { it.id }.take(8).forEach { add(it.toSearchResponse()) }
+            albums.forEach { add(it.toSearchResponse()) }
+            tracks.forEach { add(it.toSearchResponse()) }
+            if (results.isNotEmpty()) results.values.toList() else searchApple(query, limit)
         } catch (e: Exception) {
             MusicBoxLog.w(TAG, "Spotify search failed, falling back: ${e.message}")
             searchApple(query, limit)

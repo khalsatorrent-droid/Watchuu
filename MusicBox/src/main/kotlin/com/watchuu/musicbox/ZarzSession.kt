@@ -387,6 +387,31 @@ class ZarzSession(
         )
     }
 
+    /**
+     * Qobuz search through the resolver.
+     *
+     * qobuz.com itself answers 401 "User authentication is required" for every public app_id - the
+     * store api wants a logged-in user token, which an extension cannot have. The official
+     * qobuz-web extension does not call qobuz.com for search either: it calls
+     * https://api.zarz.moe/v2/qbz/track/search with its signed session. Same here.
+     */
+    suspend fun searchQobuzTrackId(query: String, limit: Int = 10): String? {
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        val path = "/qbz/track/search?query=$q&limit=$limit&offset=0&app_id=798273057"
+        val payload = runCatching { signedJson("GET", path, null, appVersionOverride = APP_VERSION_QOBUZ) }
+            .getOrNull() ?: return null
+
+        val items = payload.optJSONObject("tracks")?.optJSONArray("items")
+            ?: payload.optJSONArray("items")
+            ?: payload.optJSONArray("tracks")
+            ?: return null
+        for (i in 0 until items.length()) {
+            val id = items.optJSONObject(i)?.opt("id")?.toString().orEmpty()
+            if (id.isNotBlank() && id != "null") return id
+        }
+        return null
+    }
+
     suspend fun resolveQobuzDownload(trackId: String, quality: Int = 27): JSONObject {
         // musicdl hashes the *track url*, not the bare id, and sends a string quality plus the url
         val trackUrl = "https://open.qobuz.com/track/$trackId"

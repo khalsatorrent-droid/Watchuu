@@ -1068,9 +1068,19 @@ class MusicBoxProvider : MainAPI() {
         if (!MusicBoxSettings.enableQobuz) return false
         var added = false
 
-        // one search, shared by the direct path and the resolver
-        val resolvedQobuzId = qobuzId.ifBlank {
-            runCatching { QobuzApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
+        // The id has to come from the resolver: qobuz.com answers 401 "User authentication is
+        // required" for anonymous search on every public app_id, so the store lookup cannot work.
+        var resolvedQobuzId = qobuzId
+        if (resolvedQobuzId.isBlank() && zarzQobuz.record.isUsable()) {
+            resolvedQobuzId = runCatching { zarzQobuz.searchQobuzTrackId(query) }
+                .getOrNull().orEmpty()
+            if (resolvedQobuzId.isNotBlank()) {
+                MusicBoxLog.d(TAG, "Qobuz ZARZ: resolved id $resolvedQobuzId")
+            }
+        }
+        if (resolvedQobuzId.isBlank()) {
+            resolvedQobuzId = runCatching { QobuzApi.search(query, 1).firstOrNull()?.sourceId }
+                .getOrNull().orEmpty()
         }
 
         try {

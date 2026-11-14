@@ -168,7 +168,8 @@ class MusicBoxProvider : MainAPI() {
             } else {
                 searchJioSaavnTracksOnly(query)
             }
-            "spotify" -> searchSpotifyTracksOnly(query)
+            "spotify" -> if (isChart) spotifyChartPlaylists().ifEmpty { searchSpotifyTracksOnly(query) }
+            else searchSpotifyTracksOnly(query)
             "apple" -> if (isChart) {
                 runCatching { AppleMusicApi.getChart("in", 20).map { it.toSearchResponse() } }.getOrDefault(emptyList())
             } else {
@@ -316,6 +317,29 @@ class MusicBoxProvider : MainAPI() {
         runCatching { JioSaavnApi.search(query, limit).mapTo(out) { it.toSearchResponse() } }
         runCatching { JioSaavnApi.searchAlbums(query, 6).mapTo(out) { it.toSearchResponse() } }
         return out
+    }
+
+    /**
+     * Spotify's charts are playlists ("Top 50 - India", "Today's Top Hits"). A track search for "top hits"
+     * returns junk songs whose title merely says so, so the chart row lists the playlists themselves and
+     * each opens as a tracklist. Spotify's own editorial lists come first.
+     */
+    private suspend fun spotifyChartPlaylists(): List<SearchResponse> {
+        return try {
+            val found = listOf("Top 50", "Today's Top Hits", "Top Hits India", "Viral 50", "Global Top 50")
+                .amap { q -> runCatching { SpotifyClient.searchPlaylists(q, 8) }.getOrDefault(emptyList()) }
+                .flatten()
+                .distinctBy { it.id }
+            val ranked = found.sortedByDescending {
+                (if (it.owner.equals("Spotify", true)) 2 else 0) +
+                    (if (Regex("top 50|top hits|viral 50|charts?", RegexOption.IGNORE_CASE).containsMatchIn(it.name)) 1 else 0)
+            }
+            MusicBoxLog.d(TAG, "Spotify charts: ${ranked.size} playlist(s)")
+            ranked.take(20).map { it.toSearchResponse() }
+        } catch (e: Exception) {
+            MusicBoxLog.w(TAG, "Spotify chart playlists failed: ${e.message}")
+            emptyList()
+        }
     }
 
     private suspend fun searchSpotifyTracksOnly(query: String, limit: Int = 15): List<SearchResponse> {

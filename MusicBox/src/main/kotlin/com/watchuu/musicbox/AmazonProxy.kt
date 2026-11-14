@@ -52,7 +52,7 @@ object AmazonProxy {
         val files = dir().listFiles() ?: return
         val now = System.currentTimeMillis()
         files.filter { it != keep && now - it.lastModified() > 6 * 3600_000L }.forEach { it.delete() }
-        files.filter { it.name.endsWith(".m4a") && it != keep }.sortedByDescending { it.lastModified() }.drop(6).forEach { it.delete() }
+        files.filter { (it.name.endsWith(".m4a") || it.name.endsWith(".flac")) && it != keep }.sortedByDescending { it.lastModified() }.drop(6).forEach { it.delete() }
     }
 
     /**
@@ -60,12 +60,13 @@ object AmazonProxy {
      * Runs before the link is handed to the player so playback starts instantly.
      */
     suspend fun prepare(upstream: String, keyHex: String): String = withContext(Dispatchers.IO) {
-        val name = sha1(upstream + keyHex) + ".m4a"
-        val out = File(dir(), name)
-        val lock = locks.getOrPut(name) { Any() }
-        synchronized(lock) {
+        val base = sha1(upstream + keyHex)
+        val lock = locks.getOrPut(base) { Any() }
+        val name = synchronized(lock) {
+            var out = File(dir(), "$base.flac")
+            if (!out.exists() || out.length() == 0L) out = File(dir(), "$base.m4a")
             if (!out.exists() || out.length() == 0L) {
-                val part = File(dir(), "$name.part")
+                val part = File(dir(), "$base.part")
                 val c = URL(upstream).openConnection() as HttpURLConnection
                 c.connectTimeout = 20_000
                 c.readTimeout = 60_000
@@ -80,12 +81,17 @@ object AmazonProxy {
                         throw Exception("Amazon decrypt failed: ${e.message}")
                     }
                 }
+                // FLAC-in-MP4 plays unreliably; a native .flac stream is what players handle best
+                val native = FlacRemux.convert(part)
+                out = File(dir(), base + if (native) ".flac" else ".m4a")
+                MusicBoxLog.d("AmazonProxy", "ready: ${part.length()} bytes, native flac=$native")
                 if (!part.renameTo(out)) { part.copyTo(out, true); part.delete() }
                 cleanup(out)
             }
             out.setLastModified(System.currentTimeMillis())
+            out.name
         }
-        "http://127.0.0.1:${port()}/a?f=${URLEncoder.encode(name, "UTF-8")}"
+        return@withContext "http://127.0.0.1:${port()}/a?f=${URLEncoder.encode(name, "UTF-8")}"
     }
 
     private fun fail(o: OutputStream, code: Int) {
@@ -128,7 +134,7 @@ object AmazonProxy {
                 val partial = m != null
                 val head = StringBuilder(if (partial) "HTTP/1.1 206 Partial Content\r\n" else "HTTP/1.1 200 OK\r\n")
                 if (partial) head.append("Content-Range: bytes $start-$end/$total\r\n")
-                head.append("Content-Length: ${end - start + 1}\r\nContent-Type: audio/mp4\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n")
+                head.append("Content-Length: ${end - start + 1}\r\nContent-Type: ${if (name.endsWith(".flac")) "audio/flac" else "audio/mp4"}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n")
                 out.write(head.toString().toByteArray())
                 RandomAccessFile(file, "r").use { raf ->
                     raf.seek(start)

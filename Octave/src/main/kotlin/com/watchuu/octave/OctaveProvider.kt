@@ -389,9 +389,9 @@ class OctaveProvider : MainAPI() {
                     this.headers = OctaveApi.playerHeaders()
                 }
             )
-            // the preview beside it: if the player is refused, something still plays
-            emitPreview(preview, "preview, in case FLAC is refused")
-            OctaveLog.step("emitted: FLAC + preview")
+            // one link only: the whole song. The 30s preview is gone from this path - it was
+            // noise once lossless works, and picking it by mistake gives you 30 seconds of a song.
+            OctaveLog.step("emitted: FLAC only")
             return true
         }
 

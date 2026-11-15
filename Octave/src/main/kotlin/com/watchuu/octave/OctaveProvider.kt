@@ -97,7 +97,7 @@ class OctaveProvider : MainAPI() {
         val artist = artistName(o)
         val dur = o.optInt("duration", 0)
         val al = o.optJSONObject("album")?.str("id")
-        val prev = o.str("previewUrl") ?: ""
+        val prev = o.str("previewUrl", "preview") ?: ""
         return "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" +
             (al?.let { "&al=$it" } ?: "") +
             (if (prev.isNotBlank()) "&p=${enc(prev)}" else "")
@@ -271,12 +271,47 @@ class OctaveProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        val root = getJson("/api/search/page?query=${enc(query.trim())}&limit=30")
-        val out = ArrayList<SearchResponse>()
-        root.optJSONArray("artists").objects().take(3).mapNotNullTo(out) { artistCard(it) }
-        root.optJSONArray("albums").objects().take(8).mapNotNullTo(out) { albumCard(it) }
-        root.optJSONArray("tracks").objects().mapNotNullTo(out) { trackCard(it) }
-        return out.distinctBy { it.url }
+
+        // Octave's own search needs the Cloudflare cookie. When it is missing - or when the hidden
+        // page cannot make requests at all, which is what "TypeError: Failed to fetch" means - this
+        // falls back to Deezer's public search, which needs nothing. The catalogue is the same: every
+        // track id Octave serves is a Deezer id, and every track carries a Deezer preview url.
+        val own = runCatching {
+            val root = getJson("/api/search/page?query=${enc(query.trim())}&limit=30")
+            val out = ArrayList<SearchResponse>()
+            root.optJSONArray("artists").objects().take(3).mapNotNullTo(out) { artistCard(it) }
+            root.optJSONArray("albums").objects().take(8).mapNotNullTo(out) { albumCard(it) }
+            root.optJSONArray("tracks").objects().mapNotNullTo(out) { trackCard(it) }
+            out.distinctBy { it.url }
+        }.getOrDefault(emptyList())
+
+        if (own.isNotEmpty()) return own
+        return deezerSearch(query)
+    }
+
+    /** Deezer's public search: no key, no cookie, and the same ids Octave plays. */
+    private suspend fun deezerSearch(query: String): List<SearchResponse> {
+        val body = runCatching {
+            val r = app.get("https://api.deezer.com/search?q=${enc(query.trim())}&limit=30", timeout = 15L)
+            if (r.code in 200..299) JSONObject(r.text) else null
+        }.getOrNull() ?: return emptyList()
+
+        val items = body.optJSONArray("data") ?: return emptyList()
+        return (0 until items.length()).mapNotNull { i ->
+            val o = items.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.str("id") ?: return@mapNotNull null
+            val title = o.str("title") ?: return@mapNotNull null
+            val artist = o.optJSONObject("artist")?.str("name").orEmpty()
+            val dur = o.optInt("duration", 0)
+            val coverUrl = o.optJSONObject("album")?.str("cover_big", "cover_medium", "cover_xl").orEmpty()
+            val preview = o.str("preview").orEmpty()
+
+            val url = "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" +
+                (if (preview.isNotBlank()) "&p=${enc(preview)}" else "")
+            newMovieSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, url, TvType.Music) {
+                this.posterUrl = coverUrl.ifBlank { null }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- load
@@ -302,13 +337,20 @@ class OctaveProvider : MainAPI() {
     }
 
     private suspend fun loadAlbum(id: String): LoadResponse {
-        val root = getJson("/api/album/$id")
+        // Deezer's public album endpoint answers where Octave's needs the cookie, and the tracks are
+        // the same ids. Everything below works on either shape.
+        val root = runCatching { getJson("/api/album/$id") }.getOrElse {
+            app.get("https://api.deezer.com/album/$id", timeout = 15L).let { r ->
+                if (r.code in 200..299) JSONObject(r.text) else throw it
+            }
+        }
         val a = root.optJSONObject("album") ?: root
         val title = a.str("title") ?: "Album"
         val artist = artistName(a)
         val poster = cover(a)
         var n = 0
-        val eps = a.optJSONArray("tracks").objects().mapNotNull { trackEpisode(it, ++n, poster) }
+        val trackArr = a.optJSONArray("tracks") ?: a.optJSONObject("tracks")?.optJSONArray("data")
+        val eps = trackArr.objects().mapNotNull { trackEpisode(it, ++n, poster) }
         return newTvSeriesLoadResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/album/$id", TvType.Music, eps) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
@@ -322,6 +364,38 @@ class OctaveProvider : MainAPI() {
     }
 
     private suspend fun loadArtist(id: String): LoadResponse {
+        val deezerTop = runCatching {
+            val r = app.get("https://api.deezer.com/artist/$id/top?limit=50", timeout = 15L)
+            if (r.code in 200..299) JSONObject(r.text) else null
+        }.getOrNull()
+        if (deezerTop != null) {
+            val items = deezerTop.optJSONArray("data").objects()
+            if (items.isNotEmpty()) {
+                var n = 0
+                val eps = items.mapNotNull { t ->
+                    val tid = t.str("id") ?: return@mapNotNull null
+                    val title = t.str("title") ?: return@mapNotNull null
+                    val artist = t.optJSONObject("artist")?.str("name").orEmpty()
+                    val coverUrl = t.optJSONObject("album")?.str("cover_big", "cover_medium").orEmpty()
+                    val prev = t.str("preview").orEmpty()
+                    val url = "$mainUrl/track/$tid?t=${enc(title)}&a=${enc(artist)}&d=${t.optInt("duration", 0)}" +
+                        (if (prev.isNotBlank()) "&p=${enc(prev)}" else "")
+                    newEpisode(url) {
+                        this.name = title
+                        this.season = 1
+                        this.episode = ++n
+                        this.posterUrl = coverUrl.ifBlank { null }
+                        this.description = artist.ifBlank { null }
+                    }
+                }
+                if (eps.isNotEmpty()) {
+                    return newTvSeriesLoadResponse("Artist", "$mainUrl/artist/$id", TvType.Music, eps) {
+                        this.posterUrl = items.firstOrNull()?.optJSONObject("artist")?.str("picture_big")
+                    }
+                }
+            }
+        }
+
         val tracks = getJson("/api/artist/$id/radio").optJSONArray("tracks").objects()
         val mine = tracks.firstOrNull { it.optJSONObject("artist")?.str("id") == id }
         val name = mine?.let { artistName(it) } ?: "Artist"

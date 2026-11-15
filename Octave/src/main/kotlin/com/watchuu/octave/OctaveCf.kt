@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v16"
+    const val BUILD_TAG = "v17"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -228,7 +228,8 @@ object OctaveCf {
             if (method == "GET") app.get(url, headers = h, timeout = 20L)
             else app.post(url, headers = h, requestBody = (body ?: "").toRequestBody("application/json".toMediaType()), timeout = 25L)
         )
-        lastReport = "$tag http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}"
+        val bodyHint = if (n.code in 200..299) "" else " " + n.text.trim().take(140).replace("\n", " ")
+        lastReport = "$tag http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}$bodyHint"
         if (!n.challenge) return n
 
         // blocked: the browser is the only thing that can carry a fresh clearance cookie
@@ -292,7 +293,11 @@ object OctaveCf {
     fun report(): String {
         val clearance = hasClearance() || savedCookies.contains("cf_clearance") || manualCookie.contains("cf_clearance")
         val advice = when {
-            clearance -> "Cloudflare cookie present - search, albums and lossless playback should work."
+            clearance ->
+                "Cloudflare cookie present. If playback still answers 403 with a JSON body (not a Cloudflare " +
+                    "page), the account key was refused - open the site, copy the octv_ key from its storage and " +
+                    "paste it into Account key. A 403 with an HTML body means the cookie has expired: run " +
+                    "\"Cloudflare check + login\" again."
             accountKey.isNotBlank() ->
                 "No Cloudflare cookie. Browsing the home page still works (its rows do not need one), but " +
                     "search, albums and lossless playback answer 403 until you run \"Cloudflare check + login\". " +

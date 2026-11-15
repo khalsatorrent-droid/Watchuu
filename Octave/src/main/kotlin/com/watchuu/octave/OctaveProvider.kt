@@ -355,13 +355,28 @@ class OctaveProvider : MainAPI() {
         val key = OctaveApi.quickToken()
         OctaveLog.step("token: ${if (key == null) "NOT available - flac cannot be offered" else "available"}")
         if (key != null) {
-            val base = direct.takeIf { it.startsWith("http") }
-                ?: "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
-            val url = if (base.contains("k=")) base else "$base${if (base.contains("?")) "&" else "?"}k=$key"
+            // The url is built from scratch every time, exactly as the site's player builds it:
+            //   /audio/lossless?track=<id>&t=<title>&a=<artist>&d=<seconds>&x=0&k=<token>
+            // Appending k to the resolve url instead - which is only /audio/lossless?track=<id> -
+            // produced a url the server answers 401 to, because the metadata is part of the check.
+            fun audioUrl(token: String) =
+                "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0&k=$token"
 
-            val code = OctaveApi.serves(url)
+            var url = audioUrl(key)
+            var code = OctaveApi.serves(url)
+            OctaveLog.step("flac probe HTTP $code")
+
+            // a 401 means the token was not accepted for this url: ask for a fresh one once
+            if (code == 401 || code == 403) {
+                val fresh = OctaveApi.playbackToken(forceNew = true)
+                if (fresh != null) {
+                    url = audioUrl(fresh)
+                    code = OctaveApi.serves(url)
+                    OctaveLog.step("flac probe after a fresh token: HTTP $code")
+                }
+            }
+
             val works = code in 200..299 || code == 416
-            OctaveLog.step("flac url built with k, probe HTTP $code -> ${if (works) "good" else "doubtful"}")
             callback.invoke(
                 newExtractorLink(
                     name,

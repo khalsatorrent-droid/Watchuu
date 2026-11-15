@@ -289,6 +289,12 @@ class OctaveProvider : MainAPI() {
         return deezerSearch(query)
     }
 
+    /** a plain Deezer preview url for any track id - public, unsigned, needs nothing */
+    private suspend fun deezerPreview(id: String): String? = runCatching {
+        val r = app.get("https://api.deezer.com/track/$id", timeout = 12L)
+        if (r.code in 200..299) JSONObject(r.text).optString("preview").takeIf { it.startsWith("http") } else null
+    }.getOrNull()
+
     /** Deezer's public search: no key, no cookie, and the same ids Octave plays. */
     private suspend fun deezerSearch(query: String): List<SearchResponse> {
         val body = runCatching {
@@ -456,7 +462,15 @@ class OctaveProvider : MainAPI() {
             val r = OctaveCf.get("$api/api/track/$id?quality=lossless")
             if (r.code in 200..299) JSONObject(r.text) else null
         }.getOrNull()
-        val previewUrl = resolved?.optString("preview").orEmpty().ifBlank { previewFromCard }
+        var previewUrl = resolved?.optString("preview").orEmpty().ifBlank { previewFromCard }
+
+        // Last resort, and it cannot fail for the same reason as the rest: Deezer's public track
+        // endpoint answers for any id this catalogue serves and hands back a preview url that needs
+        // no key, no cookie and no signature. Without this, a failed resolve plus a card without a
+        // preview produced "no links found" and nothing else.
+        if (!previewUrl.startsWith("http")) {
+            previewUrl = deezerPreview(id).orEmpty()
+        }
         val directUrl = resolved?.optString("url").orEmpty()
         val gated = resolved?.optBoolean("gated", false) == true
 
@@ -502,14 +516,27 @@ class OctaveProvider : MainAPI() {
                     return true
                 }
             }
-            // key present but refused - say so, then still offer the preview
-            return emitPreview("lossless refused (HTTP 403)")
+            // key present but refused - say so, then fall through to the preview / final emit
+            if (emitPreview("lossless refused (HTTP 403)")) return true
         }
 
         // ---- 3. no key: the preview, which needs no account at all ---------------------------
-        return emitPreview(
-            if (gated) "account key needed for FLAC" else "no playback key"
+        if (emitPreview(if (gated) "account key needed for FLAC" else "no playback key")) return true
+
+        // ---- 4. nothing worked: still offer the endpoint, so the failure is visible -----------
+        // Returning false here is what CloudStream shows as "no links found", which hides every
+        // reason above. A link that may be refused is more useful than silence.
+        val fallback = if (directUrl.startsWith("http")) directUrl
+        else "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
+        callback.invoke(
+            newExtractorLink(name, "$name lossless (needs account key)", fallback, ExtractorLinkType.VIDEO) {
+                this.referer = "$mainUrl/"
+                this.quality = Qualities.Unknown.value
+                this.headers = OctaveCf.playerHeaders()
+            }
         )
+        OctaveCf.toast("Octave: no preview for this track - the lossless url needs an account key")
+        return true
     }
 
 }

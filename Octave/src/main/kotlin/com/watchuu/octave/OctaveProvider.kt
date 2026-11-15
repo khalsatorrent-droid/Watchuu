@@ -391,18 +391,47 @@ class OctaveProvider : MainAPI() {
             return true
         }
 
-        // the token call can throw (network, cancelled solver) - a throw here used to surface as
-        // "no links found" with no explanation at all
+        fun emitDirect(u: String, label: String): Boolean {
+            if (!u.startsWith("http")) return false
+            callback.invoke(
+                newExtractorLink(name, "$name $label", u, ExtractorLinkType.VIDEO) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = OctaveCf.playerHeaders()
+                }
+            )
+            return true
+        }
+
+        // 1. What the site's own player does first: ask the api to resolve the track.
+        //    GET /api/track/{id}?quality=lossless -> {url, preview, gated}
+        //    A url here needs no playback token at all - it is only gated when the server says so.
+        val resolved = runCatching {
+            val r = OctaveCf.get("$api/api/track/$id?quality=lossless")
+            if (r.code in 200..299) JSONObject(r.text) else null
+        }.getOrNull()
+        val directUrl = resolved?.optString("url").orEmpty()
+        val gated = resolved?.optBoolean("gated", false) == true
+        if (directUrl.startsWith("http") && !gated) {
+            if (emitDirect(directUrl, "FLAC (lossless)")) return true
+        }
+
+        // 2. The audio endpoint, without a key first: /audio/lossless?track=… is what the page
+        //    builds when no token exists, and the server serves it when the track is not gated.
+        val bareUrl = "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
+        if (!gated && OctaveCf.head(bareUrl) in 200..299) {
+            if (emitDirect(bareUrl, "FLAC (lossless)")) return true
+        }
+
+        // 3. Only now the playback token, which is what kept failing.
         val keyResult = runCatching { OctaveCf.playbackToken() }
         var key = keyResult.getOrNull() ?: return emitPreview(
             "no playback key (${keyResult.exceptionOrNull()?.message ?: "HTTP 403"})"
         )
         fun streamUrl(k: String) = "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0&k=$k"
 
-        // the server prepares the file on demand (HEAD answers 404 for a moment) - give it a few tries
         var url = streamUrl(key)
         for (i in 0 until 4) {
-            // asked from inside the page (same login/cookies as the site's own player)
             val code = OctaveCf.head(url)
             if (code in 200..299 || code == -1) break
             if (code == 401 || code == 403) {
@@ -412,7 +441,6 @@ class OctaveProvider : MainAPI() {
             kotlinx.coroutines.delay(1500L)
         }
 
-        // if the server never confirms the file, offer the preview rather than a dead FLAC link
         val lastCode = OctaveCf.head(url)
         if (lastCode == 401 || lastCode == 403) {
             return emitPreview("lossless refused (HTTP $lastCode)")

@@ -422,6 +422,7 @@ class OctaveProvider : MainAPI() {
 
         suspend fun emitPreviewLink(reason: String): Boolean {
             if (!previewUrl.startsWith("http")) return emitPreview(reason)
+            OctaveCf.toast("Octave: $reason - playing the 30s preview")
             callback.invoke(
                 newExtractorLink(name, "$name preview (30s) - $reason", previewUrl, ExtractorLinkType.VIDEO) {
                     this.quality = 128

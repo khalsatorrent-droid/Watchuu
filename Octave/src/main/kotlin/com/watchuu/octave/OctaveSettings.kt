@@ -58,6 +58,19 @@ object OctaveSettings {
         root.addView(header("Cloudflare"))
         root.addView(status)
         root.addView(note("Octave is protected by Cloudflare. Open the site, tick the box and log in to your Octave account. The window stays open until you press Back; then the cookies and your login are saved on this device only. Repeat when it expires (playback or search start failing)."))
+        root.addView(button("Log in + verify key") {
+            scope.launch {
+                val msg = OctaveCf.loginAndAdoptKey(act)
+                withContext(Dispatchers.Main) {
+                    refresh()
+                    AlertDialog.Builder(act)
+                        .setTitle("Octave login")
+                        .setMessage(msg)
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        })
         root.addView(button("Cloudflare check + login") {
             scope.launch {
                 val ok = OctaveCf.solveInteractive(act)
@@ -113,6 +126,20 @@ object OctaveSettings {
         val uaField = field("User agent (leave empty to use this device's)", OctaveCf.customUa)
         root.addView(cookieField)
         root.addView(uaField)
+        root.addView(button("Test the key in the field") {
+            scope.launch {
+                val key = keyField.text.toString().trim()
+                val problem = OctaveCf.validateKey(key)
+                if (problem == null) {
+                    OctaveCf.accountKey = key
+                    withContext(Dispatchers.Main) { keyField.setText(OctaveCf.accountKey); refresh() }
+                }
+                OctaveCf.toast(
+                    if (problem == null) "Octave: key works - playback ready"
+                    else "Octave: key $problem"
+                )
+            }
+        })
         root.addView(button("Use this device's user agent") {
             uaField.setText(OctaveCf.userAgent())
             OctaveCf.toast("Octave: field filled with this device's UA - Save, then use the same UA in your browser")

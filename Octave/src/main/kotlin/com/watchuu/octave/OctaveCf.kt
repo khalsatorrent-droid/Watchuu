@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v23"
+    const val BUILD_TAG = "v24"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -355,6 +355,58 @@ object OctaveCf {
             return fresh
         }
         return null
+    }
+
+    /**
+     * Checks a key against the endpoint that actually matters.
+     *
+     * /audio/lossless answers 403 without a valid token, and the token comes from
+     * /api/playback-token authenticated with this key - so one call to that endpoint decides whether
+     * a key is good, without playing anything. Returns null when the key works, or a short reason.
+     */
+    suspend fun validateKey(key: String): String? {
+        if (key.isBlank()) return "no key"
+        return try {
+            val r = get("$API/api/playback-token", true, mapOf("Authorization" to "Bearer ${key.trim()}"))
+            when {
+                r.code in 200..299 -> {
+                    // the answer carries a token; adopt it so the first play does not ask again
+                    runCatching {
+                        val o = org.json.JSONObject(r.text)
+                        val t = o.optString("token")
+                        if (t.isNotBlank()) {
+                            token = t
+                            tokenExp = System.currentTimeMillis() + o.optLong("expiresIn", 1800L) * 1000L
+                        }
+                    }
+                    null
+                }
+                r.code == 403 || r.code == 401 -> "rejected (HTTP ${r.code})"
+                else -> "HTTP ${r.code}"
+            }
+        } catch (e: Throwable) {
+            e.message ?: "failed"
+        }
+    }
+
+    /**
+     * Logs in and adopts the key the page ends up with.
+     *
+     * The account key is the one credential the extension cannot invent: the site issues it to a
+     * logged-in session, and playback is refused without it. This opens the site, lets the user log
+     * in, then takes the key from the page and proves it works before saving it.
+     */
+    suspend fun loginAndAdoptKey(activity: Activity?): String {
+        val solved = solveInteractive(activity)
+        val fresh = refreshAccountKey()
+        val candidate = fresh ?: accountKey
+        if (candidate.isBlank()) {
+            return if (solved) "window closed, but no account key found - log in to your Octave account, not just the Cloudflare box"
+            else "window closed without a result"
+        }
+        val problem = validateKey(candidate)
+        return if (problem == null) "key verified - playback should work"
+        else "key $problem - log in again in the window that opened"
     }
 
     suspend fun playbackToken(forceNew: Boolean = false): String? = tokenLock.withLock {

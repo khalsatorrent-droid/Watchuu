@@ -174,10 +174,10 @@ object OctaveBrowser {
         false
     }
 
-    /** fetch() from inside the page. Returns null when the browser is unavailable or still blocked. */
-    suspend fun fetch(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
-        if (appContext == null) return null
-        if (!ensure()) return null
+    private fun failed(r: OResp?) = r == null || r.challenge || r.code == -1
+
+    /** One fetch() from inside the page. */
+    private suspend fun attempt(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
         val id = UUID.randomUUID().toString()
         val d = CompletableDeferred<OResp>()
         pending[id] = d
@@ -191,10 +191,57 @@ object OctaveBrowser {
         lastUse = System.currentTimeMillis()
         val r = withTimeoutOrNull(35_000L) { d.await() }
         pending.remove(id)
-        lastInfo = if (r == null) "page fetch timed out: ${method} ${url.substringBefore("?").takeLast(60)}"
-        else "page fetch ${method} ${url.substringBefore("?").takeLast(60)} -> HTTP ${r.code}" +
+        lastInfo = if (r == null) "page fetch timed out: $method ${url.substringBefore("?").takeLast(60)}"
+        else "page fetch $method ${url.substringBefore("?").takeLast(60)} -> HTTP ${r.code}" +
             (if (r.code !in 200..299) " body=${r.text.take(120).replace("\n", " ")}" else "")
         return r
+    }
+
+    /** Waits (up to [ms]) for Cloudflare's own script in the hidden page to earn the cf_clearance cookie. */
+    private suspend fun waitClearance(ms: Long): Boolean {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            if (OctaveCf.hasClearance()) return true
+            delay(500L)
+        }
+        return OctaveCf.hasClearance()
+    }
+
+    /**
+     * fetch() from inside the page. The first call to the API can be answered with a Cloudflare
+     * challenge that the page's own script then solves silently (the site's player does exactly
+     * this: one 403, then it works) - so on failure wait for the cookie, retry, and finally reload
+     * the page once. Returns null when it still fails (the caller then asks the user).
+     */
+    suspend fun fetch(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
+        if (appContext == null) return null
+        if (!ensure()) return null
+        var r = attempt(method, url, body, headers)
+        if (!failed(r)) return r
+
+        waitClearance(15_000L)
+        r = attempt(method, url, body, headers)
+        if (!failed(r)) return r
+
+        // reload once: the page restarts its Cloudflare script with the cookies it has now
+        withContext(Dispatchers.Main) { try { webView?.reload() } catch (_: Throwable) {} }
+        delay(1500L)
+        if (ensure(25_000L)) {
+            waitClearance(10_000L)
+            r = attempt(method, url, body, headers)
+        }
+        return if (failed(r)) r else r
+    }
+
+    /** Cookie NAMES the browser holds per host (never the values) - for the report. */
+    fun cookieNames(): String = try {
+        val cm = CookieManager.getInstance()
+        listOf("api" to OctaveCf.API, "site" to OctaveCf.SITE, "root" to "https://octavestreaming.com").joinToString("; ") { (n, u) ->
+            val names = cm.getCookie(u)?.split(";")?.map { it.trim().substringBefore("=") }?.filter { it.isNotBlank() } ?: emptyList()
+            "$n=[${names.joinToString(",")}]"
+        }
+    } catch (_: Throwable) {
+        "?"
     }
 
     /** Throw the hidden page away (new cookies / new login) - it is rebuilt on the next request. */

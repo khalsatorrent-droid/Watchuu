@@ -252,7 +252,7 @@ object OctaveCf {
 
     fun report(): String = "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
         "cf_clearance: ${if (hasClearance()) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
-        "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}"
+        "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\nCookies seen: ${OctaveBrowser.cookieNames()}"
 
     private suspend fun retryAfterSolve(block: suspend () -> OResp): OResp? {
         // just solved/logged in and still blocked: opening the window again will not help

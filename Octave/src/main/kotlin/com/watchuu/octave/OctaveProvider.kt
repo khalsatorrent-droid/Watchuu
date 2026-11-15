@@ -377,7 +377,7 @@ class OctaveProvider : MainAPI() {
         // a 30-second preview that needs no key at all. Offering that beats returning nothing.
         val preview = param(data, "p").orEmpty()
 
-        fun emitPreview(reason: String): Boolean {
+        suspend fun emitPreview(reason: String): Boolean {
             if (!preview.startsWith("http")) {
                 OctaveCf.toast("Octave: no link - $reason, and this track carries no preview")
                 return false

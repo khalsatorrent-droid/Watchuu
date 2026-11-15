@@ -51,14 +51,14 @@ object OctaveSettings {
         val status = TextView(act).apply { textSize = 14f }
         fun refresh() {
             status.text = if (OctaveCf.hasClearance()) "Status: cf_clearance cookie saved"
-            else "Status: no Cloudflare cookie yet - tap \"Solve Cloudflare now\""
+            else "Status: no Cloudflare cookie yet - tap \"Cloudflare check + login\""
         }
         refresh()
 
         root.addView(header("Cloudflare"))
         root.addView(status)
-        root.addView(note("Octave is protected by Cloudflare. Open the site once, tick the box, and the cookie is kept. Repeat when it expires (playback or search start failing)."))
-        root.addView(button("Solve Cloudflare now") {
+        root.addView(note("Octave is protected by Cloudflare. Open the site, tick the box and log in to your Octave account. The window stays open until you press Back; then the cookies and your login are saved on this device only. Repeat when it expires (playback or search start failing)."))
+        root.addView(button("Cloudflare check + login") {
             scope.launch {
                 OctaveCf.solveInteractive(act)
                 withContext(Dispatchers.Main) { refresh() }

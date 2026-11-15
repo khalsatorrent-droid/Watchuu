@@ -103,16 +103,45 @@ object OctaveCf {
         return ua.replace("; wv)", ")").replace(" Version/4.0", "").also { defaultUa = it }
     }
 
+    /** Snapshot of every cookie the solver/login window ended with (kept on this device only). */
+    private var savedCookies: String
+        get() = str("saved_cookies")
+        set(v) = put("saved_cookies", v)
+
     private fun applyManualCookie() {
-        val raw = manualCookie
+        // the user's pasted cookie wins; the saved snapshot only fills what the WebView lost
+        val raw = listOf(savedCookies, manualCookie).filter { it.isNotBlank() }.joinToString("; ")
         if (raw.isBlank()) return
         try {
             val cm = CookieManager.getInstance()
+            val have = (cm.getCookie(API) ?: "") + ";" + (cm.getCookie(SITE) ?: "")
             raw.split(";").map { it.trim() }.filter { it.contains("=") }.forEach {
-                cm.setCookie(SITE, "$it; path=/; secure")
-                cm.setCookie(API, "$it; path=/; secure")
+                val name = it.substringBefore("=")
+                if (name in manualNames() || !have.contains("$name=")) {
+                    cm.setCookie(SITE, "$it; path=/; secure")
+                    cm.setCookie(API, "$it; path=/; secure")
+                }
             }
             cm.flush()
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun manualNames() = manualCookie.split(";").map { it.trim().substringBefore("=") }.filter { it.isNotBlank() }.toSet()
+
+    /** Keep everything the WebView holds for the site (Cloudflare + login cookies) in app storage. */
+    private fun snapshotCookies() {
+        try {
+            val cm = CookieManager.getInstance()
+            cm.flush()
+            val jar = LinkedHashMap<String, String>()
+            listOf(cm.getCookie(API), cm.getCookie(SITE), cm.getCookie("https://octavestreaming.com"))
+                .filterNotNull().forEach { c ->
+                    c.split(";").map { it.trim() }.filter { it.contains("=") }.forEach {
+                        jar[it.substringBefore("=")] = it.substringAfter("=")
+                    }
+                }
+            if (jar.isNotEmpty()) savedCookies = jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
         } catch (_: Throwable) {
         }
     }
@@ -272,6 +301,7 @@ object OctaveCf {
             cm.flush()
         } catch (_: Throwable) {
         }
+        savedCookies = ""
         token = null
     }
 
@@ -296,11 +326,18 @@ object OctaveCf {
         return result
     }
 
-    private const val READY_JS =
-        "(function(){try{return !/just a moment|attention required|security verification|un instant|einen moment/i.test(document.title)&&" +
-            "document.readyState!=='loading'&&!document.querySelector('#challenge-form,#cf-challenge-running,#challenge-stage,iframe[src*=\"challenges.cloudflare.com\"]')&&" +
-            "document.body&&document.body.innerText.length>50}catch(e){return false}})()"
+    /** Finds the site's account key (octv_...) in the page's local storage, i.e. the logged-in account. */
+    private const val KEY_JS =
+        "(function(){try{var f=function(s){var m=/octv_[0-9a-f]{16,}/.exec(s||'');return m?m[0]:null};" +
+            "for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var r=f(localStorage.getItem(k))||f(k);if(r)return r}" +
+            "for(var j=0;j<sessionStorage.length;j++){var r2=f(sessionStorage.getItem(sessionStorage.key(j)));if(r2)return r2}" +
+            "return f(document.cookie)||''}catch(e){return ''}})()"
 
+    /**
+     * Shows the real site full-screen so the user can pass Cloudflare AND log in.
+     * It stays open until the user presses Back (or "Done"); then every cookie is saved and the
+     * logged-in account key is read from the page. Nothing closes it automatically.
+     */
     @SuppressLint("SetTextI18n", "SetJavaScriptEnabled")
     private fun openSolver(act: Activity, done: CompletableDeferred<Boolean>) {
         if (act.isFinishing) {
@@ -322,12 +359,12 @@ object OctaveCf {
             setBackgroundColor(Color.rgb(30, 30, 30))
         }
         val info = TextView(act).apply {
-            text = "Octave: tick \"Verify you are human\" below. This window closes by itself when done."
+            text = "Octave: tick \"Verify you are human\", then log in to your account. When you are done press Back (or Done) - this window does not close by itself."
             setTextColor(Color.WHITE)
             textSize = 13f
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val close = Button(act).apply { text = "Close"; isAllCaps = false }
+        val close = Button(act).apply { text = "Done"; isAllCaps = false }
         bar.addView(info)
         bar.addView(close)
 
@@ -345,49 +382,66 @@ object OctaveCf {
         wv.webChromeClient = WebChromeClient()
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+
+            // keep the cookies and the account key up to date while the user browses/logs in
+            override fun onPageFinished(view: WebView?, url: String?) {
+                snapshotCookies()
+                view?.evaluateJavascript(KEY_JS) { r -> saveKeyFrom(r) }
+            }
         }
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         dialog.setContentView(root)
 
         var finished = false
-        fun finish(ok: Boolean) {
+        fun finish() {
             if (finished) return
             finished = true
-            try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
-            try { wv.stopLoading(); wv.destroy() } catch (_: Throwable) {}
-            try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
-            done.complete(ok)
-            toast(if (ok) "Octave: Cloudflare passed" else "Octave: Cloudflare not solved")
-        }
-        close.setOnClickListener { finish(hasClearance()) }
-        dialog.setOnDismissListener { finish(hasClearance()) }
-
-        var readyCount = 0
-        val poll = object : Runnable {
-            override fun run() {
-                if (finished) return
-                try {
-                    wv.evaluateJavascript(READY_JS) { r ->
-                        readyCount = if (r == "true") readyCount + 1 else 0
-                        if (r == "true" && (hasClearance() || readyCount >= 5)) {
-                            info.text = "Passed - closing..."
-                            main.postDelayed({ finish(true) }, 800L)
-                        } else if (!finished) main.postDelayed(this, 1000L)
-                    }
-                } catch (_: Throwable) {
-                    if (!finished) main.postDelayed(this, 1000L)
-                }
+            var cleaned = false
+            fun cleanup() {
+                if (cleaned) return
+                cleaned = true
+                snapshotCookies()
+                try { wv.stopLoading(); wv.destroy() } catch (_: Throwable) {}
+                try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
+                val ok = hasClearance()
+                done.complete(ok)
+                toast(
+                    if (!ok) "Octave: Cloudflare not solved"
+                    else if (accountKey.isNotBlank()) "Octave: saved (Cloudflare + login)"
+                    else "Octave: Cloudflare saved - not logged in (playback may need login)"
+                )
+            }
+            // read the logged-in account key one last time, then save everything and close
+            try {
+                wv.evaluateJavascript(KEY_JS) { r -> saveKeyFrom(r); cleanup() }
+                main.postDelayed({ cleanup() }, 2500L) // in case the page never answers
+            } catch (_: Throwable) {
+                cleanup()
             }
         }
+        close.setOnClickListener { finish() }
+        // Back button / swipe: leaves the window (this is the ONLY way out besides Done)
+        dialog.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                finish(); true
+            } else false
+        }
+        dialog.setOnCancelListener { finish() }
+
         try {
+            dialog.setCancelable(true)
             dialog.show()
             dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             // the app package name in X-Requested-With gives a WebView away
             wv.loadUrl("$SITE/", mapOf("X-Requested-With" to ""))
-            main.postDelayed(poll, 2500L)
         } catch (_: Throwable) {
-            finish(false)
+            finish()
         }
+    }
+
+    private fun saveKeyFrom(jsResult: String?) {
+        val k = jsResult?.trim('"')?.trim() ?: return
+        if (k.startsWith("octv_") && k != accountKey) accountKey = k
     }
 }

@@ -3,6 +3,11 @@ package com.watchuu.octave
 import android.content.Context
 import android.content.SharedPreferences
 import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import android.webkit.WebSettings
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.withTimeoutOrNull
@@ -29,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v30"
+    const val BUILD = "v31"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -67,6 +72,11 @@ object OctaveApi {
         get() = str("manual_cookie")
         set(v) = put("manual_cookie", v)
 
+    /** a pasted user agent; cf_clearance only works with the exact UA it was issued to */
+    var customUa: String
+        get() = str("custom_ua")
+        set(v) { put("custom_ua", v); uaCache = null }
+
     /** snapshot of whatever the login window ended with */
     var savedCookies: String
         get() = str("saved_cookies")
@@ -84,6 +94,7 @@ object OctaveApi {
     }
 
     fun userAgent(): String {
+        customUa.takeIf { it.isNotBlank() }?.let { return it }
         uaCache?.let { return it }
         val base = runCatching {
             appContext?.let { WebSettings.getDefaultUserAgent(it) }
@@ -156,6 +167,59 @@ object OctaveApi {
      * are allowed to play without one, and a refusal with a key present is not the same as a refusal
      * without it. Cached until shortly before it expires.
      */
+    /**
+     * The token, fetched by NAVIGATING a WebView to the endpoint.
+     *
+     * The site's token endpoint refuses anything that is not the browser itself: a plain http call
+     * gets 403 before the Authorization header is even read (tested - it answers 403 with no key at
+     * all, so it is the client being refused, not the credential). Calling fetch() from inside the
+     * page fails too, because the api is a different origin and CORS blocks it - that was the
+     * "TypeError: Failed to fetch" in the old reports.
+     *
+     * A navigation is not subject to CORS. So the WebView is pointed straight at the endpoint with
+     * the Authorization header attached; the browser supplies its own cf_clearance and user agent,
+     * and the JSON answer is read back off the page.
+     */
+    private suspend fun tokenViaPage(key: String): String? = withContext(Dispatchers.Main) {
+        val ctx = appContext ?: return@withContext null
+        val done = CompletableDeferred<String?>()
+        val wv = WebView(ctx)
+        try {
+            wv.settings.javaScriptEnabled = true
+            wv.settings.domStorageEnabled = true
+            wv.settings.userAgentString = userAgent()
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    view?.evaluateJavascript("document.body.innerText") { raw ->
+                        val text = (raw ?: "")
+                            .removeSurrounding("\"")
+                            .replace("\\\"", "\"")
+                            .replace("\\n", " ")
+                        if (!done.isCompleted) done.complete(text)
+                    }
+                }
+            }
+            val headers = if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap()
+            wv.loadUrl("$API/api/playback-token", headers)
+            val body = withTimeoutOrNull(20_000L) { done.await() } ?: return@withContext null
+            lastReport = "token via page -> ${body.take(60)}"
+            runCatching {
+                val o = JSONObject(body)
+                val t = o.optString("token").ifBlank { return@withContext null }
+                token = t
+                tokenExp = System.currentTimeMillis() + o.optLong("expiresIn", 1800L) * 1000L
+                t
+            }.getOrNull()
+        } catch (e: Throwable) {
+            lastReport = "token via page threw ${e.message}"
+            null
+        } finally {
+            runCatching { wv.stopLoading(); wv.destroy() }
+        }
+    }
+
     suspend fun playbackToken(forceNew: Boolean = false): String? {
         val now = System.currentTimeMillis()
         token?.let { if (!forceNew && now < tokenExp - 60_000L) return it }
@@ -164,6 +228,9 @@ object OctaveApi {
             val extra = if (withKey && accountKey.isNotBlank()) mapOf("Authorization" to "Bearer ${accountKey}") else emptyMap()
             return fetch("$API/api/playback-token", extra)
         }
+
+        // the page is the only client the endpoint accepts; http is the fallback for other setups
+        tokenViaPage(accountKey)?.let { return it }
 
         var (code, text) = ask(true)
         if (code !in 200..299 && accountKey.isNotBlank()) {
@@ -183,32 +250,16 @@ object OctaveApi {
         }.getOrNull()
     }
 
-    /** checks a key against the endpoint that decides it; null means it works */
+    /**
+     * Checks a key the same way playback will: through the page. A 403 from a plain http call says
+     * nothing about the key - the endpoint refuses non-browser clients outright - so reporting that
+     * as "rejected" was wrong and is why a correct key looked broken.
+     */
     suspend fun validateKey(key: String): String? {
         if (key.isBlank()) return "no key"
-        return try {
-            val r = app.get(
-                "$API/api/playback-token",
-                headers = headers() + mapOf("Authorization" to "Bearer ${key.trim()}"),
-                timeout = 20L
-            )
-            when {
-                r.code in 200..299 -> {
-                    runCatching {
-                        val o = JSONObject(r.text)
-                        val t = o.optString("token")
-                        if (t.isNotBlank()) {
-                            token = t
-                            tokenExp = System.currentTimeMillis() + o.optLong("expiresIn", 1800L) * 1000L
-                        }
-                    }
-                    null
-                }
-                else -> "rejected (HTTP ${r.code})"
-            }
-        } catch (e: Throwable) {
-            e.message ?: "failed"
-        }
+        if (tokenViaPage(key.trim()) != null) return null
+        return if (!hasClearance()) "not checked - the site needs a Cloudflare cookie before it will answer"
+        else "refused by the site (check the key in the browser)"
     }
 
     /** a one-byte range request: answers "will this url serve" without downloading it */

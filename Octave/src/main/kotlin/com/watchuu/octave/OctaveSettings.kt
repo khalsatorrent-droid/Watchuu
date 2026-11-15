@@ -75,14 +75,18 @@ object OctaveSettings {
 
         val keyField = field("account key (octv_…)", OctaveApi.accountKey)
         val cookieField = field("cf_clearance cookie", OctaveApi.manualCookie)
+        val uaField = field("user agent (only if you pasted a cookie from a browser)", OctaveApi.customUa)
         root.addView(text("Account key", 15f))
         root.addView(keyField)
         root.addView(text("Cloudflare cookie", 15f))
         root.addView(cookieField)
+        root.addView(text("User agent", 15f))
+        root.addView(uaField)
 
         root.addView(button("Save") {
             OctaveApi.accountKey = keyField.text.toString()
             OctaveApi.manualCookie = cookieField.text.toString()
+            OctaveApi.customUa = uaField.text.toString()
             refresh()
             Toast.makeText(act, "Octave: saved", Toast.LENGTH_SHORT).show()
         })
@@ -116,6 +120,10 @@ object OctaveSettings {
             }
         })
 
+        root.addView(button("Fill the user agent with this device's") {
+            uaField.setText(OctaveApi.userAgent())
+            Toast.makeText(act, "Octave: filled - press Save", Toast.LENGTH_SHORT).show()
+        })
         root.addView(button("Copy this device's user agent") {
             val cm = act.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("Octave UA", OctaveApi.userAgent()))

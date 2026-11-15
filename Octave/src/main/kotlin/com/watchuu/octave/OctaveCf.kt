@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v24"
+    const val BUILD_TAG = "v25"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -283,6 +283,20 @@ object OctaveCf {
     suspend fun postJson(url: String, body: String, allowSolve: Boolean = false): OResp =
         request("POST", url, body, emptyMap(), allowSolve)
 
+    /**
+     * Fast check that an audio url will serve, without the hidden WebView.
+     *
+     * head() goes through the page, which is right for the solver but wrong for playback: it can take
+     * tens of seconds. A one-byte range request answers the same question in about a second.
+     * 200/206/416 all mean the url exists and is reachable.
+     */
+    suspend fun headFast(url: String): Int = try {
+        val r = app.get(url, headers = headers(false) + mapOf("Range" to "bytes=0-0"), timeout = 12L)
+        r.code
+    } catch (e: Throwable) {
+        -1
+    }
+
     /** Status of a HEAD request made from the page (is the song file ready?). -1 = could not tell. */
     suspend fun head(url: String): Int = try {
         OctaveBrowser.fetch("HEAD", url, null, emptyMap())?.code ?: -1
@@ -409,18 +423,20 @@ object OctaveCf {
         else "key $problem - log in again in the window that opened"
     }
 
-    suspend fun playbackToken(forceNew: Boolean = false): String? = tokenLock.withLock {
+    suspend fun playbackToken(forceNew: Boolean = false, allowRefresh: Boolean = false): String? = tokenLock.withLock {
         val now = System.currentTimeMillis()
         token?.let { if (!forceNew && now < tokenExp - 60_000L) return@withLock it }
 
         suspend fun ask(anonymous: Boolean = false): OResp {
             val key = accountKey
             // playback is the one place where opening the Cloudflare window makes sense
+            // never interactive here: playback is a tap, not a settings visit. A window that waits
+            // for a human made every play look like it had hung.
             return get(
                 "$API/api/playback-token",
                 true,
                 if (!anonymous && key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap(),
-                allowSolve = true
+                allowSolve = false
             )
         }
 
@@ -428,7 +444,7 @@ object OctaveCf {
 
         // A stale key answers exactly like Cloudflare. First try the key the logged-in page holds
         // right now, which is what the site's own player uses.
-        if (r.code in listOf(401, 403) && !r.challenge) {
+        if (r.code in listOf(401, 403) && !r.challenge && allowRefresh) {
             val fresh = refreshAccountKey()
             if (fresh != null) {
                 lastReport += " | token: key refreshed from the page"

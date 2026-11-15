@@ -371,110 +371,70 @@ class OctaveProvider : MainAPI() {
         val artist = param(data, "a") ?: ""
         val dur = param(data, "d") ?: "0"
 
-        // no cookie gate here: the hidden page decides, and asks the user only if Cloudflare really blocks
+        val previewFromCard = param(data, "p").orEmpty()
 
-        // Without a playback key the lossless file cannot be fetched, but every track object carries
-        // a 30-second preview that needs no key at all. Offering that beats returning nothing.
-        val preview = param(data, "p").orEmpty()
-
-        suspend fun emitPreview(reason: String): Boolean {
-            if (!preview.startsWith("http")) {
-                OctaveCf.toast("Octave: no link - $reason, and this track carries no preview")
-                return false
-            }
-            callback.invoke(
-                newExtractorLink(name, "$name preview (30s) - $reason", preview, ExtractorLinkType.VIDEO) {
-                    this.quality = 128
-                }
-            )
-            OctaveCf.toast("Octave: preview only - $reason")
-            return true
-        }
-
-        suspend fun emitDirect(u: String, label: String): Boolean {
-            if (!u.startsWith("http")) return false
-            callback.invoke(
-                newExtractorLink(name, "$name $label", u, ExtractorLinkType.VIDEO) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = OctaveCf.playerHeaders()
-                }
-            )
-            return true
-        }
-
-        // 1. What the site's own player does first: ask the api to resolve the track.
-        //    GET /api/track/{id}?quality=lossless -> {url, preview, gated}
-        //
-        //    Every track comes back gated:true, so the url alone is not enough - but it IS a real
-        //    url, and with a valid clearance cookie the server serves it. It is tried either way;
-        //    "gated" only means a token may be needed, not that the url is useless.
+        // ---- 1. what the api says about this track, one call, short timeout -------------------
+        // GET /api/track/{id}?quality=lossless -> {url, preview, gated}
+        // It answers without a cookie, and the preview it returns is freshly signed, so this is the
+        // one thing that can always be turned into a playable link.
         val resolved = runCatching {
             val r = OctaveCf.get("$api/api/track/$id?quality=lossless")
             if (r.code in 200..299) JSONObject(r.text) else null
         }.getOrNull()
+        val previewUrl = resolved?.optString("preview").orEmpty().ifBlank { previewFromCard }
         val directUrl = resolved?.optString("url").orEmpty()
-        val freshPreview = resolved?.optString("preview").orEmpty()
         val gated = resolved?.optBoolean("gated", false) == true
 
-        // the preview from this answer is freshly signed - prefer it over the one carried in the card
-        val previewUrl = freshPreview.ifBlank { preview }
-
-        suspend fun emitPreviewLink(reason: String): Boolean {
-            if (!previewUrl.startsWith("http")) return emitPreview(reason)
-            OctaveCf.toast("Octave: $reason - playing the 30s preview")
+        suspend fun emitPreview(reason: String): Boolean {
+            if (!previewUrl.startsWith("http")) {
+                OctaveCf.toast("Octave: no link - $reason, and no preview for this track")
+                return false
+            }
             callback.invoke(
                 newExtractorLink(name, "$name preview (30s) - $reason", previewUrl, ExtractorLinkType.VIDEO) {
                     this.quality = 128
+                    this.referer = "$mainUrl/"
                 }
             )
             return true
         }
 
-        if (directUrl.startsWith("http")) {
-            val code = OctaveCf.head(directUrl)
-            if (code in 200..299 || code == -1) {
-                if (emitDirect(directUrl, "FLAC (lossless)")) return true
+        // ---- 2. the playback key, with a hard budget and no window ----------------------------
+        // The key is what unlocks lossless: /audio/lossless answers 403 without k, and k comes from
+        // /api/playback-token, which needs a valid account key. It is tried quickly and given up on
+        // quickly - a tap must never wait on anything.
+        val key = withTimeoutOrNull(8_000L) {
+            runCatching { OctaveCf.playbackToken() }.getOrNull()
+        }
+
+        if (key != null) {
+            // the api's own url, or the same endpoint built by hand - both need k
+            val urls = listOfNotNull(
+                directUrl.takeIf { it.startsWith("http") },
+                "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0",
+            ).map { if (it.contains("k=")) it else "$it${if (it.contains("?")) "&" else "?"}k=$key" }
+
+            for (u in urls.distinct()) {
+                val code = OctaveCf.headFast(u)
+                if (code in 200..299 || code == 416 || code == -1) {
+                    callback.invoke(
+                        newExtractorLink(name, "$name FLAC (lossless)", u, ExtractorLinkType.VIDEO) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                            this.headers = OctaveCf.playerHeaders()
+                        }
+                    )
+                    return true
+                }
             }
+            // key present but refused - say so, then still offer the preview
+            return emitPreview("lossless refused (HTTP 403)")
         }
 
-        // 2. The audio endpoint, without a key first: /audio/lossless?track=… is what the page
-        //    builds when no token exists, and the server serves it when the track is not gated.
-        val bareUrl = "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
-        if (!gated && OctaveCf.head(bareUrl) in 200..299) {
-            if (emitDirect(bareUrl, "FLAC (lossless)")) return true
-        }
-
-        // 3. Only now the playback token, which is what kept failing.
-        val keyResult = runCatching { OctaveCf.playbackToken() }
-        var key = keyResult.getOrNull() ?: return emitPreviewLink(
-            "no playback key (${keyResult.exceptionOrNull()?.message ?: "HTTP 403"})"
+        // ---- 3. no key: the preview, which needs no account at all ---------------------------
+        return emitPreview(
+            if (gated) "account key needed for FLAC" else "no playback key"
         )
-        fun streamUrl(k: String) = "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0&k=$k"
-
-        var url = streamUrl(key)
-        for (i in 0 until 4) {
-            val code = OctaveCf.head(url)
-            if (code in 200..299 || code == -1) break
-            if (code == 401 || code == 403) {
-                key = OctaveCf.playbackToken(forceNew = true) ?: break
-                url = streamUrl(key)
-            }
-            kotlinx.coroutines.delay(1500L)
-        }
-
-        val lastCode = OctaveCf.head(url)
-        if (lastCode == 401 || lastCode == 403) {
-            return emitPreviewLink("lossless refused (HTTP $lastCode)")
-        }
-
-        callback.invoke(
-            newExtractorLink(name, "$name FLAC (lossless)", url, ExtractorLinkType.VIDEO) {
-                this.referer = "$mainUrl/"
-                this.quality = Qualities.Unknown.value
-                this.headers = OctaveCf.playerHeaders()
-            }
-        )
-        return true
     }
+
 }

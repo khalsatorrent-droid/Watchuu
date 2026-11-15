@@ -2,6 +2,7 @@ package com.watchuu.octave
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
@@ -41,6 +42,16 @@ object OctaveBrowser {
     @Volatile private var webView: WebView? = null
     @Volatile private var lastUse = 0L
     private val pending = ConcurrentHashMap<String, CompletableDeferred<OResp>>()
+
+    // Cloudflare "warm-up" state. A fresh hidden page is challenged on its FIRST api call (403) and the
+    // site's own script clears it ~1-2 s later - exactly what the site's player does. Until that has
+    // happened nothing may fire, otherwise every home-page row fails (and reloads the page) at once.
+    private val warmLock = Mutex()
+    @Volatile private var apiReady = false
+    @Volatile private var readyAt = 0L
+    @Volatile private var brokenAt = 0L  // last time warm-up/recovery gave up (needs the user's manual check)
+    @Volatile private var epoch = 0      // bumped on every page reload
+    @Volatile private var pageLoads = 0  // bumped by onPageStarted
 
     /** Audio links the page itself requested (url -> seen), for debugging and as a fallback source. */
     val seenAudio = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -83,6 +94,10 @@ object OctaveBrowser {
         wv.addJavascriptInterface(Bridge(), "octBridge")
         wv.webChromeClient = WebChromeClient()
         wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                pageLoads++
+            }
+
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val u = request?.url?.toString() ?: return null
                 val path = u.substringBefore("?").lowercase()
@@ -156,6 +171,7 @@ object OctaveBrowser {
             withContext(Dispatchers.Main) {
                 val wv = create(ctx)
                 webView = wv
+                apiReady = false
                 wv.loadUrl("${OctaveCf.SITE}/", mapOf("X-Requested-With" to ""))
             }
             scheduleIdleClose()
@@ -177,19 +193,20 @@ object OctaveBrowser {
     private fun failed(r: OResp?) = r == null || r.challenge || r.code == -1
 
     /** One fetch() from inside the page. */
-    private suspend fun attempt(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
+    private suspend fun attempt(method: String, url: String, body: String?, headers: Map<String, String>, timeoutMs: Long = 35_000L): OResp? {
         val id = UUID.randomUUID().toString()
         val d = CompletableDeferred<OResp>()
         pending[id] = d
         val allowed = headers.filterKeys { it.equals("Authorization", true) || it.equals("Content-Type", true) || it.equals("Accept", true) }
-        val js = "try{window.__octFetch(" + JSONObject.quote(id) + "," + JSONObject.quote(method) + "," +
+        // FETCH_JS is idempotent: re-injecting it makes a call survive a page reload that wiped it
+        val js = FETCH_JS + "try{window.__octFetch(" + JSONObject.quote(id) + "," + JSONObject.quote(method) + "," +
             JSONObject.quote(url) + "," + (if (body != null) JSONObject.quote(body) else "null") + "," +
             JSONObject(allowed).toString() + ");}catch(e){}"
         withContext(Dispatchers.Main) {
             try { webView?.evaluateJavascript(js, null) } catch (_: Throwable) {}
         }
         lastUse = System.currentTimeMillis()
-        val r = withTimeoutOrNull(35_000L) { d.await() }
+        val r = withTimeoutOrNull(timeoutMs) { d.await() }
         pending.remove(id)
         lastInfo = if (r == null) "page fetch timed out: $method ${url.substringBefore("?").takeLast(60)}"
         else "page fetch $method ${url.substringBefore("?").takeLast(60)} -> HTTP ${r.code}" +
@@ -197,40 +214,89 @@ object OctaveBrowser {
         return r
     }
 
-    /** Waits (up to [ms]) for Cloudflare's own script in the hidden page to earn the cf_clearance cookie. */
-    private suspend fun waitClearance(ms: Long): Boolean {
+    /** A probe counts as "not through yet" on a 403/429/503 too: the first call is refused before the page's script clears it. */
+    private fun notThrough(r: OResp?) = failed(r) || r!!.code in listOf(403, 429, 503)
+
+    /**
+     * Polls a cheap public endpoint from inside the page until Cloudflare lets it through. This is a
+     * real wait (a request every ~1.2 s), unlike checking for the cf_clearance cookie - that cookie
+     * is already there from the site itself while the api host is still being challenged.
+     */
+    private suspend fun probeUntilReady(ms: Long): Boolean {
         val end = System.currentTimeMillis() + ms
-        while (System.currentTimeMillis() < end) {
-            if (OctaveCf.hasClearance()) return true
-            delay(500L)
+        while (true) {
+            val r = attempt("GET", "${OctaveCf.API}/api/search/trending", null, mapOf("Accept" to "application/json"), 12_000L)
+            if (!notThrough(r)) {
+                apiReady = true
+                brokenAt = 0L
+                readyAt = System.currentTimeMillis()
+                return true
+            }
+            if (System.currentTimeMillis() + 1_200L >= end) return false
+            delay(1_200L)
         }
-        return OctaveCf.hasClearance()
+    }
+
+    /** First fetch on a fresh page waits here (one prober, everyone else queues behind it). */
+    private suspend fun warmUp(): Boolean {
+        if (apiReady) return true
+        if (isBroken()) return false
+        return warmLock.withLock {
+            if (apiReady) true
+            else if (isBroken()) false
+            else probeUntilReady(20_000L).also { if (!it) brokenAt = System.currentTimeMillis() }
+        }
+    }
+
+    /** Warm-up/recovery failed in the last 30 s: do not make every queued row repeat the long wait. */
+    private fun isBroken() = brokenAt != 0L && System.currentTimeMillis() - brokenAt < 30_000L
+
+    private suspend fun reloadPage() {
+        val before = pageLoads
+        withContext(Dispatchers.Main) { try { webView?.reload() } catch (_: Throwable) {} }
+        val end = System.currentTimeMillis() + 6_000L
+        while (pageLoads == before && System.currentTimeMillis() < end) delay(200L)
     }
 
     /**
-     * fetch() from inside the page. The first call to the API can be answered with a Cloudflare
-     * challenge that the page's own script then solves silently (the site's player does exactly
-     * this: one 403, then it works) - so on failure wait for the cookie, retry, and finally reload
-     * the page once. Returns null when it still fails (the caller then asks the user).
+     * A request failed even though the page was warm. Exactly ONE caller repairs the page; the rest
+     * queue behind it and simply retry. First just wait for Cloudflare's script (soft), and only if
+     * that does not help reload the page once (hard). A reload wipes the other in-flight fetches, so
+     * those are released at once instead of waiting out their timeout.
+     */
+    private suspend fun recover(seen: Int) = warmLock.withLock {
+        if (epoch != seen) return@withLock // somebody already reloaded since this request started
+        if (apiReady && System.currentTimeMillis() - readyAt < 5_000L) return@withLock // just repaired
+        if (isBroken()) return@withLock // already tried, gave up
+        apiReady = false
+        if (probeUntilReady(12_000L)) return@withLock
+        epoch++
+        val dead = pending.values.toList()
+        pending.clear()
+        dead.forEach { it.complete(OResp(-1, "page reloaded", false)) }
+        reloadPage()
+        if (!(ensure(25_000L) && probeUntilReady(20_000L))) brokenAt = System.currentTimeMillis()
+    }
+
+    /**
+     * fetch() from inside the page. Waits for the one-time Cloudflare clearance first, then makes the
+     * call; on failure one caller repairs the page (see [recover]) and the call is retried, at most
+     * twice. Returns the last answer (or null) when it still fails - the caller then asks the user.
      */
     suspend fun fetch(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
         if (appContext == null) return null
         if (!ensure()) return null
-        var r = attempt(method, url, body, headers)
-        if (!failed(r)) return r
-
-        waitClearance(15_000L)
-        r = attempt(method, url, body, headers)
-        if (!failed(r)) return r
-
-        // reload once: the page restarts its Cloudflare script with the cookies it has now
-        withContext(Dispatchers.Main) { try { webView?.reload() } catch (_: Throwable) {} }
-        delay(1500L)
-        if (ensure(25_000L)) {
-            waitClearance(10_000L)
+        warmUp()
+        var r: OResp? = null
+        for (round in 0 until 3) {
+            val seen = epoch
             r = attempt(method, url, body, headers)
+            if (!failed(r)) return r
+            if (round == 2) break
+            recover(seen)
+            if (isBroken() || !ensure()) return r // still blocked: let the caller fall back / ask the user
         }
-        return if (failed(r)) r else r
+        return r
     }
 
     /** Cookie NAMES the browser holds per host (never the values) - for the report. */
@@ -257,6 +323,8 @@ object OctaveBrowser {
         } catch (_: Throwable) {
         }
         webView = null
+        apiReady = false
+        brokenAt = 0L
     }
 
     private fun scheduleIdleClose() {

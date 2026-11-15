@@ -152,10 +152,8 @@ class OctaveProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
 
-        // A row that throws takes the whole home page down with it, which is exactly what happened
-        // when /api/apple/charts started answering 403: the "Top Songs (Apple Music)" row threw
-        // ErrorLoadingException and nothing rendered. Every row is now isolated, so a dead endpoint
-        // costs that one row and nothing else.
+        // Every row is isolated, so one dead endpoint costs that row and not the whole home page.
+        // But a row that fails is NOT silently fine: if every row is empty the user needs a hint why.
         val items = runCatching {
             when {
                 request.data == "chart" ->
@@ -167,6 +165,7 @@ class OctaveProvider : MainAPI() {
             }
         }.getOrElse { e ->
             android.util.Log.w("Octave", "row '${request.name}' failed: ${e.message}")
+            OctaveCf.toastOnce("Octave: '${request.name}' did not load (${e.message?.take(70)}) - Settings -> Show last report")
             emptyList()
         }
         return newHomePageResponse(HomePageList(request.name, items), false)
@@ -174,9 +173,9 @@ class OctaveProvider : MainAPI() {
 
     /** Apple's chart has no Deezer ids - the site's own resolver matches the songs. */
     private suspend fun appleChart(): List<SearchResponse> {
-        // /api/apple/charts answers 403 as of the site's latest update, so this row falls back to a
-        // plain search for current hits rather than failing. If the endpoint comes back, the chart
-        // is used again.
+        // If the chart is unavailable for any reason, fall back to a plain search for current hits so the
+        // row still has content. (The 403 seen on the first call from a fresh page is Cloudflare's
+        // one-time challenge, handled in OctaveBrowser - it is not specific to this endpoint.)
         val songs = runCatching {
             getJson("/api/apple/charts?sf=us&types=songs").optJSONObject("results")
                 ?.optJSONArray("songs").objects().take(25)

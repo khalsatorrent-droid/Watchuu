@@ -325,6 +325,16 @@ object OctaveCf {
         }
     }
 
+    @Volatile private var lastToastAt = 0L
+
+    /** Like [toast] but at most once every 2 minutes - for failures that repeat on every row. */
+    fun toastOnce(msg: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastToastAt < 120_000L) return
+        lastToastAt = now
+        toast(msg)
+    }
+
     fun clearCookies() {
         try {
             val cm = CookieManager.getInstance()

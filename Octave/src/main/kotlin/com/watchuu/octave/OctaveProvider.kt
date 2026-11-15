@@ -96,7 +96,10 @@ class OctaveProvider : MainAPI() {
         val artist = artistName(o)
         val dur = o.optInt("duration", 0)
         val al = o.optJSONObject("album")?.str("id")
-        return "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" + (al?.let { "&al=$it" } ?: "")
+        val prev = o.str("previewUrl") ?: ""
+        return "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" +
+            (al?.let { "&al=$it" } ?: "") +
+            (if (prev.isNotBlank()) "&p=${enc(prev)}" else "")
     }
 
     private fun param(url: String, key: String): String? =
@@ -370,7 +373,20 @@ class OctaveProvider : MainAPI() {
 
         // no cookie gate here: the hidden page decides, and asks the user only if Cloudflare really blocks
 
+        // Without a playback key the lossless file cannot be fetched, but every track object carries
+        // a 30-second preview that needs no key at all. Offering that beats returning nothing, and
+        // the label says why it is short.
         var key = OctaveCf.playbackToken() ?: run {
+            val preview = param(data, "p") ?: ""
+            if (preview.startsWith("http")) {
+                callback.invoke(
+                    newExtractorLink(name, "$name preview (30s) - Cloudflare check + login for FLAC", preview, ExtractorLinkType.VIDEO) {
+                        this.quality = 128
+                    }
+                )
+                OctaveCf.toast("Octave: preview only - Extensions -> Octave -> settings -> Cloudflare check + login")
+                return true
+            }
             OctaveCf.toast("Octave: no playback key - Settings -> Show last report")
             return false
         }

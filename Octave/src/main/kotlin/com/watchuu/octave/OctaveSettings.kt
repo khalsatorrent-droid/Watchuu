@@ -69,7 +69,10 @@ object OctaveSettings {
                 val msg = try {
                     val r = OctaveCf.get("${OctaveCf.API}/api/lastfm/global-chart-tracks?limit=1")
                     val t = OctaveCf.playbackToken(true)
-                    "API: HTTP ${r.code}, playback key: ${if (t != null) "OK" else "failed"} - see Show last report"
+                    val browse = if (r.code in 200..299) "browsing OK" else "browsing HTTP ${r.code}"
+                    val play = if (t != null) "lossless OK"
+                    else "lossless needs the Cloudflare check (previews still play)"
+                    "$browse, $play"
                 } catch (e: Throwable) {
                     "Test failed: ${e.message}"
                 }

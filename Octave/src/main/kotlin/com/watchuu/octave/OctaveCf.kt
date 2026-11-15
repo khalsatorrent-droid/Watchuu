@@ -286,9 +286,22 @@ object OctaveCf {
     /** Plain-language trace of the last request (browser step + http step). */
     @Volatile var lastReport: String = "no request yet"
 
-    fun report(): String = "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
-        "cf_clearance: ${if (hasClearance()) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
-        "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\nCookies seen: ${OctaveBrowser.cookieNames()}"
+    fun report(): String {
+        val clearance = hasClearance() || savedCookies.contains("cf_clearance") || manualCookie.contains("cf_clearance")
+        val advice = when {
+            clearance -> "Cloudflare cookie present - search, albums and lossless playback should work."
+            accountKey.isNotBlank() ->
+                "No Cloudflare cookie. Browsing the home page still works (its rows do not need one), but " +
+                    "search, albums and lossless playback answer 403 until you run \"Cloudflare check + login\". " +
+                    "Until then playback gives the 30-second preview."
+            else ->
+                "No Cloudflare cookie and no account key. Run \"Cloudflare check + login\" once: it saves both."
+        }
+        return "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
+            "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
+            "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\n" +
+            "Cookies seen: ${OctaveBrowser.cookieNames()}\n\n$advice"
+    }
 
     private suspend fun retryAfterSolve(block: suspend () -> OResp): OResp? {
         // just solved/logged in and still blocked: opening the window again will not help

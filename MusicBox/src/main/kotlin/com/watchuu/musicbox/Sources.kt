@@ -205,10 +205,11 @@ object DeezerApi {
     /**
      * Resolve direct audio streams for a Deezer track ID using CharlesPikachu/musicdl (`deezer.py`).
      */
-    suspend fun resolveStreams(trackId: String): List<ResolvedStream> {
-        val out = mutableListOf<ResolvedStream>()
-        if (trackId.isBlank()) return out
+    suspend fun resolveStreams(trackId: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+        val m = MirrorRun<ResolvedStream>(onFound)
+        if (trackId.isBlank()) return m.run()
 
+        m.stage("deezer_anand") {
         // 1. AnandServer FLAC API (`_parsewithanandserverapi` in `deezer.py`)
         val anandHeaders = mapOf(
             "X-API-Key" to ANAND_API_KEY,
@@ -222,7 +223,7 @@ object DeezerApi {
             runCatching {
                 val resp = app.head(candidateUrl, headers = anandHeaders, timeout = 8L)
                 if (resp.code in 200..299) {
-                    out.add(
+                    m.add(
                         ResolvedStream(
                             url = candidateUrl,
                             name = "Deezer · AnandServer FLAC",
@@ -232,9 +233,11 @@ object DeezerApi {
                     )
                 }
             }
-            if (out.isNotEmpty()) break
+            if (m.found().any { it.name.contains("Anand") }) break
         }
 
+        }
+        m.stage("deezer_deemixer") {
         // 2. Deemixer API (`_parsewithdeemixerapi` in `deezer.py`)
         runCatching {
             val dmHeaders = mapOf(
@@ -260,7 +263,7 @@ object DeezerApi {
                     if (rawDl.isNotBlank()) {
                         val fullUrl = if (rawDl.startsWith("http")) rawDl
                         else "https://deemixer.com/" + rawDl.trimStart('/')
-                        out.add(
+                        m.add(
                             ResolvedStream(
                                 url = fullUrl,
                                 name = "Deezer · Deemixer $bitrate",
@@ -275,6 +278,8 @@ object DeezerApi {
             }
         }
 
+        }
+        m.stage("deezer_musicfab") {
         // 3. MusicFab Deezer API (`_parsewithmusicfabapi` in `deezer.py`)
         runCatching {
             val mfHeaders = mapOf(
@@ -296,7 +301,7 @@ object DeezerApi {
                 ?.optJSONObject("metadata")
                 ?.optString("download", "") ?: ""
             if (dlUrl.startsWith("http")) {
-                out.add(
+                m.add(
                     ResolvedStream(
                         url = dlUrl,
                         name = "Deezer · MusicFab 320kbps",
@@ -308,6 +313,8 @@ object DeezerApi {
             }
         }
 
+        }
+        m.stage("deezer_deezdl") {
         // 4. DeezDownloaders API (`_parsewithdeezdownloadersapi` in `deezer.py`)
         runCatching {
             val ddHeaders = mapOf(
@@ -339,7 +346,7 @@ object DeezerApi {
                 )
                 val dlink = JSONObject(dlResp.text).optString("dlink", "")
                 if (dlink.startsWith("http")) {
-                    out.add(
+                    m.add(
                         ResolvedStream(
                             url = dlink,
                             name = "Deezer · DeezDownloaders",
@@ -352,8 +359,10 @@ object DeezerApi {
             }
         }
 
+        }
+        m.stage("deezer_antra") {
         // 5. Antra Hoshi Lossless API (`_parsewithantrahoshiapi` in `deezer.py`)
-        if (out.isEmpty()) {
+        if (true) {
             runCatching {
                 val (encUser, encPass) = ANTRA_ACCOUNTS.random()
                 val username = decodeAntraCred(encUser)
@@ -411,7 +420,7 @@ object DeezerApi {
                             )
                             val st = JSONObject(stResp.text).optString("status", "")
                             if (st == "complete") {
-                                out.add(
+                                m.add(
                                     ResolvedStream(
                                         url = "https://antra.hoshi.cfd/api/jobs/$jobId/download",
                                         name = "Deezer · Antra Lossless FLAC",
@@ -429,7 +438,8 @@ object DeezerApi {
             }
         }
 
-        return out
+        }
+        return m.run()
     }
 
     private fun parseTrack(obj: JSONObject?): MusicTrack? {
@@ -885,8 +895,8 @@ object TidalApi {
     /**
      * Resolve lossless FLAC streams via Monochrome (`tracks.monochrome.st`) and GDStudio (`tidal`).
      */
-    suspend fun resolveStreams(tidalId: String, query: String): List<ResolvedStream> {
-        val out = mutableListOf<ResolvedStream>()
+    suspend fun resolveStreams(tidalId: String, query: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+        val m = MirrorRun<ResolvedStream>(onFound)
 
         // 1. Direct Monochrome lossless FLAC stream
         val candidateId = if (tidalId.isNotBlank() && tidalId.all { it.isDigit() }) {
@@ -898,7 +908,7 @@ object TidalApi {
         }
 
         if (candidateId.isNotBlank() && candidateId.all { it.isDigit() }) {
-            out.add(
+            m.add(
                 ResolvedStream(
                     url = "$MONOCHROME_API/track/$candidateId",
                     name = "Tidal · Monochrome FLAC (Lossless)",
@@ -909,13 +919,15 @@ object TidalApi {
             )
         }
 
+        m.stage("tidal_gdstudio") {
         // 2. GDStudio Tidal resolver (from CharlesPikachu/musicdl `gdstudio.py`)
         runCatching {
             val gdStream = GDStudioApi.resolveBestStream(query, "tidal")
-            if (gdStream != null) out.add(gdStream)
+            if (gdStream != null) m.add(gdStream)
         }
 
-        return out
+        }
+        return m.run()
     }
 
     private fun extractMonochromeArtists(o: JSONObject): String {
@@ -1050,13 +1062,14 @@ object QobuzApi {
      *  3. `GDStudioApi` (`_parsewithgdstudioxyzapi` / `_parsewithgdstudioorgapi`)
      *  4. `clashflac.kanjijewels.com` (`_parsewithclashflacapi`)
      */
-    suspend fun resolveStreams(qobuzId: String, query: String): List<ResolvedStream> {
-        val out = mutableListOf<ResolvedStream>()
+    suspend fun resolveStreams(qobuzId: String, query: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+        val m = MirrorRun<ResolvedStream>(onFound)
         val targetId = qobuzId.ifBlank {
             runCatching { search(query, 1).firstOrNull()?.sourceId ?: "" }.getOrDefault("")
         }
 
         if (targetId.isNotBlank()) {
+        m.stage("qobuz_anand") {
             // 1. AnandServer Qobuz Hi-Res FLAC (`_parsewithanandserverapi` in `qobuz.py`)
             val anandHeaders = mapOf(
                 "User-Agent" to DEFAULT_UA,
@@ -1073,7 +1086,7 @@ object QobuzApi {
                 runCatching {
                     val head = app.head(url, headers = anandHeaders, timeout = 8L)
                     if (head.code in 200..299) {
-                        out.add(
+                        m.add(
                             ResolvedStream(
                                 url = url,
                                 name = "Qobuz · AnandServer FLAC",
@@ -1084,9 +1097,11 @@ object QobuzApi {
                         )
                     }
                 }
-                if (out.isNotEmpty()) break
+                if (m.found().any { it.name.contains("Anand") }) break
             }
 
+        }
+        m.stage("qobuz_dezalty") {
             // 2. DezAlty Qobuz Guest Stream (`_parsewithdezaltyapi` in `qobuz.py`)
             runCatching {
                 val dzHeaders = mapOf(
@@ -1112,7 +1127,7 @@ object QobuzApi {
                     val dataObj = respJson.optJSONObject("data") ?: respJson
                     val dlUrl = dataObj.optString("url", "")
                     if (dlUrl.startsWith("http")) {
-                        out.add(
+                        m.add(
                             ResolvedStream(
                                 url = dlUrl,
                                 name = "Qobuz · DezAlty Stream",
@@ -1125,11 +1140,13 @@ object QobuzApi {
                 }
             }
 
+        }
+        m.stage("qobuz_gdstudio") {
             // 3. GDStudio Qobuz URL resolver (`_parsewithgdstudioxyzapi` & `_parsewithgdstudioorgapi` in `qobuz.py`)
             runCatching {
                 val gdUrl = GDStudioApi.getSongUrl(targetId, "qobuz", 999)
                 if (gdUrl.isNotBlank()) {
-                    out.add(
+                    m.add(
                         ResolvedStream(
                             url = gdUrl,
                             name = "Qobuz · GDStudio Lossless",
@@ -1141,14 +1158,17 @@ object QobuzApi {
             }
         }
 
+        }
+        m.stage("qobuz_gdsearch") {
         // 4. Fallback via GDStudio Qobuz search if targetId wasn't found directly
-        if (out.isEmpty() && query.isNotBlank()) {
+        if (query.isNotBlank()) {
             runCatching {
-                GDStudioApi.resolveBestStream(query, "qobuz")?.let { out.add(it) }
+                GDStudioApi.resolveBestStream(query, "qobuz")?.let { m.add(it) }
             }
         }
 
-        return out
+        }
+        return m.run()
     }
 
     private fun parseTrack(obj: JSONObject?): MusicTrack? {
@@ -1985,10 +2005,11 @@ object YouTubeMusicApi {
         return null
     }
 
-    suspend fun resolveStreams(videoId: String, titleHint: String = "track"): List<ResolvedStream> {
-        val out = mutableListOf<ResolvedStream>()
-        if (videoId.isBlank()) return out
+    suspend fun resolveStreams(videoId: String, titleHint: String = "track", onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+        val m = MirrorRun<ResolvedStream>(onFound)
+        if (videoId.isBlank()) return m.run()
 
+        m.stage("yt_y2mate") {
         // 1. Y2Mate / cnv.cx (`_parsewithy2mateapi` in `youtube.py`)
         runCatching {
             val y2Headers = mapOf(
@@ -2016,7 +2037,7 @@ object YouTubeMusicApi {
                 )
                 val dlUrl = JSONObject(convResp.text).optString("url", "").replace("/tunnel?", "/tunnel/?")
                 if (dlUrl.startsWith("http")) {
-                    out.add(
+                    m.add(
                         ResolvedStream(
                             url = dlUrl,
                             name = "YouTube · Y2Mate 320kbps",
@@ -2029,6 +2050,8 @@ object YouTubeMusicApi {
             }
         }
 
+        }
+        m.stage("yt_cnvmp3") {
         // 2. CnvMP3 (`_parsewithcnvmp3api` in `youtube.py`)
         runCatching {
             val cnvHeaders = mapOf(
@@ -2053,7 +2076,7 @@ object YouTubeMusicApi {
             } else ""
 
             if (cachedUrl.startsWith("http")) {
-                out.add(
+                m.add(
                     ResolvedStream(
                         url = cachedUrl,
                         name = "YouTube · CnvMP3 320kbps",
@@ -2077,7 +2100,7 @@ object YouTubeMusicApi {
                 val convJson = JSONObject(convResp.text)
                 val dlLink = convJson.optString("download_link", "")
                 if (convJson.optBoolean("success", false) && dlLink.startsWith("http")) {
-                    out.add(
+                    m.add(
                         ResolvedStream(
                             url = dlLink,
                             name = "YouTube · CnvMP3 320kbps",
@@ -2090,8 +2113,10 @@ object YouTubeMusicApi {
             }
         }
 
+        }
+        m.stage("yt_mediaytmp3") {
         // 3. MediaYTMP3 / Convert1s (`_parsewithmediaytmp3api` in `youtube.py`)
-        if (out.isEmpty()) {
+        if (true) {
             runCatching {
                 val baseHeaders = mapOf(
                     "User-Agent" to DEFAULT_UA,
@@ -2126,7 +2151,7 @@ object YouTubeMusicApi {
                         val st = stJson.optString("status", "")
                         val dlUrl = stJson.optString("downloadUrl", "")
                         if (st == "completed" && dlUrl.startsWith("http")) {
-                            out.add(
+                            m.add(
                                 ResolvedStream(
                                     url = dlUrl,
                                     name = "YouTube · YTMP3 320kbps",
@@ -2143,11 +2168,13 @@ object YouTubeMusicApi {
             }
         }
 
+        }
+        m.stage("yt_mp3juice") {
         // 4. MP3Juice / ThetaCloud fallback (`mp3juice.py`)
-        if (out.isEmpty()) {
+        if (true) {
             val mp3JuiceUrl = MP3JuiceApi.resolveYouTubeStream(videoId)
             if (mp3JuiceUrl.startsWith("http")) {
-                out.add(
+                m.add(
                     ResolvedStream(
                         url = mp3JuiceUrl,
                         name = "YouTube · MP3Juice",
@@ -2159,7 +2186,8 @@ object YouTubeMusicApi {
             }
         }
 
-        return out
+        }
+        return m.run()
     }
 }
 

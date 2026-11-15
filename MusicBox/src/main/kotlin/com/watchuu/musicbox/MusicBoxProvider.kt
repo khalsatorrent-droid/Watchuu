@@ -1035,28 +1035,31 @@ class MusicBoxProvider : MainAPI() {
             runCatching { TidalApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
         }
 
-        // 1. Monochrome / GDStudio Tidal lossless FLAC streams
-        try {
-            val streams = TidalApi.resolveStreams(resolvedTidalId, query)
-            for (s in streams) {
-                callback.invoke(
-                    newExtractorLink(
-                        "MusicBox",
-                        s.name,
-                        s.url,
-                        if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    ) {
-                        this.quality = s.quality
-                        this.referer = s.referer
-                        this.headers = s.headers
-                    }
-                )
-                added = true
+        coroutineScope {
+            val mirrors = async<Unit> {
+            try {
+                TidalApi.resolveStreams(resolvedTidalId, query) { s ->
+                    callback.invoke(
+                        newExtractorLink(
+                            "MusicBox",
+                            s.name,
+                            s.url,
+                            if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                        ) {
+                            this.quality = s.quality
+                            this.referer = s.referer
+                            this.headers = s.headers
+                        }
+                    )
+                    added = true
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MusicBoxLog.d(TAG, "Tidal Monochrome/GDStudio failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            MusicBoxLog.d(TAG, "Tidal Monochrome/GDStudio failed: ${e.message}")
-        }
-
+            }
+            val zarz = async<Unit> {
         // 2. Optional ZARZ Tidal resolver if session is active
         if (zarzTidal.record.isUsable() && !upstreamDown("tidal-zarz")) {
             try {
@@ -1083,7 +1086,11 @@ class MusicBoxProvider : MainAPI() {
                         if (lastError.contains("503") || lastError.contains("PROVIDER_UNAVAILABLE")) {
                             markUpstreamDown("tidal-zarz", 300)
                         }
-                        return added
+                            }
+            awaitAll(mirrors, zarz)
+        }
+
+        return@async
                     }
                     saveSession()
                     // TIDAL answers a base64 dash manifest, not a link. Decode it and take the
@@ -1133,23 +1140,27 @@ class MusicBoxProvider : MainAPI() {
         }
         if (trackId.isBlank()) return false
 
-        // 1. CharlesPikachu/musicdl Deezer resolvers (AnandServer, Deemixer, MusicFab, DeezDownloaders, Antra)
-        try {
-            val streams = DeezerApi.resolveStreams(trackId)
-            for (s in streams) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
-                        this.quality = s.quality
-                        this.referer = s.referer
-                        this.headers = s.headers
+        // mirrors and the ZARZ resolver run side by side; links are emitted as each one lands
+        coroutineScope {
+            val mirrors = async<Unit> {
+                try {
+                    DeezerApi.resolveStreams(trackId) { s ->
+                        callback.invoke(
+                            newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
+                                this.quality = s.quality
+                                this.referer = s.referer
+                                this.headers = s.headers
+                            }
+                        )
+                        added = true
                     }
-                )
-                added = true
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    MusicBoxLog.d(TAG, "Deezer mirrors failed: ${e.message}")
+                }
             }
-        } catch (e: Exception) {
-            MusicBoxLog.d(TAG, "Deezer musicdl resolvers failed: ${e.message}")
-        }
-
+            val zarz = async<Unit> {
         // 2. ZARZ Deezer resolver
         if (zarzDeezer.record.isUsable()) {
             val deezerTarget = trackId.ifBlank {
@@ -1211,6 +1222,10 @@ class MusicBoxProvider : MainAPI() {
             }
         }
 
+            }
+            awaitAll(mirrors, zarz)
+        }
+
         return added
     }
 
@@ -1237,22 +1252,27 @@ class MusicBoxProvider : MainAPI() {
                 .getOrNull().orEmpty()
         }
 
-        try {
-            val streams = QobuzApi.resolveStreams(resolvedQobuzId, query)
-            for (s in streams) {
-                callback.invoke(
-                    newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
-                        this.quality = s.quality
-                        this.referer = s.referer
-                        this.headers = s.headers
-                    }
-                )
-                added = true
+        // mirrors and the ZARZ resolver run side by side; links are emitted as each one lands
+        coroutineScope {
+            val mirrors = async<Unit> {
+            try {
+                QobuzApi.resolveStreams(resolvedQobuzId, query) { s ->
+                    callback.invoke(
+                        newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
+                            this.quality = s.quality
+                            this.referer = s.referer
+                            this.headers = s.headers
+                        }
+                    )
+                    added = true
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MusicBoxLog.d(TAG, "Qobuz mirrors failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            MusicBoxLog.d(TAG, "Qobuz musicdl failed: ${e.message}")
-        }
-
+            }
+            val zarz = async<Unit> {
         if (zarzQobuz.record.isUsable()) {
             try {
                 val targetId = resolvedQobuzId
@@ -1293,6 +1313,10 @@ class MusicBoxProvider : MainAPI() {
             }
         }
 
+            }
+            awaitAll(mirrors, zarz)
+        }
+
         return added
     }
 
@@ -1308,9 +1332,8 @@ class MusicBoxProvider : MainAPI() {
             }
             if (targetId.isBlank()) return false
 
-            val streams = SpotifyClient.resolveStreams(targetId)
             var added = false
-            for (s in streams) {
+            SpotifyClient.resolveStreams(targetId) { s ->
                 callback.invoke(
                     newExtractorLink("MusicBox", s.providerName, s.url, ExtractorLinkType.VIDEO) {
                         this.quality = s.quality
@@ -1558,84 +1581,65 @@ class MusicBoxProvider : MainAPI() {
         try {
             val videoId = ytId.takeIf { it.length == 11 } ?: YouTubeMusicApi.searchVideoId(query)
             if (!videoId.isNullOrBlank()) {
-                // 1. CharlesPikachu/musicdl YouTube converters (Y2Mate/cnv.cx, CnvMP3, YTMP3, MP3Juice)
-                runCatching {
-                    val streams = YouTubeMusicApi.resolveStreams(videoId, query)
-                    for (s in streams) {
+                // every route at once: the converters, the direct audio stream, CloudStream's own
+                // extractor and Cobalt. Each is its own switch in Settings and its own thread.
+                coroutineScope {
+                    val jobs = ArrayList<kotlinx.coroutines.Deferred<Unit>>()
+                    fun emit(name: String, url: String, quality: Int, referer: String?, headers: Map<String, String>, type: ExtractorLinkType = ExtractorLinkType.VIDEO) {
                         callback.invoke(
-                            newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
-                                this.quality = s.quality
-                                this.referer = s.referer
-                                this.headers = s.headers
+                            newExtractorLink("MusicBox", name, url, type) {
+                                this.quality = quality
+                                if (!referer.isNullOrBlank()) this.referer = referer
+                                this.headers = headers
                             }
                         )
                         added = true
                     }
-                }
 
-                // 2. audio-only stream from YouTube's own player endpoint
-                if (!added) {
-                    runCatching { YouTubeMusicApi.audioOnlyStream(videoId) }.getOrNull()?.let { s ->
-                        callback.invoke(
-                            newExtractorLink("MusicBox", s.name, s.url, ExtractorLinkType.VIDEO) {
-                                this.quality = s.quality
-                                this.referer = s.referer
-                                this.headers = s.headers
+                    jobs += async<Unit> {
+                        runCatching {
+                            YouTubeMusicApi.resolveStreams(videoId, query) { s ->
+                                emit(s.name, s.url, s.quality, s.referer, s.headers)
                             }
-                        )
-                        added = true
-                    }
-                }
-
-                // 3. CloudStream built-in YouTube extractor, audio tracks only. It returns video
-                //    streams too, and emitting those is what played a silent picture instead of a
-                //    song - so a video-only link is dropped rather than offered.
-                if (!added) {
-                    val youtubeUrl = "https://music.youtube.com/watch?v=$videoId"
-                    val viaExtractor = mutableListOf<ExtractorLink>()
-                    runCatching {
-                        loadExtractor(youtubeUrl, "https://music.youtube.com/", subtitleCallback) {
-                            viaExtractor.add(it)
                         }
                     }
-                    val audioOnly = viaExtractor.filter { link ->
-                        val u = link.url.lowercase()
-                        u.contains("mime=audio") || u.contains("audio%2f") || u.contains("mime%3daudio")
-                    }
-                    audioOnly.sortedByDescending { it.quality }.forEach { link ->
-                        callback.invoke(
-                            newExtractorLink(
-                                "MusicBox",
-                                "YouTube Music · ${link.name}",
-                                link.url,
-                                link.type,
-                            ) {
-                                this.quality = link.quality
-                                this.referer = link.referer.ifBlank { "https://www.youtube.com/" }
-                                this.headers = link.headers
+                    if (MusicBoxSettings.mirrorEnabled("yt_audioonly")) jobs += async<Unit> {
+                        withTimeoutOrNull(15_000L) {
+                            runCatching { YouTubeMusicApi.audioOnlyStream(videoId) }.getOrNull()?.let { s ->
+                                emit(s.name, s.url, s.quality, s.referer, s.headers)
                             }
-                        )
-                        added = true
+                        }
                     }
-                }
-
-                // 4. ZARZ Cobalt v1 fallback
-                if (!added) {
-                    runCatching {
-                        val cobalt = zarzDeezer.resolveYouTubeDownload(
-                            "https://music.youtube.com/watch?v=$videoId"
-                        )
-                        // cobalt is asked for audio only; anything else is ignored
-                        val url = cobalt.optString("url", "")
-                        if (url.isNotBlank()) {
-                            callback.invoke(
-                                newExtractorLink("MusicBox", "YouTube Music · Cobalt", url, ExtractorLinkType.VIDEO) {
-                                    this.quality = Qualities.Unknown.value
+                    if (MusicBoxSettings.mirrorEnabled("yt_extractor")) jobs += async<Unit> {
+                        // audio tracks only: it returns video streams too, and emitting those is what
+                        // played a silent picture instead of a song
+                        withTimeoutOrNull(20_000L) {
+                            val viaExtractor = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                            runCatching {
+                                loadExtractor("https://music.youtube.com/watch?v=$videoId", "https://music.youtube.com/", subtitleCallback) {
+                                    viaExtractor.add(it)
                                 }
-                            )
-                            added = true
+                            }
+                            viaExtractor.toList().filter { link ->
+                                val u = link.url.lowercase()
+                                u.contains("mime=audio") || u.contains("audio%2f") || u.contains("mime%3daudio")
+                            }.sortedByDescending { it.quality }.forEach { link ->
+                                emit("YouTube Music · ${link.name}", link.url, link.quality,
+                                    link.referer.ifBlank { "https://www.youtube.com/" }, link.headers, link.type)
+                            }
                         }
                     }
+                    if (MusicBoxSettings.mirrorEnabled("yt_cobalt")) jobs += async<Unit> {
+                        withTimeoutOrNull(15_000L) {
+                            runCatching {
+                                val cobalt = zarzDeezer.resolveYouTubeDownload("https://music.youtube.com/watch?v=$videoId")
+                                // cobalt is asked for audio only; anything else is ignored
+                                val url = cobalt.optString("url", "")
+                                if (url.isNotBlank()) emit("YouTube Music · Cobalt", url, Qualities.Unknown.value, null, emptyMap())
+                            }
+                        }
+                    }
+                    jobs.awaitAll()
                 }
             }
         } catch (e: Exception) {

@@ -94,6 +94,10 @@ object MusicBoxSettings {
         get() = bool("enable_yt_fallback", true)
         set(v) = put { putBoolean("enable_yt_fallback", v) }
 
+    /** per-mirror switch for the third-party fallback converters; on unless turned off */
+    fun mirrorEnabled(key: String): Boolean = bool("mirror_$key", true)
+    fun setMirrorEnabled(key: String, on: Boolean) = put { putBoolean("mirror_$key", on) }
+
     val catalogueOptions = listOf(
         "all" to "All Sources (Merged)",
         "jiosaavn" to "JioSaavn",
@@ -255,6 +259,17 @@ object MusicBoxSettings {
         }
         root.addView(cbYouTube)
 
+        // ========== Fallback mirrors ==========
+        root.addView(header("Fallback Mirrors (all searched in parallel)"))
+        root.addView(note("Third-party converters used when a service's own link is missing. Each runs on its own thread at the same time; switch off the ones that are slow or dead for you."))
+        val mirrorBoxes = MirrorRun.catalogue.map { (key, group, label) ->
+            CheckBox(act).apply {
+                text = "$group · $label"
+                isChecked = mirrorEnabled(key)
+                root.addView(this)
+            } to key
+        }
+
         // ========== ZARZ Session ==========
         root.addView(header("ZARZ Session (Optional Bonus Resolver)"))
 
@@ -414,6 +429,7 @@ object MusicBoxSettings {
                 enableGDStudio = cbGDStudio.isChecked
                 enableJamendo = cbJamendo.isChecked
                 enableYouTubeFallback = cbYouTube.isChecked
+                mirrorBoxes.forEach { (box, key) -> setMirrorEnabled(key, box.isChecked) }
                 Toast.makeText(act, "Settings saved", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)

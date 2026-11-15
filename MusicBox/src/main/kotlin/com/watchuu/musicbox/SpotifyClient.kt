@@ -555,11 +555,12 @@ object SpotifyClient {
      * Resolve direct playable audio streams for a Spotify track using the third-party resolvers
      * from CharlesPikachu/musicdl (`spotify.py`).
      */
-    suspend fun resolveStreams(spotifyTrackId: String): List<SpotifyStreamResult> {
-        val results = mutableListOf<SpotifyStreamResult>()
+    suspend fun resolveStreams(spotifyTrackId: String, onFound: ((SpotifyStreamResult) -> Unit)? = null): List<SpotifyStreamResult> {
+        val m = MirrorRun<SpotifyStreamResult>(onFound)
         val cleanId = spotifyTrackId.substringAfterLast(":").trim()
-        if (cleanId.isBlank()) return results
+        if (cleanId.isBlank()) return m.run()
 
+        m.stage("spotify_spotidown") {
         // 1. SpotiDown (`_parsewithspotidownmeapi` in musicdl `spotify.py`)
         runCatching {
             val pageResp = app.get(
@@ -589,7 +590,7 @@ object SpotifyClient {
                 )
                 val dlUrl = JSONObject(convResp.text).optString("url", "")
                 if (dlUrl.startsWith("http")) {
-                    results.add(
+                    m.add(
                         SpotifyStreamResult(
                             url = dlUrl,
                             providerName = "Spotify · SpotiDown 320kbps",
@@ -601,6 +602,8 @@ object SpotifyClient {
             }
         }
 
+        }
+        m.stage("spotify_rapidapi") {
         // 2. RapidAPI Spotify Downloader (`_parsewithrapidapi` in musicdl `spotify.py`)
         runCatching {
             val key = RAPIDAPI_KEYS.random()
@@ -616,7 +619,7 @@ object SpotifyClient {
             )
             val dlUrl = JSONObject(resp.text).optJSONObject("data")?.optString("downloadLink", "") ?: ""
             if (dlUrl.startsWith("http")) {
-                results.add(
+                m.add(
                     SpotifyStreamResult(
                         url = dlUrl,
                         providerName = "Spotify · RapidAPI 320kbps",
@@ -627,6 +630,8 @@ object SpotifyClient {
             }
         }
 
+        }
+        m.stage("spotify_musicfab") {
         // 3. MusicFab Spotify (`_parsewithmusicfabapi` in musicdl `spotify.py`)
         runCatching {
             val headers = mapOf(
@@ -651,7 +656,7 @@ object SpotifyClient {
                 ?.optJSONObject("metadata")
                 ?.optString("download", "") ?: ""
             if (dlUrl.startsWith("http")) {
-                results.add(
+                m.add(
                     SpotifyStreamResult(
                         url = dlUrl,
                         providerName = "Spotify · MusicFab 320kbps",
@@ -662,6 +667,8 @@ object SpotifyClient {
             }
         }
 
+        }
+        m.stage("spotify_spotsaver") {
         // 4. SpotSaver (`_parsewithspotsaverapi` in musicdl `spotify.py`)
         runCatching {
             val headers = mapOf(
@@ -708,7 +715,7 @@ object SpotifyClient {
                         .map { dlJson.optString(it, "") }
                         .firstOrNull { it.startsWith("http") } ?: ""
                     if (dlUrl.isNotBlank()) {
-                        results.add(
+                        m.add(
                             SpotifyStreamResult(
                                 url = dlUrl,
                                 providerName = "Spotify · SpotSaver 320kbps",
@@ -721,8 +728,10 @@ object SpotifyClient {
             }
         }
 
+        }
+        m.stage("spotify_spotifydl") {
         // 5. Spotify-Downloads (`_parsewithspotifydownloadsapi` in musicdl `spotify.py`)
-        if (results.isEmpty()) {
+        if (true) {
             runCatching {
                 val headers = mapOf(
                     "User-Agent" to UA,
@@ -748,7 +757,7 @@ object SpotifyClient {
                         val stJson = JSONObject(stResp.text)
                         val status = stJson.optString("status", "")
                         if (status == "ready") {
-                            results.add(
+                            m.add(
                                 SpotifyStreamResult(
                                     url = "https://www.spotify-downloads.com/api/file/$jobId",
                                     providerName = "Spotify · SpotifyDownloads 320kbps",
@@ -764,7 +773,8 @@ object SpotifyClient {
             }
         }
 
-        return results
+        }
+        return m.run()
     }
 
     // ========== Parsers ==========

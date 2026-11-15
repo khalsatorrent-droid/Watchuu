@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
 import org.json.JSONArray
@@ -24,6 +25,15 @@ import org.json.JSONObject
  *   /artist/<id>/<name>
  */
 class OctaveProvider : MainAPI() {
+
+    private val scope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
+    /** fetches the playback token in the background, so a later tap has it cached */
+    private fun warmToken() {
+        scope.launch { runCatching { OctaveApi.playbackToken() } }
+    }
     override var mainUrl = OctaveApi.SITE
     override var name = "Octave"
     override var lang = "en"
@@ -206,6 +216,8 @@ class OctaveProvider : MainAPI() {
     // ------------------------------------------------------------------ load
 
     override suspend fun load(url: String): LoadResponse? {
+        // the token takes a WebView round trip; start it now, not when the user presses play
+        warmToken()
         Regex("/album/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadAlbum(it) }
         Regex("/artist/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadArtist(it, url) }
         Regex("/track/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadTrack(it, url) }

@@ -1,4 +1,4 @@
-version = 36
+version = 37
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")

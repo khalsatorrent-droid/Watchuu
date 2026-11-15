@@ -136,46 +136,109 @@ class OctaveProvider : MainAPI() {
 
     // ---------------------------------------------------------------- home page
 
+    /**
+     * Rows built from endpoints that answer without the Cloudflare cookie.
+     *
+     * The site's latest update put /api/search/page and /api/album behind the clearance check -
+     * they answer 403 without it - which is why every "q:" row came back empty and the page looked
+     * dead. These do not need it:
+     *
+     *   /api/lastfm/global-chart-tracks?limit=  -> the chart itself
+     *   /api/mix?artists=<ids>                  -> "more like these", seeded from the chart
+     *   /api/track/{id}/radio                   -> radio around a chart track
+     *   /api/apple/enum?kind=music&sf=us        -> Apple's shelves, still open
+     *
+     * The search rows stay, and fill in by themselves once the clearance cookie is valid.
+     */
     override val mainPage = mainPageOf(
         "chart" to "Global Chart",
+        "mix" to "Because of the chart",
+        "radio" to "Radio picks",
         "apple" to "Top Songs (Apple Music)",
         "q:bollywood hits" to "Bollywood",
         "q:arijit singh" to "Arijit Singh",
         "q:punjabi" to "Punjabi",
-        "q:romantic" to "Romantic",
         "q:lofi" to "Lo-fi & Chill",
-        "q:hip hop" to "Hip Hop",
         "q:pop hits" to "Pop",
-        "q:k-pop" to "K-Pop",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
 
-        // Every row is isolated, so one dead endpoint costs that row and not the whole home page.
-        // But a row that fails is NOT silently fine: if every row is empty the user needs a hint why.
+        // A row that throws takes the whole home page down with it, which is exactly what happened
+        // when /api/apple/charts started answering 403: the "Top Songs (Apple Music)" row threw
+        // ErrorLoadingException and nothing rendered. Every row is now isolated, so a dead endpoint
+        // costs that one row and nothing else.
         val items = runCatching {
-            when {
-                request.data == "chart" ->
-                    getJson("/api/lastfm/global-chart-tracks?limit=30")
-                        .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-                request.data == "apple" -> appleChart()
+            when (request.data) {
+                "chart" -> chartTracks().mapNotNull { trackCard(it) }
+                "mix" -> mixRow()
+                "radio" -> radioRow()
+                "apple" -> appleChart()
                 else -> getJson("/api/search/page?query=${enc(request.data.removePrefix("q:"))}&limit=30")
                     .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
             }
         }.getOrElse { e ->
             android.util.Log.w("Octave", "row '${request.name}' failed: ${e.message}")
-            OctaveCf.toastOnce("Octave: '${request.name}' did not load (${e.message?.take(70)}) - Settings -> Show last report")
             emptyList()
         }
         return newHomePageResponse(HomePageList(request.name, items), false)
     }
 
+    // ---------------------------------------------------------------- home rows
+
+    @Volatile private var chartCache: List<JSONObject> = emptyList()
+    @Volatile private var chartCacheAt = 0L
+
+    /** the global chart, cached a few minutes: the mix and radio rows are seeded from it */
+    private suspend fun chartTracks(): List<JSONObject> {
+        val now = System.currentTimeMillis()
+        if (chartCache.isNotEmpty() && now - chartCacheAt < 5 * 60_000L) return chartCache
+        val list = getJson("/api/lastfm/global-chart-tracks?limit=30")
+            .optJSONArray("tracks").objects()
+        if (list.isNotEmpty()) {
+            chartCache = list
+            chartCacheAt = now
+        }
+        return list
+    }
+
+    /** "more like these": a mix seeded with the artists on the chart */
+    private suspend fun mixRow(): List<SearchResponse> {
+        val seeds = chartTracks()
+            .mapNotNull { it.optJSONObject("artist")?.str("id") }
+            .distinct()
+            .take(4)
+        if (seeds.isEmpty()) return emptyList()
+        val out = LinkedHashMap<String, SearchResponse>()
+        seeds.forEach { artistId ->
+            runCatching {
+                getJson("/api/mix?limit=20&artists=$artistId")
+                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+            }.getOrDefault(emptyList()).forEach { out[it.url] = it }
+        }
+        return out.values.toList()
+    }
+
+    /** radio around the top few chart tracks */
+    private suspend fun radioRow(): List<SearchResponse> {
+        val seeds = chartTracks().mapNotNull { it.str("id") }.take(3)
+        if (seeds.isEmpty()) return emptyList()
+        val out = LinkedHashMap<String, SearchResponse>()
+        seeds.forEach { trackId ->
+            runCatching {
+                getJson("/api/track/$trackId/radio")
+                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+            }.getOrDefault(emptyList()).forEach { out[it.url] = it }
+        }
+        return out.values.toList()
+    }
+
     /** Apple's chart has no Deezer ids - the site's own resolver matches the songs. */
     private suspend fun appleChart(): List<SearchResponse> {
-        // If the chart is unavailable for any reason, fall back to a plain search for current hits so the
-        // row still has content. (The 403 seen on the first call from a fresh page is Cloudflare's
-        // one-time challenge, handled in OctaveBrowser - it is not specific to this endpoint.)
+        // /api/apple/charts answers 403 as of the site's latest update, so this row falls back to a
+        // plain search for current hits rather than failing. If the endpoint comes back, the chart
+        // is used again.
         val songs = runCatching {
             getJson("/api/apple/charts?sf=us&types=songs").optJSONObject("results")
                 ?.optJSONArray("songs").objects().take(25)

@@ -300,7 +300,8 @@ object OctaveCf {
         return "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
             "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
             "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\n" +
-            "Cookies seen: ${OctaveBrowser.cookieNames()}\n\n$advice"
+            "Cookies seen: ${OctaveBrowser.cookieNames()}\n" +
+            "User agent sent: ${userAgent().take(120)}\n\n$advice"
     }
 
     private suspend fun retryAfterSolve(block: suspend () -> OResp): OResp? {

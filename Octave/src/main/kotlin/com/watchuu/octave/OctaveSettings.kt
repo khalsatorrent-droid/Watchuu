@@ -113,6 +113,11 @@ object OctaveSettings {
         val uaField = field("User agent (leave empty to use this device's)", OctaveCf.customUa)
         root.addView(cookieField)
         root.addView(uaField)
+        root.addView(button("Use this device's user agent") {
+            uaField.setText(OctaveCf.userAgent())
+            OctaveCf.toast("Octave: field filled with this device's UA - Save, then use the same UA in your browser")
+        })
+
 
         AlertDialog.Builder(act)
             .setTitle("Octave settings")

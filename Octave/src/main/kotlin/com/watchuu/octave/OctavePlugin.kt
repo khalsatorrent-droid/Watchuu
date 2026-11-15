@@ -7,10 +7,12 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class OctavePlugin : Plugin() {
     override fun load(context: Context) {
-        // the provider first: anything that throws after this still leaves it registered
+        // the provider first, so anything that fails afterwards still leaves it registered
         registerMainAPI(OctaveProvider())
-        runCatching { OctaveCf.init(context) }
-        // gear icon in Extensions -> Octave: Cloudflare / account settings
+        runCatching {
+            OctaveApi.init(context)
+            OctaveApi.attach(context)
+        }
         runCatching { openSettings = { ctx -> OctaveSettings.show(ctx) } }
     }
 }

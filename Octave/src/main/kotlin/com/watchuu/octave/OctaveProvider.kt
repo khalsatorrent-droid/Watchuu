@@ -1,27 +1,5 @@
 package com.watchuu.octave
 
-/**
- * Octave (music.octavestreaming.com) - lossless music for Cloudstream.
- *
- * Everything goes through api.octavestreaming.com behind Cloudflare, so every request carries the
- * cf_clearance cookie the user earned in the solver window (see OctaveCf / OctaveSettings).
- *
- *  - search    : GET /api/search/page?query=&limit=   -> {top, tracks[], albums[], artists[], playlists[]}
- *  - album     : GET /api/album/{id}                  -> {album:{title, artist, cover_*, tracks[]}}
- *  - artist    : GET /api/artist/{id}/radio           -> {tracks[]}    GET /api/artists/releases?ids= -> {releases:[{album}]}
- *  - similar   : GET /api/track/{id}/radio            -> {tracks[]}
- *  - charts    : GET /api/lastfm/global-chart-tracks  -> {tracks[]}
- *                GET /api/apple/charts?sf=us&types=songs -> Apple songs, matched with POST /api/import/resolve
- *  - key       : GET /api/playback-token              -> {token, expiresIn:1800}
- *  - stream    : GET /audio/lossless?track=&t=&a=&d=&x=0&k=<key>  -> the FLAC file (range requests)
- *
- * URLs used inside Cloudstream:
- *   https://music.octavestreaming.com/album/{id}                         (series, tracks = episodes)
- *   https://music.octavestreaming.com/artist/{id}                        (series, radio tracks = episodes)
- *   https://music.octavestreaming.com/track/{id}?t=&a=&d=&al=            (single; title/artist/duration travel with it
- *                                                                          because the stream URL needs them)
- */
-
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -30,38 +8,35 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLDecoder
 import java.net.URLEncoder
 import org.json.JSONArray
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
+/**
+ * Octave - lossless music from music.octavestreaming.com.
+ *
+ * The catalogue is Deezer's, and the site's public endpoints answer without any credential, so the
+ * extension is useful with nothing configured: home, search, albums, artists and a 30-second preview
+ * for every track. A valid account key plus a Cloudflare clearance cookie unlock the lossless file,
+ * and nothing else does - that is the site's rule, not a limitation here.
+ *
+ * Card urls look like:
+ *   /track/<id>?t=<title>&a=<artist>&d=<seconds>&p=<preview>
+ *   /album/<id>/<title>/<artist>/<cover>
+ *   /artist/<id>/<name>
+ */
 class OctaveProvider : MainAPI() {
-    override var mainUrl = OctaveCf.SITE
+    override var mainUrl = OctaveApi.SITE
     override var name = "Octave"
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
-    private val api = OctaveCf.API
+    private val api = OctaveApi.API
 
-    // ---------------------------------------------------------------- networking
-
-    private suspend fun getJson(path: String): JSONObject {
-        val r = OctaveCf.get(if (path.startsWith("http")) path else "$api$path")
-        if (OctaveCf.isChallenge(r)) {
-            throw ErrorLoadingException("Octave: Cloudflare check needed - open Extensions -> Octave -> settings -> Cloudflare check + login")
-        }
-        if (r.code !in 200..299) throw ErrorLoadingException("Octave: HTTP ${r.code} for ${path.substringBefore("?").take(50)}")
-        return try {
-            JSONObject(r.text)
-        } catch (_: Throwable) {
-            throw ErrorLoadingException("Octave: bad answer from server")
-        }
-    }
+    // ------------------------------------------------------------------ helpers
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
-    private fun dec(s: String) = try { URLDecoder.decode(s, "UTF-8") } catch (_: Throwable) { s }
-
-    // ---------------------------------------------------------------- json helpers
+    private fun dec(s: String) = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
     private fun JSONObject.str(vararg keys: String): String? {
         for (k in keys) {
@@ -71,217 +46,149 @@ class OctaveProvider : MainAPI() {
         return null
     }
 
-    private fun JSONArray?.objects(): List<JSONObject> {
+    private fun JSONArray?.objs(): List<JSONObject> {
         if (this == null) return emptyList()
         return (0 until length()).mapNotNull { optJSONObject(it) }
     }
 
-    private fun artistName(o: JSONObject): String =
-        o.optJSONObject("artist")?.str("name") ?: o.str("artist", "artistName") ?: ""
+    private fun artistOf(o: JSONObject): String =
+        o.optJSONObject("artist")?.str("name")
+            ?: o.str("artist", "artistName")
+            ?: ""
 
-    private fun artistNames(o: JSONObject): String {
-        val all = o.optJSONArray("artists").objects().mapNotNull { it.str("name") }.distinct()
-        return if (all.isNotEmpty()) all.take(3).joinToString(", ") else artistName(o)
+    private fun artistsOf(o: JSONObject): String {
+        val all = o.optJSONArray("artists").objs().mapNotNull { it.str("name") }.distinct()
+        return if (all.isNotEmpty()) all.take(3).joinToString(", ") else artistOf(o)
     }
 
-    private fun cover(o: JSONObject): String? {
+    private fun coverOf(o: JSONObject): String? {
         val al = o.optJSONObject("album") ?: o
-        return al.str("cover_big", "cover_xl", "cover_medium", "cover", "image", "picture_big", "picture_xl", "picture", "cover_small")
+        return al.str("cover_big", "cover_xl", "cover_medium", "cover", "image", "picture_big", "picture_xl")
+            ?: o.optJSONObject("artist")?.str("picture_big", "picture_xl", "picture_medium")
     }
 
-    // ---------------------------------------------------------------- track links
+    private fun previewOf(o: JSONObject): String =
+        o.str("previewUrl", "preview") ?: ""
 
     private fun trackUrl(o: JSONObject): String? {
         val id = o.str("id") ?: return null
         val title = o.str("title") ?: return null
-        val artist = artistName(o)
+        val artist = artistsOf(o)
         val dur = o.optInt("duration", 0)
-        val al = o.optJSONObject("album")?.str("id")
-        val prev = o.str("previewUrl", "preview") ?: ""
+        val prev = previewOf(o)
         return "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" +
-            (al?.let { "&al=$it" } ?: "") +
             (if (prev.isNotBlank()) "&p=${enc(prev)}" else "")
     }
 
     private fun param(url: String, key: String): String? =
         Regex("[?&]$key=([^&]*)").find(url)?.groupValues?.get(1)?.let { dec(it) }
 
-    private fun idFrom(url: String, kind: String): String? =
-        Regex("/$kind/(\\d+)").find(url)?.groupValues?.get(1)
-
-    // ---------------------------------------------------------------- cards
+    // ------------------------------------------------------------------ cards
 
     private fun trackCard(o: JSONObject): SearchResponse? {
         val url = trackUrl(o) ?: return null
         val title = o.str("title") ?: return null
-        val artist = artistNames(o)
+        val artist = artistsOf(o)
         return newMovieSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, url, TvType.Music) {
-            this.posterUrl = cover(o)
+            this.posterUrl = coverOf(o)
         }
     }
 
     private fun albumCard(o: JSONObject): SearchResponse? {
         val id = o.str("id") ?: return null
         val title = o.str("title") ?: return null
-        val artist = artistName(o)
-        return newTvSeriesSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/album/$id", TvType.Music) {
-            this.posterUrl = cover(o)
-            this.year = o.str("releaseDate")?.take(4)?.toIntOrNull()
-        }
+        val artist = artistOf(o)
+        val cover = coverOf(o).orEmpty()
+        return newTvSeriesSearchResponse(
+            if (artist.isNotBlank()) "$title - $artist" else title,
+            "$mainUrl/album/$id/${enc(title)}/${enc(artist)}/${enc(cover)}",
+            TvType.Music,
+        ) { this.posterUrl = cover }
     }
 
     private fun artistCard(o: JSONObject): SearchResponse? {
         val id = o.str("id") ?: return null
-        val name = o.str("name") ?: return null
-        return newTvSeriesSearchResponse(name, "$mainUrl/artist/$id", TvType.Music) {
-            this.posterUrl = o.str("picture_big", "picture_xl", "picture_medium", "picture")
+        val nm = o.str("name") ?: return null
+        return newTvSeriesSearchResponse(nm, "$mainUrl/artist/$id/${enc(nm)}", TvType.Music) {
+            this.posterUrl = o.str("picture_big", "picture_xl", "picture_medium", "image")
         }
     }
 
-    // ---------------------------------------------------------------- home page
+    // ------------------------------------------------------------------ home
 
-    /**
-     * Rows built from endpoints that answer without the Cloudflare cookie.
-     *
-     * The site's latest update put /api/search/page and /api/album behind the clearance check -
-     * they answer 403 without it - which is why every "q:" row came back empty and the page looked
-     * dead. These do not need it:
-     *
-     *   /api/lastfm/global-chart-tracks?limit=  -> the chart itself
-     *   /api/mix?artists=<ids>                  -> "more like these", seeded from the chart
-     *   /api/track/{id}/radio                   -> radio around a chart track
-     *   /api/apple/enum?kind=music&sf=us        -> Apple's shelves, still open
-     *
-     * The search rows stay, and fill in by themselves once the clearance cookie is valid.
-     */
     override val mainPage = mainPageOf(
         "chart" to "Global Chart",
         "mix" to "Because of the chart",
         "radio" to "Radio picks",
-        "apple" to "Top Songs (Apple Music)",
+        "apple" to "Apple top songs",
         "q:bollywood hits" to "Bollywood",
         "q:arijit singh" to "Arijit Singh",
-        "q:punjabi" to "Punjabi",
-        "q:lofi" to "Lo-fi & Chill",
-        "q:pop hits" to "Pop",
+        "q:punjabi hits" to "Punjabi",
+        "q:lofi" to "Lo-fi",
+        "q:romantic" to "Romantic",
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
-
-        // A row that throws takes the whole home page down with it, which is exactly what happened
-        // when /api/apple/charts started answering 403: the "Top Songs (Apple Music)" row threw
-        // ErrorLoadingException and nothing rendered. Every row is now isolated, so a dead endpoint
-        // costs that one row and nothing else.
-        val items = runCatching {
-            when (request.data) {
-                "chart" -> chartTracks().mapNotNull { trackCard(it) }
-                "mix" -> mixRow()
-                "radio" -> radioRow()
-                "apple" -> appleChart()
-                else -> getJson("/api/search/page?query=${enc(request.data.removePrefix("q:"))}&limit=30")
-                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-            }
-        }.getOrElse { e ->
-            android.util.Log.w("Octave", "row '${request.name}' failed: ${e.message}")
-            emptyList()
-        }
-        return newHomePageResponse(HomePageList(request.name, items), false)
-    }
-
-    // ---------------------------------------------------------------- home rows
-
     @Volatile private var chartCache: List<JSONObject> = emptyList()
-    @Volatile private var chartCacheAt = 0L
+    @Volatile private var chartAt = 0L
 
-    /** the global chart, cached a few minutes: the mix and radio rows are seeded from it */
-    private suspend fun chartTracks(): List<JSONObject> {
+    private suspend fun chart(): List<JSONObject> {
         val now = System.currentTimeMillis()
-        if (chartCache.isNotEmpty() && now - chartCacheAt < 5 * 60_000L) return chartCache
-        val list = getJson("/api/lastfm/global-chart-tracks?limit=30")
-            .optJSONArray("tracks").objects()
+        if (chartCache.isNotEmpty() && now - chartAt < 5 * 60_000L) return chartCache
+        val list = OctaveApi.json("$api/api/lastfm/global-chart-tracks?limit=30")
+            ?.optJSONArray("tracks").objs().orEmpty()
         if (list.isNotEmpty()) {
             chartCache = list
-            chartCacheAt = now
+            chartAt = now
         }
         return list
     }
 
-    /** "more like these": a mix seeded with the artists on the chart */
-    private suspend fun mixRow(): List<SearchResponse> {
-        val seeds = chartTracks()
-            .mapNotNull { it.optJSONObject("artist")?.str("id") }
-            .distinct()
-            .take(4)
-        if (seeds.isEmpty()) return emptyList()
-        val out = LinkedHashMap<String, SearchResponse>()
-        seeds.forEach { artistId ->
-            runCatching {
-                getJson("/api/mix?limit=20&artists=$artistId")
-                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-            }.getOrDefault(emptyList()).forEach { out[it.url] = it }
-        }
-        return out.values.toList()
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
+        val items = runCatching {
+            when (request.data) {
+                "chart" -> chart().mapNotNull { trackCard(it) }
+                "mix" -> {
+                    val seeds = chart().mapNotNull { it.optJSONObject("artist")?.str("id") }.distinct().take(3)
+                    val seen = LinkedHashMap<String, SearchResponse>()
+                    seeds.forEach { id ->
+                        OctaveApi.json("$api/api/mix?limit=20&artists=$id")
+                            ?.optJSONArray("tracks").objs().orEmpty()
+                            .mapNotNull { trackCard(it) }
+                            .forEach { seen[it.url] = it }
+                    }
+                    seen.values.toList()
+                }
+                "radio" -> {
+                    val seeds = chart().mapNotNull { it.str("id") }.take(3)
+                    val seen = LinkedHashMap<String, SearchResponse>()
+                    seeds.forEach { id ->
+                        OctaveApi.json("$api/api/track/$id/radio")
+                            ?.optJSONArray("tracks").objs().orEmpty()
+                            .mapNotNull { trackCard(it) }
+                            .forEach { seen[it.url] = it }
+                    }
+                    seen.values.toList()
+                }
+                "apple" -> search("top hits").take(30)
+                else -> search(request.data.removePrefix("q:")).take(30)
+            }
+        }.getOrElse { emptyList() }
+        return newHomePageResponse(HomePageList(request.name, items), false)
     }
 
-    /** radio around the top few chart tracks */
-    private suspend fun radioRow(): List<SearchResponse> {
-        val seeds = chartTracks().mapNotNull { it.str("id") }.take(3)
-        if (seeds.isEmpty()) return emptyList()
-        val out = LinkedHashMap<String, SearchResponse>()
-        seeds.forEach { trackId ->
-            runCatching {
-                getJson("/api/track/$trackId/radio")
-                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-            }.getOrDefault(emptyList()).forEach { out[it.url] = it }
-        }
-        return out.values.toList()
-    }
-
-    /** Apple's chart has no Deezer ids - the site's own resolver matches the songs. */
-    private suspend fun appleChart(): List<SearchResponse> {
-        // /api/apple/charts answers 403 as of the site's latest update, so this row falls back to a
-        // plain search for current hits rather than failing. If the endpoint comes back, the chart
-        // is used again.
-        val songs = runCatching {
-            getJson("/api/apple/charts?sf=us&types=songs").optJSONObject("results")
-                ?.optJSONArray("songs").objects().take(25)
-        }.getOrNull()
-        if (songs.isNullOrEmpty()) {
-            return runCatching {
-                getJson("/api/search/page?query=${enc("top hits")}&limit=30")
-                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-            }.getOrDefault(emptyList())
-        }
-        val items = JSONArray()
-        songs.forEach {
-            items.put(JSONObject().put("title", it.str("name") ?: "").put("artist", it.str("artistName") ?: "").put("isrc", it.str("isrc") ?: ""))
-        }
-        val body = JSONObject().put("items", items).put("name", "Top Songs").put("budgetMs", 12000).toString()
-        val r = OctaveCf.postJson("$api/api/import/resolve", body)
-        if (r.code !in 200..299) return emptyList()
-        return try {
-            JSONObject(r.text).optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
-
-    // ---------------------------------------------------------------- search
+    // ------------------------------------------------------------------ search
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
 
-        // Octave's own search needs the Cloudflare cookie. When it is missing - or when the hidden
-        // page cannot make requests at all, which is what "TypeError: Failed to fetch" means - this
-        // falls back to Deezer's public search, which needs nothing. The catalogue is the same: every
-        // track id Octave serves is a Deezer id, and every track carries a Deezer preview url.
         val own = runCatching {
-            val root = getJson("/api/search/page?query=${enc(query.trim())}&limit=30")
+            val root = OctaveApi.json("$api/api/search/page?query=${enc(query.trim())}&limit=30")
+                ?: return@runCatching emptyList<SearchResponse>()
             val out = ArrayList<SearchResponse>()
-            root.optJSONArray("artists").objects().take(3).mapNotNullTo(out) { artistCard(it) }
-            root.optJSONArray("albums").objects().take(8).mapNotNullTo(out) { albumCard(it) }
-            root.optJSONArray("tracks").objects().mapNotNullTo(out) { trackCard(it) }
+            root.optJSONArray("artists").objs().take(3).mapNotNullTo(out) { artistCard(it) }
+            root.optJSONArray("albums").objs().take(6).mapNotNullTo(out) { albumCard(it) }
+            root.optJSONArray("tracks").objs().mapNotNullTo(out) { trackCard(it) }
             out.distinctBy { it.url }
         }.getOrDefault(emptyList())
 
@@ -289,157 +196,92 @@ class OctaveProvider : MainAPI() {
         return deezerSearch(query)
     }
 
-    /** a plain Deezer preview url for any track id - public, unsigned, needs nothing */
-    private suspend fun deezerPreview(id: String): String? = runCatching {
-        val r = app.get("https://api.deezer.com/track/$id", timeout = 12L)
-        if (r.code in 200..299) JSONObject(r.text).optString("preview").takeIf { it.startsWith("http") } else null
-    }.getOrNull()
-
-    /** Deezer's public search: no key, no cookie, and the same ids Octave plays. */
+    /** Deezer's public search: same ids, same previews, no credentials at all */
     private suspend fun deezerSearch(query: String): List<SearchResponse> {
-        val body = runCatching {
-            val r = app.get("https://api.deezer.com/search?q=${enc(query.trim())}&limit=30", timeout = 15L)
-            if (r.code in 200..299) JSONObject(r.text) else null
-        }.getOrNull() ?: return emptyList()
-
-        val items = body.optJSONArray("data") ?: return emptyList()
-        return (0 until items.length()).mapNotNull { i ->
-            val o = items.optJSONObject(i) ?: return@mapNotNull null
-            val id = o.str("id") ?: return@mapNotNull null
-            val title = o.str("title") ?: return@mapNotNull null
-            val artist = o.optJSONObject("artist")?.str("name").orEmpty()
-            val dur = o.optInt("duration", 0)
-            val coverUrl = o.optJSONObject("album")?.str("cover_big", "cover_medium", "cover_xl").orEmpty()
-            val preview = o.str("preview").orEmpty()
-
-            val url = "$mainUrl/track/$id?t=${enc(title)}&a=${enc(artist)}&d=$dur" +
-                (if (preview.isNotBlank()) "&p=${enc(preview)}" else "")
-            newMovieSearchResponse(if (artist.isNotBlank()) "$title - $artist" else title, url, TvType.Music) {
-                this.posterUrl = coverUrl.ifBlank { null }
-            }
-        }
+        val body = OctaveApi.json("${OctaveApi.DEEZER}/search?q=${enc(query.trim())}&limit=30") ?: return emptyList()
+        return body.optJSONArray("data").objs().mapNotNull { trackCard(it) }
     }
 
-    // ---------------------------------------------------------------- load
+    // ------------------------------------------------------------------ load
 
     override suspend fun load(url: String): LoadResponse? {
-        idFrom(url, "album")?.let { return loadAlbum(it) }
-        idFrom(url, "artist")?.let { return loadArtist(it) }
-        idFrom(url, "track")?.let { return loadTrack(it, url) }
-        throw ErrorLoadingException("Octave: unknown link")
+        Regex("/album/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadAlbum(it) }
+        Regex("/artist/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadArtist(it, url) }
+        Regex("/track/(\\d+)").find(url)?.groupValues?.get(1)?.let { return loadTrack(it, url) }
+        return null
     }
 
-    private fun trackEpisode(t: JSONObject, n: Int, fallbackPoster: String?): Episode? {
-        val url = trackUrl(t) ?: return null
-        val artist = artistNames(t)
-        return newEpisode(url) {
-            this.name = t.str("title") ?: "Track $n"
-            this.episode = n
-            this.season = 1
-            this.posterUrl = cover(t) ?: fallbackPoster
-            this.description = artist.ifBlank { null }
-            this.runTime = (t.optInt("duration", 0) / 60).takeIf { it > 0 }
+    private suspend fun loadTrack(id: String, url: String): LoadResponse? {
+        val title = param(url, "t") ?: "Track"
+        val artist = param(url, "a").orEmpty()
+        val dur = param(url, "d")?.toIntOrNull() ?: 0
+        return newMovieLoadResponse(
+            if (artist.isNotBlank()) "$title - $artist" else title,
+            url,
+            TvType.Music,
+            url,
+        ) {
+            this.posterUrl = null
+            this.plot = artist.ifBlank { null }
+            this.duration = dur
         }
     }
 
-    private suspend fun loadAlbum(id: String): LoadResponse {
-        // Deezer's public album endpoint answers where Octave's needs the cookie, and the tracks are
-        // the same ids. Everything below works on either shape.
-        val root = runCatching { getJson("/api/album/$id") }.getOrElse {
-            app.get("https://api.deezer.com/album/$id", timeout = 15L).let { r ->
-                if (r.code in 200..299) JSONObject(r.text) else throw it
-            }
-        }
+    private suspend fun loadAlbum(id: String): LoadResponse? {
+        // the site's album endpoint needs the cookie; Deezer's does not, and the tracks are the same
+        val own = runCatching { OctaveApi.json("$api/api/album/$id") }.getOrNull()
+        val root = own ?: OctaveApi.json("${OctaveApi.DEEZER}/album/$id") ?: return null
         val a = root.optJSONObject("album") ?: root
         val title = a.str("title") ?: "Album"
-        val artist = artistName(a)
-        val poster = cover(a)
+        val artist = artistOf(a)
+        val poster = coverOf(a)
+        val tracks = a.optJSONArray("tracks") ?: a.optJSONObject("tracks")?.optJSONArray("data")
         var n = 0
-        val trackArr = a.optJSONArray("tracks") ?: a.optJSONObject("tracks")?.optJSONArray("data")
-        val eps = trackArr.objects().mapNotNull { trackEpisode(it, ++n, poster) }
-        return newTvSeriesLoadResponse(if (artist.isNotBlank()) "$title - $artist" else title, "$mainUrl/album/$id", TvType.Music, eps) {
-            this.posterUrl = poster
-            this.backgroundPosterUrl = poster
-            this.year = a.str("releaseDate")?.take(4)?.toIntOrNull()
-            this.plot = listOfNotNull(
-                artist.ifBlank { null },
-                a.str("recordType")?.replaceFirstChar { it.uppercase() },
-                "${eps.size} tracks",
-            ).joinToString(" | ")
-        }
-    }
-
-    private suspend fun loadArtist(id: String): LoadResponse {
-        val deezerTop = runCatching {
-            val r = app.get("https://api.deezer.com/artist/$id/top?limit=50", timeout = 15L)
-            if (r.code in 200..299) JSONObject(r.text) else null
-        }.getOrNull()
-        if (deezerTop != null) {
-            val items = deezerTop.optJSONArray("data").objects()
-            if (items.isNotEmpty()) {
-                var n = 0
-                val eps = items.mapNotNull { t ->
-                    val tid = t.str("id") ?: return@mapNotNull null
-                    val title = t.str("title") ?: return@mapNotNull null
-                    val artist = t.optJSONObject("artist")?.str("name").orEmpty()
-                    val coverUrl = t.optJSONObject("album")?.str("cover_big", "cover_medium").orEmpty()
-                    val prev = t.str("preview").orEmpty()
-                    val url = "$mainUrl/track/$tid?t=${enc(title)}&a=${enc(artist)}&d=${t.optInt("duration", 0)}" +
-                        (if (prev.isNotBlank()) "&p=${enc(prev)}" else "")
-                    newEpisode(url) {
-                        this.name = title
-                        this.season = 1
-                        this.episode = ++n
-                        this.posterUrl = coverUrl.ifBlank { null }
-                        this.description = artist.ifBlank { null }
-                    }
-                }
-                if (eps.isNotEmpty()) {
-                    return newTvSeriesLoadResponse("Artist", "$mainUrl/artist/$id", TvType.Music, eps) {
-                        this.posterUrl = items.firstOrNull()?.optJSONObject("artist")?.str("picture_big")
-                    }
-                }
+        val eps = tracks.objs().mapNotNull { t ->
+            val u = trackUrl(t) ?: return@mapNotNull null
+            newEpisode(u) {
+                this.name = t.str("title") ?: "Track ${n + 1}"
+                this.season = 1
+                this.episode = ++n
+                this.posterUrl = coverOf(t) ?: poster
+                this.description = artistsOf(t).ifBlank { null }
             }
         }
-
-        val tracks = getJson("/api/artist/$id/radio").optJSONArray("tracks").objects()
-        val mine = tracks.firstOrNull { it.optJSONObject("artist")?.str("id") == id }
-        val name = mine?.let { artistName(it) } ?: "Artist"
-        val poster = tracks.firstOrNull()?.let { cover(it) }
-        var n = 0
-        val eps = tracks.mapNotNull { trackEpisode(it, ++n, poster) }
-        val albums = try {
-            getJson("/api/artists/releases?ids=$id").optJSONArray("releases").objects()
-                .mapNotNull { it.optJSONObject("album") }.mapNotNull { albumCard(it) }.distinctBy { it.url }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-        return newTvSeriesLoadResponse(name, "$mainUrl/artist/$id", TvType.Music, eps) {
+        if (eps.isEmpty()) return null
+        return newTvSeriesLoadResponse(
+            if (artist.isNotBlank()) "$title - $artist" else title,
+            "$mainUrl/album/$id",
+            TvType.Music,
+            eps,
+        ) {
             this.posterUrl = poster
-            this.backgroundPosterUrl = poster
-            this.plot = "Artist radio for $name. Albums are listed below."
-            this.recommendations = albums
+            this.plot = listOfNotNull(artist.ifBlank { null }, "${eps.size} tracks").joinToString(" · ")
         }
     }
 
-    private suspend fun loadTrack(id: String, url: String): LoadResponse {
-        val title = param(url, "t") ?: "Track"
-        val artist = param(url, "a") ?: ""
-        val dur = param(url, "d")?.toIntOrNull() ?: 0
-        val others = try {
-            getJson("/api/track/$id/radio").optJSONArray("tracks").objects()
-                .filter { it.str("id") != id }.take(20).mapNotNull { trackCard(it) }
-        } catch (_: Throwable) {
-            emptyList()
+    private suspend fun loadArtist(id: String, url: String): LoadResponse? {
+        val nm = url.substringAfterLast("/").let { if (it.all { c -> c.isDigit() }) "Artist" else dec(it) }
+        val top = OctaveApi.json("${OctaveApi.DEEZER}/artist/$id/top?limit=50")
+            ?: OctaveApi.json("$api/api/artist/$id/radio")
+        val items = top?.optJSONArray("data").objs().orEmpty().ifEmpty { top?.optJSONArray("tracks").objs().orEmpty() }
+        var n = 0
+        val eps = items.mapNotNull { t ->
+            val u = trackUrl(t) ?: return@mapNotNull null
+            newEpisode(u) {
+                this.name = t.str("title") ?: "Track ${n + 1}"
+                this.season = 1
+                this.episode = ++n
+                this.posterUrl = coverOf(t)
+                this.description = artistsOf(t).ifBlank { null }
+            }
         }
-        return newMovieLoadResponse(if (artist.isNotBlank()) "$title - $artist" else title, url, TvType.Music, url) {
-            this.plot = artist.ifBlank { null }
-            this.duration = (dur / 60).takeIf { it > 0 }
-            this.recommendations = others
+        if (eps.isEmpty()) return null
+        return newTvSeriesLoadResponse(nm, "$mainUrl/artist/$id", TvType.Music, eps) {
+            this.posterUrl = items.firstOrNull()?.let { coverOf(it) }
         }
     }
 
-    // ---------------------------------------------------------------- links
+    // ------------------------------------------------------------------ playback
 
     override suspend fun loadLinks(
         data: String,
@@ -447,96 +289,74 @@ class OctaveProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val id = idFrom(data, "track") ?: Regex("(\\d{5,})").findAll(data).lastOrNull()?.groupValues?.get(1) ?: return false
-        val title = param(data, "t") ?: ""
-        val artist = param(data, "a") ?: ""
+        val id = Regex("/track/(\\d+)").find(data)?.groupValues?.get(1)
+            ?: Regex("(\\d{5,})").findAll(data).lastOrNull()?.groupValues?.get(1)
+            ?: return false
+
+        val title = param(data, "t").orEmpty()
+        val artist = param(data, "a").orEmpty()
         val dur = param(data, "d") ?: "0"
 
-        val previewFromCard = param(data, "p").orEmpty()
-
-        // ---- 1. what the api says about this track, one call, short timeout -------------------
-        // GET /api/track/{id}?quality=lossless -> {url, preview, gated}
-        // It answers without a cookie, and the preview it returns is freshly signed, so this is the
-        // one thing that can always be turned into a playable link.
-        val resolved = runCatching {
-            val r = OctaveCf.get("$api/api/track/$id?quality=lossless")
-            if (r.code in 200..299) JSONObject(r.text) else null
-        }.getOrNull()
-        var previewUrl = resolved?.optString("preview").orEmpty().ifBlank { previewFromCard }
-
-        // Last resort, and it cannot fail for the same reason as the rest: Deezer's public track
-        // endpoint answers for any id this catalogue serves and hands back a preview url that needs
-        // no key, no cookie and no signature. Without this, a failed resolve plus a card without a
-        // preview produced "no links found" and nothing else.
-        if (!previewUrl.startsWith("http")) {
-            previewUrl = deezerPreview(id).orEmpty()
-        }
-        val directUrl = resolved?.optString("url").orEmpty()
-        val gated = resolved?.optBoolean("gated", false) == true
-
-        suspend fun emitPreview(reason: String): Boolean {
-            if (!previewUrl.startsWith("http")) {
-                OctaveCf.toast("Octave: no link - $reason, and no preview for this track")
-                return false
-            }
+        suspend fun emitPreview(url: String, reason: String): Boolean {
+            if (!url.startsWith("http")) return false
             callback.invoke(
-                newExtractorLink(name, "$name preview (30s) - $reason", previewUrl, ExtractorLinkType.VIDEO) {
-                    this.quality = 128
+                newExtractorLink(name, "$name preview (30s) - $reason", url, ExtractorLinkType.VIDEO) {
                     this.referer = "$mainUrl/"
+                    this.quality = 128
                 }
             )
             return true
         }
 
-        // ---- 2. the playback key, made from inside the page, with a hard budget and no window --
-        // The key is what unlocks lossless: /audio/lossless answers 403 without k, and k comes from
-        // /api/playback-token, which needs a valid account key. It is tried quickly and given up on
-        // quickly - a tap must never wait on anything.
-        val key = withTimeoutOrNull(25_000L) {
-            runCatching { OctaveCf.playbackToken() }.getOrNull()
+        // 1. what the site says about this track. Public, no cookie, and it hands back a fresh
+        //    preview url plus the lossless url and whether that url is gated.
+        val info = OctaveApi.json("$api/api/track/$id?quality=lossless")
+        val direct = info?.optString("url").orEmpty()
+        val gated = info?.optBoolean("gated", false) == true
+        var preview = info?.optString("preview").orEmpty().ifBlank { param(data, "p").orEmpty() }
+
+        // 2. a preview from Deezer if the site gave none - any id here is a Deezer id
+        if (!preview.startsWith("http")) {
+            preview = OctaveApi.json("${OctaveApi.DEEZER}/track/$id")?.optString("preview").orEmpty()
         }
 
+        // 3. the lossless file, which needs a token, which needs the account key
+        val key = OctaveApi.quickToken()
         if (key != null) {
-            // the api's own url, or the same endpoint built by hand - both need k
-            val urls = listOfNotNull(
-                directUrl.takeIf { it.startsWith("http") },
+            val candidates = listOfNotNull(
+                direct.takeIf { it.startsWith("http") },
                 "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0",
             ).map { if (it.contains("k=")) it else "$it${if (it.contains("?")) "&" else "?"}k=$key" }
 
-            for (u in urls.distinct()) {
-                val code = OctaveCf.headFast(u)
+            for (u in candidates.distinct()) {
+                val code = OctaveApi.serves(u)
                 if (code in 200..299 || code == 416 || code == -1) {
                     callback.invoke(
                         newExtractorLink(name, "$name FLAC (lossless)", u, ExtractorLinkType.VIDEO) {
                             this.referer = "$mainUrl/"
                             this.quality = Qualities.Unknown.value
-                            this.headers = OctaveCf.playerHeaders()
+                            this.headers = OctaveApi.playerHeaders()
                         }
                     )
                     return true
                 }
             }
-            // key present but refused - say so, then fall through to the preview / final emit
-            if (emitPreview("lossless refused (HTTP 403)")) return true
+            if (emitPreview(preview, "lossless refused (HTTP 403)")) return true
         }
 
-        // ---- 3. no key: the preview, which needs no account at all ---------------------------
-        if (emitPreview(if (gated) "account key needed for FLAC" else "no playback key")) return true
+        // 4. no key, or nothing above worked: the preview. Never silence - Cloudstream reports
+        //    silence as "no links found", which hides every reason above it.
+        if (emitPreview(preview, if (gated) "account key needed for FLAC" else "no playback key")) return true
 
-        // ---- 4. nothing worked: still offer the endpoint, so the failure is visible -----------
-        // Returning false here is what CloudStream shows as "no links found", which hides every
-        // reason above. A link that may be refused is more useful than silence.
-        val fallback = if (directUrl.startsWith("http")) directUrl
+        val fallback = if (direct.startsWith("http")) direct
         else "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
         callback.invoke(
             newExtractorLink(name, "$name lossless (needs account key)", fallback, ExtractorLinkType.VIDEO) {
                 this.referer = "$mainUrl/"
                 this.quality = Qualities.Unknown.value
-                this.headers = OctaveCf.playerHeaders()
+                this.headers = OctaveApi.playerHeaders()
             }
         )
-        OctaveCf.toast("Octave: no preview for this track - the lossless url needs an account key")
         return true
     }
-
 }

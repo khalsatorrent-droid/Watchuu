@@ -1,161 +1,157 @@
 package com.watchuu.octave
 
+import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.Typeface
 import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import com.lagradost.cloudstream3.CommonActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Settings dialog: Extensions -> Octave -> gear. The Cloudflare check is done here by the user. */
+/**
+ * Three fields and four buttons. Nothing here is required for browsing or previews - these exist only
+ * to unlock lossless, which needs the site's account key and a Cloudflare cookie.
+ */
 object OctaveSettings {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    private fun dp(ctx: Context, v: Int) = (v * ctx.resources.displayMetrics.density).toInt()
 
     fun show(context: Context) {
-        val act = OctaveCf.currentActivity() ?: (context as? android.app.Activity) ?: return
-        OctaveCf.init(act)
-        val pad = dp(act, 16)
+        val act: Activity = CommonActivity.activity ?: context as? Activity ?: return
+        val scope = CoroutineScope(Dispatchers.IO)
+
         val root = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+            val p = (18 * act.resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
         }
 
-        fun header(t: String) = TextView(act).apply {
+        fun text(t: String, size: Float = 13f) = TextView(act).apply {
             text = t
-            setTypeface(typeface, Typeface.BOLD)
-            textSize = 15f
-            setPadding(0, dp(act, 14), 0, dp(act, 4))
+            textSize = size
+            setPadding(0, 8, 0, 8)
         }
-        fun note(t: String) = TextView(act).apply { text = t; textSize = 12f; alpha = 0.75f }
+
         fun field(hint: String, value: String) = EditText(act).apply {
             this.hint = hint
             setText(value)
             textSize = 13f
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 1; maxLines = 4
+            minLines = 1
+            maxLines = 3
         }
+
         fun button(t: String, onClick: () -> Unit) = Button(act).apply {
-            text = t; isAllCaps = false; setOnClickListener { onClick() }
+            text = t
+            isAllCaps = false
+            setOnClickListener { onClick() }
         }
 
         val status = TextView(act).apply { textSize = 14f }
         fun refresh() {
-            status.text = if (OctaveCf.hasClearance()) "Status: cf_clearance cookie saved"
-            else "Status: no Cloudflare cookie yet - tap \"Cloudflare check + login\""
+            status.text = when {
+                OctaveApi.hasClearance() && OctaveApi.accountKey.isNotBlank() -> "Ready: cookie and key present"
+                OctaveApi.hasClearance() -> "Cookie present, no account key - previews only"
+                OctaveApi.accountKey.isNotBlank() -> "Key present, no cookie - the token call will be refused"
+                else -> "Nothing set - browsing and previews work, lossless does not"
+            }
         }
         refresh()
 
-        root.addView(header("Cloudflare"))
+        root.addView(text("Octave", 20f))
         root.addView(status)
-        root.addView(note("Octave is protected by Cloudflare. Open the site, tick the box and log in to your Octave account. The window stays open until you press Back; then the cookies and your login are saved on this device only. Repeat when it expires (playback or search start failing)."))
-        root.addView(button("Log in + verify key") {
+        root.addView(text(
+            "Browsing and 30-second previews need nothing. Full-length FLAC needs two things from the " +
+                "site: a Cloudflare cookie and the account key it issues when you are signed in."
+        ))
+
+        val keyField = field("account key (octv_…)", OctaveApi.accountKey)
+        val cookieField = field("cf_clearance cookie", OctaveApi.manualCookie)
+        root.addView(text("Account key", 15f))
+        root.addView(keyField)
+        root.addView(text("Cloudflare cookie", 15f))
+        root.addView(cookieField)
+
+        root.addView(button("Save") {
+            OctaveApi.accountKey = keyField.text.toString()
+            OctaveApi.manualCookie = cookieField.text.toString()
+            refresh()
+            Toast.makeText(act, "Octave: saved", Toast.LENGTH_SHORT).show()
+        })
+
+        root.addView(button("Check the key in the field") {
             scope.launch {
-                val msg = OctaveCf.loginAndAdoptKey(act)
+                val problem = OctaveApi.validateKey(keyField.text.toString().trim())
                 withContext(Dispatchers.Main) {
-                    refresh()
-                    AlertDialog.Builder(act)
-                        .setTitle("Octave login")
-                        .setMessage(msg)
-                        .setPositiveButton("OK", null)
-                        .show()
+                    if (problem == null) {
+                        OctaveApi.accountKey = keyField.text.toString()
+                        refresh()
+                    }
+                    Toast.makeText(
+                        act,
+                        if (problem == null) "Octave: key works" else "Octave: key $problem",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         })
-        root.addView(button("Cloudflare check + login") {
+
+        root.addView(button("Open the site to get cookie + key") {
             scope.launch {
-                val ok = OctaveCf.solveInteractive(act)
+                val msg = OctaveLogin.runAndSave(act)
                 withContext(Dispatchers.Main) {
                     refresh()
-                    OctaveCf.toast(
-                        if (ok) "Octave: Cloudflare cookie captured - search and FLAC should work now"
-                        else "Octave: no cf_clearance captured (cookies: ${OctaveCf.cookieSummary()}). " +
-                            "Use \"Copy my user agent\" and the manual cookie field below."
-                    )
+                    keyField.setText(OctaveApi.accountKey)
+                    AlertDialog.Builder(act).setTitle("Octave").setMessage(msg)
+                        .setPositiveButton("OK", null).show()
                 }
             }
         })
+
+        root.addView(button("Copy this device's user agent") {
+            val cm = act.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("Octave UA", OctaveApi.userAgent()))
+            Toast.makeText(act, "Octave: copied - a pasted cookie only works with this exact UA", Toast.LENGTH_LONG).show()
+        })
+
         root.addView(button("Test connection") {
             scope.launch {
-                val msg = try {
-                    val r = OctaveCf.get("${OctaveCf.API}/api/lastfm/global-chart-tracks?limit=1")
-                    val t = OctaveCf.playbackToken(true)
-                    val browse = if (r.code in 200..299) "browsing OK" else "browsing HTTP ${r.code}"
-                    val play = if (t != null) "lossless OK"
-                    else "lossless needs the Cloudflare check (previews still play)"
-                    "$browse, $play"
-                } catch (e: Throwable) {
-                    "Test failed: ${e.message}"
+                val chart = OctaveApi.json("${OctaveApi.API}/api/lastfm/global-chart-tracks?limit=1")
+                val token = OctaveApi.playbackToken(true)
+                val msg = buildString {
+                    append(if (chart != null) "browsing OK" else "browsing failed")
+                    append(", ")
+                    append(if (token != null) "lossless OK" else "lossless needs cookie + key (previews still play)")
                 }
-                OctaveCf.toast("Octave: $msg")
-                withContext(Dispatchers.Main) { refresh() }
-            }
-        })
-        root.addView(button("Copy my user agent") {
-            val ua = OctaveCf.userAgent()
-            val cm = act.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                as android.content.ClipboardManager
-            cm.setPrimaryClip(android.content.ClipData.newPlainText("Octave UA", ua))
-            OctaveCf.toast("Octave: user agent copied - use the same one in the browser you solve Cloudflare in")
-        })
-        root.addView(button("Show last report") {
-            AlertDialog.Builder(act).setTitle("Octave report").setMessage(OctaveCf.report()).setPositiveButton("OK", null).show()
-        })
-        root.addView(button("Clear Cloudflare cookies") {
-            OctaveCf.clearCookies(); refresh()
-            OctaveCf.toast("Octave: cookies cleared")
-        })
-
-        root.addView(header("Account key (optional)"))
-        root.addView(note("Created automatically when the site allows it. If playback says 'no playback key', paste the key from the website here (starts with octv_)."))
-        val keyField = field("octv_...", OctaveCf.accountKey)
-        root.addView(keyField)
-
-        root.addView(header("Manual cookie (optional)"))
-        root.addView(note("Only if you solved Cloudflare in another browser: paste its cf_clearance cookie AND that browser's exact user agent."))
-        val cookieField = field("cf_clearance=...", OctaveCf.manualCookie)
-        val uaField = field("User agent (leave empty to use this device's)", OctaveCf.customUa)
-        root.addView(cookieField)
-        root.addView(uaField)
-        root.addView(button("Test the key in the field") {
-            scope.launch {
-                val key = keyField.text.toString().trim()
-                val problem = OctaveCf.validateKey(key)
-                if (problem == null) {
-                    OctaveCf.accountKey = key
-                    withContext(Dispatchers.Main) { keyField.setText(OctaveCf.accountKey); refresh() }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(act, "Octave: $msg", Toast.LENGTH_LONG).show()
                 }
-                OctaveCf.toast(
-                    if (problem == null) "Octave: key works - playback ready"
-                    else "Octave: key $problem"
-                )
             }
         })
-        root.addView(button("Use this device's user agent") {
-            uaField.setText(OctaveCf.userAgent())
-            OctaveCf.toast("Octave: field filled with this device's UA - Save, then use the same UA in your browser")
+
+        root.addView(button("Show report") {
+            AlertDialog.Builder(act).setTitle("Octave report").setMessage(OctaveApi.report())
+                .setPositiveButton("OK", null).show()
         })
 
+        root.addView(button("Clear cookie and key") {
+            OctaveApi.clearCookies()
+            OctaveApi.accountKey = ""
+            keyField.setText("")
+            cookieField.setText("")
+            refresh()
+            Toast.makeText(act, "Octave: cleared", Toast.LENGTH_SHORT).show()
+        })
 
-        AlertDialog.Builder(act)
-            .setTitle("Octave settings")
-            .setView(ScrollView(act).apply { addView(root) })
-            .setPositiveButton("Save") { _, _ ->
-                OctaveCf.accountKey = keyField.text.toString()
-                OctaveCf.manualCookie = cookieField.text.toString()
-                OctaveCf.customUa = uaField.text.toString()
-                OctaveCf.toast("Octave: saved")
-            }
-            .setNegativeButton("Close", null)
-            .show()
+        val scroll = ScrollView(act).apply { addView(root) }
+        AlertDialog.Builder(act).setView(scroll).setNegativeButton("Close", null).show()
     }
 }

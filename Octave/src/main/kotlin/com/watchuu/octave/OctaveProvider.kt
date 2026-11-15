@@ -151,21 +151,42 @@ class OctaveProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
-        val items = when {
-            request.data == "chart" ->
-                getJson("/api/lastfm/global-chart-tracks?limit=30").optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
-            request.data == "apple" -> appleChart()
-            else -> getJson("/api/search/page?query=${enc(request.data.removePrefix("q:"))}&limit=30")
-                .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+
+        // A row that throws takes the whole home page down with it, which is exactly what happened
+        // when /api/apple/charts started answering 403: the "Top Songs (Apple Music)" row threw
+        // ErrorLoadingException and nothing rendered. Every row is now isolated, so a dead endpoint
+        // costs that one row and nothing else.
+        val items = runCatching {
+            when {
+                request.data == "chart" ->
+                    getJson("/api/lastfm/global-chart-tracks?limit=30")
+                        .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+                request.data == "apple" -> appleChart()
+                else -> getJson("/api/search/page?query=${enc(request.data.removePrefix("q:"))}&limit=30")
+                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+            }
+        }.getOrElse { e ->
+            android.util.Log.w("Octave", "row '${request.name}' failed: ${e.message}")
+            emptyList()
         }
         return newHomePageResponse(HomePageList(request.name, items), false)
     }
 
     /** Apple's chart has no Deezer ids - the site's own resolver matches the songs. */
     private suspend fun appleChart(): List<SearchResponse> {
-        val songs = getJson("/api/apple/charts?sf=us&types=songs").optJSONObject("results")
-            ?.optJSONArray("songs").objects().take(25)
-        if (songs.isEmpty()) return emptyList()
+        // /api/apple/charts answers 403 as of the site's latest update, so this row falls back to a
+        // plain search for current hits rather than failing. If the endpoint comes back, the chart
+        // is used again.
+        val songs = runCatching {
+            getJson("/api/apple/charts?sf=us&types=songs").optJSONObject("results")
+                ?.optJSONArray("songs").objects().take(25)
+        }.getOrNull()
+        if (songs.isNullOrEmpty()) {
+            return runCatching {
+                getJson("/api/search/page?query=${enc("top hits")}&limit=30")
+                    .optJSONArray("tracks").objects().mapNotNull { trackCard(it) }
+            }.getOrDefault(emptyList())
+        }
         val items = JSONArray()
         songs.forEach {
             items.put(JSONObject().put("title", it.str("name") ?: "").put("artist", it.str("artistName") ?: "").put("isrc", it.str("isrc") ?: ""))

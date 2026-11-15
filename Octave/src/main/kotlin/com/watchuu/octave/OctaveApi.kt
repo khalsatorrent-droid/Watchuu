@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v33"
+    const val BUILD = "v34"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -182,6 +182,51 @@ object OctaveApi {
      * the Authorization header attached; the browser supplies its own cf_clearance and user agent,
      * and the JSON answer is read back off the page.
      */
+    /**
+     * Any api url, fetched the same way the token is: by navigating the WebView to it.
+     *
+     * This is what makes the site's own endpoints usable at all. They refuse plain http - the client
+     * is rejected before the request is read - but a navigation is the browser itself, so search,
+     * albums and artists answer normally. Deezer is kept only as a last resort.
+     */
+    suspend fun pageJson(url: String, headers: Map<String, String> = emptyMap()): JSONObject? {
+        val body = pageText(url, headers) ?: return null
+        return runCatching { JSONObject(body) }.getOrNull()
+    }
+
+    /** the raw body of a url, read from a WebView navigation */
+    suspend fun pageText(url: String, headers: Map<String, String> = emptyMap()): String? =
+        withContext(Dispatchers.Main) {
+            val ctx = appContext ?: return@withContext null
+            val done = CompletableDeferred<String?>()
+            val wv = WebView(ctx)
+            try {
+                wv.settings.javaScriptEnabled = true
+                wv.settings.domStorageEnabled = true
+                wv.settings.userAgentString = userAgent()
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, u: String?) {
+                        view?.evaluateJavascript("document.body.innerText") { raw ->
+                            val text = (raw ?: "").removeSurrounding("\"").replace("\\\"", "\"").replace("\\n", " ")
+                            if (!done.isCompleted) done.complete(text)
+                        }
+                    }
+                }
+                wv.loadUrl(url, headers)
+                val out = withTimeoutOrNull(25_000L) { done.await() }
+                lastReport = "page ${url.substringBefore("?").takeLast(44)} -> ${out?.take(40) ?: "no answer"}"
+                out?.takeIf { it.trimStart().startsWith("{") || it.trimStart().startsWith("[") }
+            } catch (e: Throwable) {
+                lastReport = "page threw ${e.message}"
+                null
+            } finally {
+                runCatching { wv.stopLoading(); wv.destroy() }
+            }
+        }
+    }
+
     private suspend fun tokenViaPage(key: String): String? = withContext(Dispatchers.Main) {
         val ctx = appContext ?: return@withContext null
         val done = CompletableDeferred<String?>()

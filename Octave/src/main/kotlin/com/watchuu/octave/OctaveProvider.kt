@@ -184,6 +184,7 @@ class OctaveProvider : MainAPI() {
 
         val own = runCatching {
             val root = OctaveApi.json("$api/api/search/page?query=${enc(query.trim())}&limit=30")
+                ?: OctaveApi.pageJson("$api/api/search/page?query=${enc(query.trim())}&limit=30")
                 ?: return@runCatching emptyList<SearchResponse>()
             val out = ArrayList<SearchResponse>()
             root.optJSONArray("artists").objs().take(3).mapNotNullTo(out) { artistCard(it) }
@@ -230,7 +231,11 @@ class OctaveProvider : MainAPI() {
     private suspend fun loadAlbum(id: String): LoadResponse? {
         // the site's album endpoint needs the cookie; Deezer's does not, and the tracks are the same
         val own = runCatching { OctaveApi.json("$api/api/album/$id") }.getOrNull()
-        val root = own ?: OctaveApi.json("${OctaveApi.DEEZER}/album/$id") ?: return null
+            ?: OctaveApi.pageJson("$api/api/album/$id")
+        val root = own
+            ?: OctaveApi.json("$api/api/album/$id")
+            ?: OctaveApi.json("${OctaveApi.DEEZER}/album/$id")
+            ?: return null
         val a = root.optJSONObject("album") ?: root
         val title = a.str("title") ?: "Album"
         val artist = artistOf(a)
@@ -261,8 +266,9 @@ class OctaveProvider : MainAPI() {
 
     private suspend fun loadArtist(id: String, url: String): LoadResponse? {
         val nm = url.substringAfterLast("/").let { if (it.all { c -> c.isDigit() }) "Artist" else dec(it) }
-        val top = OctaveApi.json("${OctaveApi.DEEZER}/artist/$id/top?limit=50")
-            ?: OctaveApi.json("$api/api/artist/$id/radio")
+        val top = OctaveApi.json("$api/api/artist/$id/radio")
+            ?: OctaveApi.pageJson("$api/api/artist/$id/radio")
+            ?: OctaveApi.json("${OctaveApi.DEEZER}/artist/$id/top?limit=50")
         val items = top?.optJSONArray("data").objs().orEmpty().ifEmpty { top?.optJSONArray("tracks").objs().orEmpty() }
         var n = 0
         val eps = items.mapNotNull { t ->
@@ -311,6 +317,7 @@ class OctaveProvider : MainAPI() {
         // 1. what the site says about this track. Public, no cookie, and it hands back a fresh
         //    preview url plus the lossless url and whether that url is gated.
         val info = OctaveApi.json("$api/api/track/$id?quality=lossless")
+            ?: OctaveApi.pageJson("$api/api/track/$id?quality=lossless")
         val direct = info?.optString("url").orEmpty()
         val gated = info?.optBoolean("gated", false) == true
         var preview = info?.optString("preview").orEmpty().ifBlank { param(data, "p").orEmpty() }

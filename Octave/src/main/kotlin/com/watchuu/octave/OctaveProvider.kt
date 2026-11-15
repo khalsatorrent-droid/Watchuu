@@ -330,14 +330,25 @@ class OctaveProvider : MainAPI() {
 
             for (u in candidates.distinct()) {
                 val code = OctaveApi.serves(u)
-                if (code in 200..299 || code == 416 || code == -1) {
+                // 403 here is Cloudflare refusing the probe, not the url being dead: the player is a
+                // different client and often gets through. The link is offered either way, and the
+                // preview is offered beside it, so there is always something that plays.
+                if (code in 200..299 || code == 416 || code == 403 || code == -1) {
+                    val certain = code in 200..299 || code == 416
                     callback.invoke(
-                        newExtractorLink(name, "$name FLAC (lossless)", u, ExtractorLinkType.VIDEO) {
+                        newExtractorLink(
+                            name,
+                            if (certain) "$name FLAC (lossless)" else "$name FLAC (lossless, unverified)",
+                            u,
+                            ExtractorLinkType.VIDEO,
+                        ) {
                             this.referer = "$mainUrl/"
                             this.quality = Qualities.Unknown.value
                             this.headers = OctaveApi.playerHeaders()
                         }
                     )
+                    // and the preview next to it, so a refused flac is not a dead end
+                    emitPreview(preview, "preview, in case FLAC is refused")
                     return true
                 }
             }

@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v32"
+    const val BUILD = "v33"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -283,7 +283,8 @@ object OctaveApi {
         -1
     }
 
-    suspend fun quickToken(): String? = withTimeoutOrNull(12_000L) { playbackToken() }
+    /** the page route is slow by nature - a WebView has to be built and loaded before it answers */
+    suspend fun quickToken(): String? = withTimeoutOrNull(40_000L) { playbackToken() }
 
     fun report(): String {
         val clearance = hasClearance()

@@ -130,7 +130,7 @@ object OctaveCf {
     private fun manualNames() = manualCookie.split(";").map { it.trim().substringBefore("=") }.filter { it.isNotBlank() }.toSet()
 
     /** Keep everything the WebView holds for the site (Cloudflare + login cookies) in app storage. */
-    private fun snapshotCookies() {
+    internal fun snapshotCookies() {
         try {
             val cm = CookieManager.getInstance()
             cm.flush()
@@ -247,7 +247,7 @@ object OctaveCf {
      *
      * Only playback and the settings screen pass true. The home page and search do not: a blocked
      * row used to call solveInteractive() and wait up to five minutes for a human, which is why the
-     * home page appeared to hang instead of simply coming back empty.
+     * home page appeared to hang instead of coming back empty.
      */
     private suspend fun request(
         method: String,
@@ -367,6 +367,16 @@ object OctaveCf {
         }
     }
 
+    @Volatile private var lastToastAt = 0L
+
+    /** Like [toast] but at most once every 2 minutes - for failures that repeat on every row. */
+    fun toastOnce(msg: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastToastAt < 120_000L) return
+        lastToastAt = now
+        toast(msg)
+    }
+
     fun clearCookies() {
         try {
             val cm = CookieManager.getInstance()
@@ -399,15 +409,15 @@ object OctaveCf {
             solving = null
             ok
         }
+        OctaveBrowser.afterSolve() // the SAME page keeps serving requests - nothing is rebuilt
         if (result) {
             lastSolvedAt = System.currentTimeMillis()
-            OctaveBrowser.reset() // restart the hidden page with the new cookies / login
         }
         return result
     }
 
     /** Finds the site's account key (octv_...) in the page's local storage, i.e. the logged-in account. */
-    private const val KEY_JS =
+    internal const val KEY_JS =
         "(function(){try{var f=function(s){var m=/octv_[0-9a-f]{16,}/.exec(s||'');return m?m[0]:null};" +
             "for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var r=f(localStorage.getItem(k))||f(k);if(r)return r}" +
             "for(var j=0;j<sessionStorage.length;j++){var r2=f(sessionStorage.getItem(sessionStorage.key(j)));if(r2)return r2}" +
@@ -448,29 +458,13 @@ object OctaveCf {
         bar.addView(info)
         bar.addView(close)
 
-        val wv = WebView(act)
-        wv.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            mediaPlaybackRequiresUserGesture = true
-            userAgentString = userAgent()
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-        }
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
-        wv.webChromeClient = WebChromeClient()
-        wv.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
-
-            // keep the cookies and the account key up to date while the user browses/logs in
-            override fun onPageFinished(view: WebView?, url: String?) {
-                snapshotCookies()
-                view?.evaluateJavascript(KEY_JS) { r -> saveKeyFrom(r) }
-            }
-        }
+        // THE page - the one hidden browser that makes every API call - is moved into this window, so
+        // the Cloudflare check and the login happen in the very WebView that is used afterwards.
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val wv = OctaveBrowser.attach(act, root)
+        if (wv == null) {
+            done.complete(false); return
+        }
         dialog.setContentView(root)
 
         var finished = false
@@ -482,7 +476,7 @@ object OctaveCf {
                 if (cleaned) return
                 cleaned = true
                 snapshotCookies()
-                try { wv.stopLoading(); wv.destroy() } catch (_: Throwable) {}
+                OctaveBrowser.detach() // back to hidden duty, alive and logged in
                 try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
                 val ok = hasClearance()
                 done.complete(ok)
@@ -508,19 +502,18 @@ object OctaveCf {
             } else false
         }
         dialog.setOnCancelListener { finish() }
+        dialog.setOnDismissListener { OctaveBrowser.detach() } // never leave the page parked in a dead window
 
         try {
             dialog.setCancelable(true)
             dialog.show()
             dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            // the app package name in X-Requested-With gives a WebView away
-            wv.loadUrl("$SITE/", mapOf("X-Requested-With" to ""))
         } catch (_: Throwable) {
             finish()
         }
     }
 
-    private fun saveKeyFrom(jsResult: String?) {
+    internal fun saveKeyFrom(jsResult: String?) {
         val k = jsResult?.trim('"')?.trim() ?: return
         if (k.startsWith("octv_") && k != accountKey) accountKey = k
     }

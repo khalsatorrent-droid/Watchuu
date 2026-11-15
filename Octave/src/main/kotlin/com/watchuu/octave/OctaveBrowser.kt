@@ -225,6 +225,13 @@ object OctaveBrowser {
     }
 
     /** The user closed the solver window: same page, new cookies/login. Only makes sure it is back on the site. */
+    /** the account key the logged-in page currently holds (octv_…), or null */
+    suspend fun evaluateKey(): String? {
+        if (!ensure(10_000L)) return null
+        val raw = eval(webView, OctaveCf.KEY_JS) ?: return null
+        return raw.trim().trim('"').takeIf { it.startsWith("octv_") }
+    }
+
     suspend fun afterSolve() {
         apiReady = false
         brokenAt = 0L

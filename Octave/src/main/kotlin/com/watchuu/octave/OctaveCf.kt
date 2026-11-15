@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v21"
+    const val BUILD_TAG = "v22"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -310,7 +310,7 @@ object OctaveCf {
         }
         return "Octave build: $BUILD_TAG\n" +
             "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
-            "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
+            "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${accountKey.take(12).ifBlank { "none" }}…, " +
             "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\n" +
             "Cookies seen: ${OctaveBrowser.cookieNames()}\n" +
             "User agent sent: ${userAgent().take(120)}\n\n$advice"
@@ -337,6 +337,26 @@ object OctaveCf {
      * and if the server wants an account, creates one (Turnstile-protected accounts need the key
      * pasted in the settings instead).
      */
+    /**
+     * Re-reads the account key from the logged-in page.
+     *
+     * The key is what /api/playback-token authenticates with, and it changes when the site reissues
+     * it. A stale key answers 403 - exactly like Cloudflare - so on a refusal we ask the page for
+     * the current one instead of trusting what was saved months ago.
+     */
+    suspend fun refreshAccountKey(): String? {
+        val fresh = try {
+            withTimeoutOrNull(8_000L) { OctaveBrowser.evaluateKey() }
+        } catch (_: Throwable) {
+            null
+        }?.trim().orEmpty()
+        if (fresh.startsWith("octv_") && fresh != accountKey) {
+            accountKey = fresh
+            return fresh
+        }
+        return null
+    }
+
     suspend fun playbackToken(forceNew: Boolean = false): String? = tokenLock.withLock {
         val now = System.currentTimeMillis()
         token?.let { if (!forceNew && now < tokenExp - 60_000L) return@withLock it }
@@ -354,9 +374,17 @@ object OctaveCf {
 
         var r = ask()
 
-        // A stored key can go stale, and a stale key answers exactly like Cloudflare does - 403.
-        // Asking again without the Authorization header separates the two: if the anonymous call
-        // succeeds the cookie is fine and the key was the problem, and playback still works.
+        // A stale key answers exactly like Cloudflare. First try the key the logged-in page holds
+        // right now, which is what the site's own player uses.
+        if (r.code in listOf(401, 403) && !r.challenge) {
+            val fresh = refreshAccountKey()
+            if (fresh != null) {
+                lastReport += " | token: key refreshed from the page"
+                r = ask()
+            }
+        }
+
+        // still refused: ask without the header at all, to separate a bad key from a bad cookie
         if (r.code in listOf(401, 403) && !r.challenge && accountKey.isNotBlank()) {
             val anon = ask(anonymous = true)
             if (anon.code in 200..299) {

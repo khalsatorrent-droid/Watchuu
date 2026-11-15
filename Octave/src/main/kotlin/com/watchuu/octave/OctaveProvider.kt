@@ -372,15 +372,8 @@ class OctaveProvider : MainAPI() {
         //    silence as "no links found", which hides every reason above it.
         if (emitPreview(preview, if (gated) "account key needed for FLAC" else "no playback key")) return true
 
-        val fallback = if (direct.startsWith("http")) direct
-        else "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
-        callback.invoke(
-            newExtractorLink(name, "$name lossless (needs account key)", fallback, ExtractorLinkType.VIDEO) {
-                this.referer = "$mainUrl/"
-                this.quality = Qualities.Unknown.value
-                this.headers = OctaveApi.playerHeaders()
-            }
-        )
-        return true
+        // A url without k answers 403 - the capture proves the working request carries k - so
+        // offering the bare resolve url here only produced a dead link that looked like a bug.
+        return false
     }
 }

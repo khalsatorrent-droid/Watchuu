@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v37"
+    const val BUILD = "v38"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

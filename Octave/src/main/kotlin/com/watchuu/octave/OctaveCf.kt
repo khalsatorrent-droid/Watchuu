@@ -41,6 +41,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
  */
 object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
+
+    /** shown in the report, so an outdated install is obvious at a glance */
+    const val BUILD_TAG = "v16"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -297,7 +300,8 @@ object OctaveCf {
             else ->
                 "No Cloudflare cookie and no account key. Run \"Cloudflare check + login\" once: it saves both."
         }
-        return "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
+        return "Octave build: $BUILD_TAG\n" +
+            "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
             "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
             "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\n" +
             "Cookies seen: ${OctaveBrowser.cookieNames()}\n" +

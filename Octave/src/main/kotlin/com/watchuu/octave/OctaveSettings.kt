@@ -108,6 +108,34 @@ object OctaveSettings {
             }
         })
 
+        root.addView(button("Test the key (runs the real token request)") {
+            scope.launch {
+                val key = keyField.text.toString().trim()
+                val shape = OctaveApi.keyShape(key)
+                OctaveApi.accountKey = key
+                val token = OctaveApi.playbackToken(true)
+                val answer = OctaveApi.lastTokenAnswer.ifBlank { "(no answer)" }
+                val verdict = when {
+                    token != null -> "TOKEN OBTAINED - lossless should play"
+                    shape != "looks right" -> "key shape: $shape"
+                    answer.contains("token", true) -> "the site answered with a token but it was not read"
+                    else -> "the site refused the request - see its answer below"
+                }
+                withContext(Dispatchers.Main) {
+                    refresh()
+                    AlertDialog.Builder(act)
+                        .setTitle("Octave token test")
+                        .setMessage(
+                            "key shape: $shape\n" +
+                                "cf_clearance: ${if (OctaveApi.hasClearance()) "yes" else "NO"}\n\n" +
+                                "$verdict\n\n" +
+                                "The site said:\n$answer"
+                        )
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        })
         root.addView(button("Open the site to get cookie + key") {
             scope.launch {
                 val msg = OctaveLogin.runAndSave(act)

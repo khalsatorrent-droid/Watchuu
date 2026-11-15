@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v31"
+    const val BUILD = "v32"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -45,6 +45,8 @@ object OctaveApi {
     @Volatile private var token: String? = null
     @Volatile private var tokenExp = 0L
     @Volatile var lastReport: String = "no request yet"
+    /** the raw answer from the token endpoint, first 200 chars - the only thing that says why */
+    @Volatile var lastTokenAnswer: String = ""
 
     fun attach(context: Context) { appContext = context.applicationContext }
 
@@ -204,6 +206,7 @@ object OctaveApi {
             val headers = if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap()
             wv.loadUrl("$API/api/playback-token", headers)
             val body = withTimeoutOrNull(20_000L) { done.await() } ?: return@withContext null
+            lastTokenAnswer = body.take(200)
             lastReport = "token via page -> ${body.take(60)}"
             runCatching {
                 val o = JSONObject(body)
@@ -250,6 +253,17 @@ object OctaveApi {
         }.getOrNull()
     }
 
+    /** the key's shape only: octv_ followed by 48 hex characters is what the site issues */
+    fun keyShape(key: String): String {
+        val k = key.trim()
+        if (k.isBlank()) return "empty"
+        if (!k.startsWith("octv_")) return "wrong prefix (should start octv_)"
+        val hex = k.removePrefix("octv_")
+        if (hex.length != 48) return "wrong length (${hex.length} hex chars, the site issues 48)"
+        if (!hex.all { it in "0123456789abcdefABCDEF" }) return "not hex"
+        return "looks right"
+    }
+
     /**
      * Checks a key the same way playback will: through the page. A 403 from a plain http call says
      * nothing about the key - the endpoint refuses non-browser clients outright - so reporting that
@@ -283,6 +297,7 @@ object OctaveApi {
         return "Octave build: $BUILD\n" +
             "Last request: $lastReport\n" +
             "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "set" else "missing"}\n" +
-            "User agent: ${userAgent().take(110)}\n\n$advice"
+            "User agent: ${userAgent().take(110)}\n" +
+            "Token endpoint said: ${lastTokenAnswer.ifBlank { "not asked yet" }}\n\n$advice"
     }
 }

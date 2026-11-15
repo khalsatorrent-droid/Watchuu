@@ -400,11 +400,11 @@ class OctaveProvider : MainAPI() {
             return true
         }
 
-        // ---- 2. the playback key, with a hard budget and no window ----------------------------
+        // ---- 2. the playback key, made from inside the page, with a hard budget and no window --
         // The key is what unlocks lossless: /audio/lossless answers 403 without k, and k comes from
         // /api/playback-token, which needs a valid account key. It is tried quickly and given up on
         // quickly - a tap must never wait on anything.
-        val key = withTimeoutOrNull(8_000L) {
+        val key = withTimeoutOrNull(25_000L) {
             runCatching { OctaveCf.playbackToken() }.getOrNull()
         }
 

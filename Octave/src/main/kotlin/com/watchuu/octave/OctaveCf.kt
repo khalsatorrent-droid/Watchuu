@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v26"
+    const val BUILD_TAG = "v27"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -215,12 +215,37 @@ object OctaveCf {
      * A cookie-carrying GET takes about a second. The browser is the exception now, not the rule,
      * and it is capped so it can never stall a row.
      */
-    private suspend fun once(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
+    private suspend fun once(
+        method: String,
+        url: String,
+        body: String?,
+        extra: Map<String, String>,
+        viaPage: Boolean = false,
+    ): OResp {
         val hdr = LinkedHashMap<String, String>()
         hdr["Accept"] = "application/json"
         if (body != null) hdr["Content-Type"] = "application/json"
         hdr.putAll(extra)
         val tag = "$method ${url.substringBefore("?").takeLast(50)}"
+
+        // Some endpoints are refused to anything that is not the page itself. The token endpoint is
+        // one: Cloudflare answers 403 Forbidden to OkHttp even with a valid cf_clearance and a valid
+        // Authorization header, while the identical request made from inside the page returns 200.
+        // For those, the WebView is tried first.
+        if (viaPage) {
+            val b = try {
+                withTimeoutOrNull(15_000L) { OctaveBrowser.fetch(method, url, body, hdr) }
+            } catch (_: Throwable) {
+                null
+            }
+            if (b != null && b.code in 200..299) {
+                lastReport = "$tag via page -> HTTP ${b.code}"
+                snapshotCookies()
+                return b
+            }
+            lastReport = "$tag page: ${b?.code ?: "unavailable"}"
+        }
+
         val key = accountKey
         val h = headers() + hdr + (if (key.isNotBlank() && !hdr.containsKey("Authorization")) mapOf("Authorization" to "Bearer $key") else emptyMap())
 
@@ -262,13 +287,14 @@ object OctaveCf {
         body: String?,
         extra: Map<String, String>,
         allowSolve: Boolean = false,
+        viaPage: Boolean = false,
     ): OResp {
-        var r = once(method, url, body, extra)
+        var r = once(method, url, body, extra, viaPage)
         if (r.challenge && allowSolve) {
-            r = retryAfterSolve { once(method, url, body, extra) } ?: r
+            r = retryAfterSolve { once(method, url, body, extra, viaPage) } ?: r
         } else if (r.code >= 500) { // the origin sometimes answers 502 - once more
             kotlinx.coroutines.delay(600L)
-            r = once(method, url, body, extra)
+            r = once(method, url, body, extra, viaPage)
         }
         return r
     }
@@ -278,10 +304,11 @@ object OctaveCf {
         json: Boolean = true,
         extra: Map<String, String> = emptyMap(),
         allowSolve: Boolean = false,
-    ): OResp = request("GET", url, null, extra, allowSolve)
+        viaPage: Boolean = false,
+    ): OResp = request("GET", url, null, extra, allowSolve, viaPage)
 
-    suspend fun postJson(url: String, body: String, allowSolve: Boolean = false): OResp =
-        request("POST", url, body, emptyMap(), allowSolve)
+    suspend fun postJson(url: String, body: String, allowSolve: Boolean = false, viaPage: Boolean = false): OResp =
+        request("POST", url, body, emptyMap(), allowSolve, viaPage)
 
     /**
      * Fast check that an audio url will serve, without the hidden WebView.
@@ -381,7 +408,7 @@ object OctaveCf {
     suspend fun validateKey(key: String): String? {
         if (key.isBlank()) return "no key"
         return try {
-            val r = get("$API/api/playback-token", true, mapOf("Authorization" to "Bearer ${key.trim()}"))
+            val r = get("$API/api/playback-token", true, mapOf("Authorization" to "Bearer ${key.trim()}"), viaPage = true)
             when {
                 r.code in 200..299 -> {
                     // the answer carries a token; adopt it so the first play does not ask again
@@ -436,7 +463,8 @@ object OctaveCf {
                 "$API/api/playback-token",
                 true,
                 if (!anonymous && key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap(),
-                allowSolve = false
+                allowSolve = false,
+                viaPage = true
             )
         }
 

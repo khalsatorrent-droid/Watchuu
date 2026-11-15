@@ -11,11 +11,8 @@ import android.os.Looper
 import android.view.ViewGroup
 import android.view.Window
 import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -165,6 +162,9 @@ object OctaveCf {
     }
 
     fun hasClearance(): Boolean = cookies()?.contains("cf_clearance") == true
+
+    /** names only - which cookies the jars actually hold right now */
+    fun cookieSummary(): String = OctaveBrowser.cookieNames()
 
     fun headers(json: Boolean = true): Map<String, String> {
         val h = LinkedHashMap<String, String>()

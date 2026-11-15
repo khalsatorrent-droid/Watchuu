@@ -60,8 +60,15 @@ object OctaveSettings {
         root.addView(note("Octave is protected by Cloudflare. Open the site, tick the box and log in to your Octave account. The window stays open until you press Back; then the cookies and your login are saved on this device only. Repeat when it expires (playback or search start failing)."))
         root.addView(button("Cloudflare check + login") {
             scope.launch {
-                OctaveCf.solveInteractive(act)
-                withContext(Dispatchers.Main) { refresh() }
+                val ok = OctaveCf.solveInteractive(act)
+                withContext(Dispatchers.Main) {
+                    refresh()
+                    OctaveCf.toast(
+                        if (ok) "Octave: Cloudflare cookie captured - search and FLAC should work now"
+                        else "Octave: no cf_clearance captured (cookies: ${OctaveCf.cookieSummary()}). " +
+                            "Use \"Copy my user agent\" and the manual cookie field below."
+                    )
+                }
             }
         })
         root.addView(button("Test connection") {
@@ -79,6 +86,13 @@ object OctaveSettings {
                 OctaveCf.toast("Octave: $msg")
                 withContext(Dispatchers.Main) { refresh() }
             }
+        })
+        root.addView(button("Copy my user agent") {
+            val ua = OctaveCf.userAgent()
+            val cm = act.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("Octave UA", ua))
+            OctaveCf.toast("Octave: user agent copied - use the same one in the browser you solve Cloudflare in")
         })
         root.addView(button("Show last report") {
             AlertDialog.Builder(act).setTitle("Octave report").setMessage(OctaveCf.report()).setPositiveButton("OK", null).show()

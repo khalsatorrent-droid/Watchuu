@@ -38,7 +38,7 @@ class OctaveProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Music)
+    override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     private val api = OctaveCf.API
 

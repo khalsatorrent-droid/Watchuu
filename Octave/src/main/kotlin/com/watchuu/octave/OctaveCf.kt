@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v25"
+    const val BUILD_TAG = "v26"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =

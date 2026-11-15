@@ -30,6 +30,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLDecoder
 import java.net.URLEncoder
 import org.json.JSONArray
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 class OctaveProvider : MainAPI() {

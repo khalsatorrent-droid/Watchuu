@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v38"
+    const val BUILD = "v39"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -167,12 +167,16 @@ object OctaveApi {
     // ------------------------------------------------------------------ requests
 
     private suspend fun fetch(url: String, extra: Map<String, String> = emptyMap()): Pair<Int, String> {
+        val short = url.substringBefore("?").removePrefix(API).takeLast(44)
+        val t0 = System.currentTimeMillis()
         return try {
             val r = app.get(url, headers = headers() + extra, timeout = 20L)
-            lastReport = "GET ${url.substringBefore("?").takeLast(46)} -> ${r.code}"
+            lastReport = "GET $short -> ${r.code}"
+            OctaveLog.net("http GET $short -> ${r.code} (${System.currentTimeMillis() - t0}ms)")
             r.code to r.text
         } catch (e: Throwable) {
-            lastReport = "GET ${url.substringBefore("?").takeLast(46)} threw ${e.message}"
+            lastReport = "GET $short threw ${e.message}"
+            OctaveLog.warn("http GET $short threw ${e.message} (${System.currentTimeMillis() - t0}ms)")
             -1 to ""
         }
     }
@@ -236,8 +240,10 @@ object OctaveApi {
                     }
                 }
                 wv.loadUrl(url, headers)
+                OctaveLog.net("page GET ${url.substringBefore("?").removePrefix(API).takeLast(44)}")
                 val out = withTimeoutOrNull(25_000L) { done.await() }
                 lastReport = "page ${url.substringBefore("?").takeLast(44)} -> ${out?.take(40) ?: "no answer"}"
+                OctaveLog.net("page answer ${out?.length ?: 0} chars: ${out?.take(50) ?: "none"}")
                 out?.takeIf { it.trimStart().startsWith("{") || it.trimStart().startsWith("[") }
             } catch (e: Throwable) {
                 lastReport = "page threw ${e.message}"
@@ -270,8 +276,13 @@ object OctaveApi {
             }
             val headers = if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap()
             wv.loadUrl("$API/api/playback-token", headers)
-            val body = withTimeoutOrNull(20_000L) { done.await() } ?: return@withContext null
+            val body = withTimeoutOrNull(20_000L) { done.await() }
+            if (body == null) {
+                OctaveLog.warn("token: page navigation produced nothing")
+                return@withContext null
+            }
             lastTokenAnswer = body.take(200)
+            OctaveLog.auth("token: page said ${body.take(80)}")
             lastReport = "token via page -> ${body.take(60)}"
             runCatching {
                 val o = JSONObject(body)
@@ -292,7 +303,13 @@ object OctaveApi {
 
     suspend fun playbackToken(forceNew: Boolean = false): String? {
         val now = System.currentTimeMillis()
-        token?.let { if (!forceNew && now < tokenExp - 60_000L) return it }
+        token?.let {
+            if (!forceNew && now < tokenExp - 60_000L) {
+                OctaveLog.auth("token: reusing cached one, ${(tokenExp - now) / 1000}s left")
+                return it
+            }
+        }
+        OctaveLog.auth("token: asking (key ${if (accountKey.isNotBlank()) "set" else "MISSING"}, clearance ${if (hasClearance()) "yes" else "no"})")
 
         suspend fun ask(withKey: Boolean): Pair<Int, String> {
             val extra = if (withKey && accountKey.isNotBlank()) mapOf("Authorization" to "Bearer ${accountKey}") else emptyMap()
@@ -309,13 +326,17 @@ object OctaveApi {
                 code = anon.first; text = anon.second
             }
         }
-        if (code !in 200..299) return null
+        if (code !in 200..299) {
+            OctaveLog.warn("token: http route answered $code")
+            return null
+        }
 
         return runCatching {
             val o = JSONObject(text)
             val t = o.optString("token").ifBlank { return null }
             token = t
             tokenExp = now + (o.optLong("expiresIn", 1800L) * 1000L)
+            OctaveLog.auth("token: obtained, valid ${o.optLong("expiresIn", 1800L)}s")
             put("token", t)
             put("token_exp", tokenExp.toString())
             t

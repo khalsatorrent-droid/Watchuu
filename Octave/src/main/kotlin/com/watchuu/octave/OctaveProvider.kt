@@ -203,6 +203,7 @@ class OctaveProvider : MainAPI() {
             out.distinctBy { it.url }
         }.getOrDefault(emptyList())
 
+        OctaveLog.step("search \"$query\": own api gave ${own.size}, deezer fallback ${if (own.isEmpty()) "used" else "not needed"}")
         if (own.isNotEmpty()) return own
         return deezerSearch(query)
     }
@@ -264,6 +265,7 @@ class OctaveProvider : MainAPI() {
                 this.description = artistsOf(t).ifBlank { null }
             }
         }
+        OctaveLog.step("album $id: \"$title\" ${eps.size} tracks (${if (own != null) "own api" else "deezer"})")
         if (eps.isEmpty()) return null
         return newTvSeriesLoadResponse(
             if (artist.isNotBlank()) "$title - $artist" else title,
@@ -293,6 +295,7 @@ class OctaveProvider : MainAPI() {
                 this.description = artistsOf(t).ifBlank { null }
             }
         }
+        OctaveLog.step("artist $id \"$nm\": ${eps.size} tracks")
         if (eps.isEmpty()) return null
         return newTvSeriesLoadResponse(nm, "$mainUrl/artist/$id", TvType.Music, eps) {
             this.posterUrl = items.firstOrNull()?.let { coverOf(it) }
@@ -328,15 +331,21 @@ class OctaveProvider : MainAPI() {
 
         // 1. what the site says about this track. Public, no cookie, and it hands back a fresh
         //    preview url plus the lossless url and whether that url is gated.
+        OctaveLog.step("play $id \"$title\" - $artist (${dur}s)")
         val info = OctaveApi.json("$api/api/track/$id?quality=lossless")
             ?: OctaveApi.pageJson("$api/api/track/$id?quality=lossless")
         val direct = info?.optString("url").orEmpty()
         val gated = info?.optBoolean("gated", false) == true
         var preview = info?.optString("preview").orEmpty().ifBlank { param(data, "p").orEmpty() }
+        OctaveLog.step(
+            "resolve: " + (if (info == null) "no answer" else
+                "url=${if (direct.isBlank()) "none" else "yes"}, gated=$gated, preview=${if (preview.isBlank()) "none" else "yes"}")
+        )
 
         // 2. a preview from Deezer if the site gave none - any id here is a Deezer id
         if (!preview.startsWith("http")) {
             preview = OctaveApi.json("${OctaveApi.DEEZER}/track/$id")?.optString("preview").orEmpty()
+            OctaveLog.step("preview: fell back to deezer, ${if (preview.isBlank()) "still none" else "got one"}")
         }
 
         // 3. the lossless file. The capture shows this request needs nothing but k:
@@ -344,6 +353,7 @@ class OctaveProvider : MainAPI() {
         //      User-Agent, Origin, Accept: */*  - no cookie at all
         //    So a token is the whole requirement, and the link is emitted as soon as there is one.
         val key = OctaveApi.quickToken()
+        OctaveLog.step("token: ${if (key == null) "NOT available - flac cannot be offered" else "available"}")
         if (key != null) {
             val base = direct.takeIf { it.startsWith("http") }
                 ?: "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
@@ -351,6 +361,7 @@ class OctaveProvider : MainAPI() {
 
             val code = OctaveApi.serves(url)
             val works = code in 200..299 || code == 416
+            OctaveLog.step("flac url built with k, probe HTTP $code -> ${if (works) "good" else "doubtful"}")
             callback.invoke(
                 newExtractorLink(
                     name,
@@ -365,15 +376,20 @@ class OctaveProvider : MainAPI() {
             )
             // the preview beside it: if the player is refused, something still plays
             emitPreview(preview, "preview, in case FLAC is refused")
+            OctaveLog.step("emitted: FLAC + preview")
             return true
         }
 
         // 4. no key, or nothing above worked: the preview. Never silence - Cloudstream reports
         //    silence as "no links found", which hides every reason above it.
-        if (emitPreview(preview, if (gated) "account key needed for FLAC" else "no playback key")) return true
+        if (emitPreview(preview, if (gated) "account key needed for FLAC" else "no playback key")) {
+            OctaveLog.step("emitted: preview only (no token)")
+            return true
+        }
 
         // A url without k answers 403 - the capture proves the working request carries k - so
         // offering the bare resolve url here only produced a dead link that looked like a bug.
+        OctaveLog.warn("emitted: nothing - no token and no preview")
         return false
     }
 }

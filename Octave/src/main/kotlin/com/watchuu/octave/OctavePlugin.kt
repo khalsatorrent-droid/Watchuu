@@ -9,6 +9,7 @@ class OctavePlugin : Plugin() {
     override fun load(context: Context) {
         // the provider first, so anything that fails afterwards still leaves it registered
         registerMainAPI(OctaveProvider())
+        OctaveLog.step("plugin loaded")
         runCatching {
             OctaveApi.init(context)
             OctaveApi.attach(context)

@@ -173,6 +173,31 @@ object OctaveSettings {
             }
         })
 
+        root.addView(button("Show log (every step)") {
+            val box = TextView(act).apply {
+                text = OctaveLog.dump()
+                textSize = 10f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextIsSelectable(true)
+                val p = (12 * act.resources.displayMetrics.density).toInt()
+                setPadding(p, p, p, p)
+            }
+            val scroll = ScrollView(act).apply { addView(box) }
+            AlertDialog.Builder(act)
+                .setTitle("Octave log")
+                .setView(scroll)
+                .setPositiveButton("Copy") { _, _ ->
+                    val cm = act.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("Octave log", OctaveLog.dump()))
+                    Toast.makeText(act, "Octave: log copied", Toast.LENGTH_SHORT).show()
+                }
+                .setNeutralButton("Clear") { _, _ ->
+                    OctaveLog.clear()
+                    Toast.makeText(act, "Octave: log cleared", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Close", null)
+                .show()
+        })
         root.addView(button("Show report") {
             AlertDialog.Builder(act).setTitle("Octave report").setMessage(OctaveApi.report())
                 .setPositiveButton("OK", null).show()

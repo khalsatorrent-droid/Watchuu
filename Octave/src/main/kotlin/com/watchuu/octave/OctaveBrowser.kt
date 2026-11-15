@@ -1,10 +1,13 @@
 package com.watchuu.octave
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.MutableContextWrapper
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -13,6 +16,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.LinearLayout
 import java.io.ByteArrayInputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -29,10 +33,12 @@ import org.json.JSONObject
 class OResp(val code: Int, val text: String, val challenge: Boolean)
 
 /**
- * The hidden browser. It is the SAME WebView engine, cookie jar, local storage and user agent the
- * login window uses (so it is logged in and past Cloudflare), and every API call is made with
- * fetch() from INSIDE the site's own page - the site answers OkHttp with a bot challenge but
- * answers its own page. The playback key and the song links are captured this way too.
+ * THE browser: one WebView for everything. It is the page that passes Cloudflare, the page the user
+ * logs in on (the solver window just hosts this very view, see [attach] / [detach]) and the page
+ * every API call is made from with fetch() - so the JS state, cookies, local storage, user agent
+ * and TLS session that earned the clearance are exactly the ones that use it. Nothing is rebuilt
+ * after the user closes the solver window. The site answers OkHttp with a bot challenge but answers
+ * its own page; the playback key and the song links are captured the same way.
  */
 object OctaveBrowser {
     private var appContext: Context? = null
@@ -41,6 +47,9 @@ object OctaveBrowser {
 
     @Volatile private var webView: WebView? = null
     @Volatile private var lastUse = 0L
+    /** True while the page is shown inside the solver window (the user is working in it). */
+    @Volatile var visible = false
+        private set
     private val pending = ConcurrentHashMap<String, CompletableDeferred<OResp>>()
 
     // Cloudflare "warm-up" state. A fresh hidden page is challenged on its FIRST api call (403) and the
@@ -70,17 +79,23 @@ object OctaveBrowser {
         }
     }
 
-    private val imageExt = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".ico", ".woff", ".woff2")
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun create(ctx: Context): WebView {
-        val wv = WebView(ctx)
-        // a real size: a page without layout renders no text and some scripts never start
+    /** A real size: a page without layout renders no text and some scripts never start. */
+    private fun measureHidden(wv: WebView) {
         wv.measure(
             android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
             android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
         )
         wv.layout(0, 0, 1080, 1920)
+    }
+
+    private val imageExt = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".ico", ".woff", ".woff2")
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun create(ctx: Context): WebView {
+        // MutableContextWrapper: the same view is later hosted by the solver window (an Activity
+        // context is needed for dialogs, pickers, keyboard) and taken back to the app context after.
+        val wv = WebView(MutableContextWrapper(ctx))
+        measureHidden(wv)
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -98,6 +113,13 @@ object OctaveBrowser {
                 pageLoads++
             }
 
+            // while the user works in the window: keep the cookies and the logged-in account key saved
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (!visible) return
+                OctaveCf.snapshotCookies()
+                view?.evaluateJavascript(OctaveCf.KEY_JS) { r -> OctaveCf.saveKeyFrom(r) }
+            }
+
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                 val u = request?.url?.toString() ?: return null
                 val path = u.substringBefore("?").lowercase()
@@ -106,7 +128,7 @@ object OctaveBrowser {
                     seenAudio.add(u)
                     return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                 }
-                if (imageExt.any { path.endsWith(it) }) {
+                if (!visible && imageExt.any { path.endsWith(it) }) { // the user sees the real page
                     return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                 }
                 return null
@@ -163,19 +185,62 @@ object OctaveBrowser {
 })();
 """
 
-    /** Makes sure the hidden page is open and past Cloudflare. */
+    /** Main thread. The one page: created and started if it does not exist yet. */
+    private fun createAndLoad(ctx: Context): WebView {
+        webView?.let { return it }
+        val wv = create(ctx)
+        webView = wv
+        apiReady = false
+        wv.loadUrl("${OctaveCf.SITE}/", mapOf("X-Requested-With" to "")) // the app package in X-Requested-With gives a WebView away
+        scheduleIdleClose()
+        return wv
+    }
+
+    /**
+     * Main thread. Moves THE page into [container] (the solver window) so Cloudflare is ticked and the
+     * login is done in the very WebView that makes the requests afterwards. Returns null if there is
+     * no app context yet.
+     */
+    fun attach(act: Activity, container: ViewGroup): WebView? {
+        val ctx = appContext ?: return null
+        val wv = createAndLoad(ctx)
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        (wv.context as? MutableContextWrapper)?.baseContext = act
+        if (wv.url.isNullOrBlank()) wv.loadUrl("${OctaveCf.SITE}/", mapOf("X-Requested-With" to ""))
+        visible = true
+        lastUse = System.currentTimeMillis()
+        container.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        wv.requestFocus()
+        return wv
+    }
+
+    /** Main thread. Takes the page back out of the window. It is NOT destroyed - it keeps serving requests. */
+    fun detach() {
+        visible = false
+        lastUse = System.currentTimeMillis()
+        val wv = webView ?: return
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        appContext?.let { (wv.context as? MutableContextWrapper)?.baseContext = it }
+        measureHidden(wv)
+    }
+
+    /** The user closed the solver window: same page, new cookies/login. Only makes sure it is back on the site. */
+    suspend fun afterSolve() {
+        apiReady = false
+        brokenAt = 0L
+        val wv = webView ?: return
+        // login redirects may have taken it off the site; fetch() needs the site's origin
+        val origin = eval(wv, "location.origin")?.trim('"')
+        if (origin != OctaveCf.SITE) {
+            withContext(Dispatchers.Main) { try { wv.loadUrl("${OctaveCf.SITE}/", mapOf("X-Requested-With" to "")) } catch (_: Throwable) {} }
+        }
+    }
+
+    /** Makes sure the page is open and past Cloudflare. */
     private suspend fun ensure(timeoutMs: Long = 30_000L): Boolean = lock.withLock {
         val ctx = appContext ?: return@withLock false
         lastUse = System.currentTimeMillis()
-        if (webView == null) {
-            withContext(Dispatchers.Main) {
-                val wv = create(ctx)
-                webView = wv
-                apiReady = false
-                wv.loadUrl("${OctaveCf.SITE}/", mapOf("X-Requested-With" to ""))
-            }
-            scheduleIdleClose()
-        }
+        if (webView == null) withContext(Dispatchers.Main) { createAndLoad(ctx) }
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
             if (eval(webView, READY_JS) == "true") {
@@ -230,6 +295,7 @@ object OctaveBrowser {
                 apiReady = true
                 brokenAt = 0L
                 readyAt = System.currentTimeMillis()
+                OctaveCf.snapshotCookies() // keep what the page earned
                 return true
             }
             if (System.currentTimeMillis() + 1_200L >= end) return false
@@ -240,7 +306,7 @@ object OctaveBrowser {
     /** First fetch on a fresh page waits here (one prober, everyone else queues behind it). */
     private suspend fun warmUp(): Boolean {
         if (apiReady) return true
-        if (isBroken()) return false
+        if (isBroken() || visible) return false
         return warmLock.withLock {
             if (apiReady) true
             else if (isBroken()) false
@@ -265,11 +331,13 @@ object OctaveBrowser {
      * those are released at once instead of waiting out their timeout.
      */
     private suspend fun recover(seen: Int) = warmLock.withLock {
+        if (visible) return@withLock // never reload the page under the user
         if (epoch != seen) return@withLock // somebody already reloaded since this request started
         if (apiReady && System.currentTimeMillis() - readyAt < 5_000L) return@withLock // just repaired
         if (isBroken()) return@withLock // already tried, gave up
         apiReady = false
         if (probeUntilReady(12_000L)) return@withLock
+        if (visible) return@withLock
         epoch++
         val dead = pending.values.toList()
         pending.clear()
@@ -285,6 +353,7 @@ object OctaveBrowser {
      */
     suspend fun fetch(method: String, url: String, body: String?, headers: Map<String, String>): OResp? {
         if (appContext == null) return null
+        if (visible) return null // the user is working in the page: never disturb it
         if (!ensure()) return null
         warmUp()
         var r: OResp? = null
@@ -317,6 +386,8 @@ object OctaveBrowser {
 
     private fun destroy() {
         try {
+            webView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            visible = false
             webView?.stopLoading()
             webView?.removeJavascriptInterface("octBridge")
             webView?.destroy()
@@ -331,7 +402,7 @@ object OctaveBrowser {
         main.postDelayed(object : Runnable {
             override fun run() {
                 if (webView == null) return
-                if (System.currentTimeMillis() - lastUse > 120_000L) destroy() else main.postDelayed(this, 30_000L)
+                if (!visible && System.currentTimeMillis() - lastUse > 900_000L) destroy() else main.postDelayed(this, 30_000L)
             }
         }, 30_000L)
     }

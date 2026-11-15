@@ -391,7 +391,7 @@ class OctaveProvider : MainAPI() {
             return true
         }
 
-        fun emitDirect(u: String, label: String): Boolean {
+        suspend fun emitDirect(u: String, label: String): Boolean {
             if (!u.startsWith("http")) return false
             callback.invoke(
                 newExtractorLink(name, "$name $label", u, ExtractorLinkType.VIDEO) {

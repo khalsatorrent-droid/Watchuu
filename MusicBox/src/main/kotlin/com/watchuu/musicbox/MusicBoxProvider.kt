@@ -1086,11 +1086,7 @@ class MusicBoxProvider : MainAPI() {
                         if (lastError.contains("503") || lastError.contains("PROVIDER_UNAVAILABLE")) {
                             markUpstreamDown("tidal-zarz", 300)
                         }
-                            }
-            awaitAll(mirrors, zarz)
-        }
-
-        return@async
+                        return@async
                     }
                     saveSession()
                     // TIDAL answers a base64 dash manifest, not a link. Decode it and take the
@@ -1122,6 +1118,10 @@ class MusicBoxProvider : MainAPI() {
             } catch (e: Exception) {
                 MusicBoxLog.d(TAG, "Tidal ZARZ failed: ${e.message}")
             }
+        }
+
+            }
+            awaitAll(mirrors, zarz)
         }
 
         return added
@@ -1585,7 +1585,7 @@ class MusicBoxProvider : MainAPI() {
                 // extractor and Cobalt. Each is its own switch in Settings and its own thread.
                 coroutineScope {
                     val jobs = ArrayList<kotlinx.coroutines.Deferred<Unit>>()
-                    fun emit(name: String, url: String, quality: Int, referer: String?, headers: Map<String, String>, type: ExtractorLinkType = ExtractorLinkType.VIDEO) {
+                    suspend fun emit(name: String, url: String, quality: Int, referer: String?, headers: Map<String, String>, type: ExtractorLinkType = ExtractorLinkType.VIDEO) {
                         callback.invoke(
                             newExtractorLink("MusicBox", name, url, type) {
                                 this.quality = quality

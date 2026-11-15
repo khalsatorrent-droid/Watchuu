@@ -12,11 +12,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * enabled stage at the same moment instead of one after another, so the total wait is the slowest
  * single mirror rather than the sum of all of them. [onFound] sees each result the instant it exists.
  */
-class MirrorRun<T>(private val onFound: ((T) -> Unit)? = null) {
+class MirrorRun<T>(private val onFound: (suspend (T) -> Unit)? = null) {
     private val found = java.util.Collections.synchronizedList(ArrayList<T>())
     private val stages = ArrayList<Pair<String, suspend () -> Unit>>()
 
-    fun add(item: T) {
+    suspend fun add(item: T) {
         found.add(item)
         onFound?.invoke(item)
     }

@@ -555,7 +555,7 @@ object SpotifyClient {
      * Resolve direct playable audio streams for a Spotify track using the third-party resolvers
      * from CharlesPikachu/musicdl (`spotify.py`).
      */
-    suspend fun resolveStreams(spotifyTrackId: String, onFound: ((SpotifyStreamResult) -> Unit)? = null): List<SpotifyStreamResult> {
+    suspend fun resolveStreams(spotifyTrackId: String, onFound: (suspend (SpotifyStreamResult) -> Unit)? = null): List<SpotifyStreamResult> {
         val m = MirrorRun<SpotifyStreamResult>(onFound)
         val cleanId = spotifyTrackId.substringAfterLast(":").trim()
         if (cleanId.isBlank()) return m.run()

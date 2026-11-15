@@ -205,7 +205,7 @@ object DeezerApi {
     /**
      * Resolve direct audio streams for a Deezer track ID using CharlesPikachu/musicdl (`deezer.py`).
      */
-    suspend fun resolveStreams(trackId: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+    suspend fun resolveStreams(trackId: String, onFound: (suspend (ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
         val m = MirrorRun<ResolvedStream>(onFound)
         if (trackId.isBlank()) return m.run()
 
@@ -895,7 +895,7 @@ object TidalApi {
     /**
      * Resolve lossless FLAC streams via Monochrome (`tracks.monochrome.st`) and GDStudio (`tidal`).
      */
-    suspend fun resolveStreams(tidalId: String, query: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+    suspend fun resolveStreams(tidalId: String, query: String, onFound: (suspend (ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
         val m = MirrorRun<ResolvedStream>(onFound)
 
         // 1. Direct Monochrome lossless FLAC stream
@@ -1062,7 +1062,7 @@ object QobuzApi {
      *  3. `GDStudioApi` (`_parsewithgdstudioxyzapi` / `_parsewithgdstudioorgapi`)
      *  4. `clashflac.kanjijewels.com` (`_parsewithclashflacapi`)
      */
-    suspend fun resolveStreams(qobuzId: String, query: String, onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+    suspend fun resolveStreams(qobuzId: String, query: String, onFound: (suspend (ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
         val m = MirrorRun<ResolvedStream>(onFound)
         val targetId = qobuzId.ifBlank {
             runCatching { search(query, 1).firstOrNull()?.sourceId ?: "" }.getOrDefault("")
@@ -2005,7 +2005,7 @@ object YouTubeMusicApi {
         return null
     }
 
-    suspend fun resolveStreams(videoId: String, titleHint: String = "track", onFound: ((ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
+    suspend fun resolveStreams(videoId: String, titleHint: String = "track", onFound: (suspend (ResolvedStream) -> Unit)? = null): List<ResolvedStream> {
         val m = MirrorRun<ResolvedStream>(onFound)
         if (videoId.isBlank()) return m.run()
 

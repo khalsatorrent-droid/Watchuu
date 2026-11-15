@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v22"
+    const val BUILD_TAG = "v23"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -310,7 +310,7 @@ object OctaveCf {
         }
         return "Octave build: $BUILD_TAG\n" +
             "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
-            "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${accountKey.take(12).ifBlank { "none" }}…, " +
+            "cf_clearance: ${if (clearance) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "set" else "missing"}, " +
             "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}\n" +
             "Cookies seen: ${OctaveBrowser.cookieNames()}\n" +
             "User agent sent: ${userAgent().take(120)}\n\n$advice"

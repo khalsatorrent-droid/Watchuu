@@ -99,6 +99,44 @@ class MusicBoxProvider : MainAPI() {
         upstreamDownUntil[key] = System.currentTimeMillis() + seconds * 1000
     }
 
+    /** the Settings switch for each catalogue key; Apple has no switch and is always on */
+    private fun sourceEnabled(key: String): Boolean = when (key) {
+        "jiosaavn" -> MusicBoxSettings.enableJioSaavn
+        "tidal" -> MusicBoxSettings.enableTidal
+        "deezer" -> MusicBoxSettings.enableDeezerDownload
+        "qobuz" -> MusicBoxSettings.enableQobuz
+        "spotify" -> MusicBoxSettings.enableSpotifyDownload
+        "soundcloud" -> MusicBoxSettings.enableSoundCloud
+        "gdstudio" -> MusicBoxSettings.enableGDStudio
+        "jamendo" -> MusicBoxSettings.enableJamendo
+        "ytmusic" -> MusicBoxSettings.enableYouTubeFallback
+        else -> true
+    }
+
+    /** the catalogue to search: the chosen one if its switch is on, otherwise the merged mode */
+    private fun effectiveCatalogue(): String {
+        val c = getCatalogue()
+        return if (c == "all" || sourceEnabled(c)) c else "all"
+    }
+
+    private fun enabledSignature(): String =
+        listOf("jiosaavn", "tidal", "deezer", "qobuz", "spotify", "soundcloud", "gdstudio", "jamendo", "ytmusic")
+            .filter { sourceEnabled(it) }.joinToString(",")
+
+    private class Cached(val at: Long, val value: List<SearchResponse>)
+    private val rowCache = ConcurrentHashMap<String, Cached>()
+    private suspend fun cached(key: String, ttlMs: Long, load: suspend () -> List<SearchResponse>): List<SearchResponse> {
+        val hit = rowCache[key]
+        if (hit != null && System.currentTimeMillis() - hit.at < ttlMs) return hit.value
+        val fresh = load()
+        if (fresh.isNotEmpty()) rowCache[key] = Cached(System.currentTimeMillis(), fresh)
+        return fresh
+    }
+
+    /** one slow catalogue must not hold the merged list: it gets a few seconds, then it is left out */
+    private suspend fun <T> quick(ms: Long = 7_000L, block: suspend () -> List<T>): List<T> =
+        withTimeoutOrNull(ms) { runCatching { block() }.getOrDefault(emptyList()) } ?: emptyList()
+
     private fun loadSession() {
         val context = CloudStreamApp.context ?: return
         runCatching { MusicBoxSettings.init(context) }
@@ -144,8 +182,9 @@ class MusicBoxProvider : MainAPI() {
         if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
         loadSession()
 
-        val cat = getCatalogue()
-        val items = when (request.data) {
+        val cat = effectiveCatalogue()
+        val items = cached("home:$cat:${request.data}:${enabledSignature()}", 10 * 60_000L) {
+          when (request.data) {
             "chart" -> getCatalogRow(cat, "top hits", isChart = true)
             "trending" -> getCatalogRow(cat, "trending hits 2025")
             "new" -> getCatalogRow(cat, "new music releases")
@@ -155,6 +194,7 @@ class MusicBoxProvider : MainAPI() {
             "chill" -> getCatalogRow(cat, "lofi chill beats")
             "albums" -> getFeaturedAlbumsRow(cat, "top albums")
             else -> emptyList()
+          }
         }
 
         return newHomePageResponse(
@@ -192,18 +232,26 @@ class MusicBoxProvider : MainAPI() {
                 // "all" mode: blend fast catalogues based on row type
                 val out = LinkedHashMap<String, SearchResponse>()
                 if (isChart) {
-                    runCatching { JioSaavnApi.getChart(12).forEach { out[it.id] = it.toSearchResponse() } }
-                    runCatching { AppleMusicApi.getChart("in", 12).forEach { out[it.id] = it.toSearchResponse() } }
-                    runCatching { DeezerApi.getChart(10).forEach { out[it.id] = it.toSearchResponse() } }
+                    listOf("jiosaavn", "apple", "deezer").filter { sourceEnabled(it) }.amap { src ->
+                        quick {
+                            when (src) {
+                                "jiosaavn" -> JioSaavnApi.getChart(12).map { it.id to it.toSearchResponse() }
+                                "apple" -> AppleMusicApi.getChart("in", 12).map { it.id to it.toSearchResponse() }
+                                else -> DeezerApi.getChart(10).map { it.id to it.toSearchResponse() }
+                            }
+                        }
+                    }.flatten().forEach { out[it.first] = it.second }
                 } else {
-                    val lists = listOf("jiosaavn", "tidal", "apple", "spotify", "deezer").amap { src ->
-                        when (src) {
-                            "jiosaavn" -> searchJioSaavnTracksOnly(query, 8)
-                            "tidal" -> searchTidalTracksOnly(query, 8)
-                            "apple" -> searchAppleTracksOnly(query, 8)
-                            "spotify" -> searchSpotifyTracksOnly(query, 6)
-                            "deezer" -> searchDeezerTracksOnly(query, 6)
-                            else -> emptyList()
+                    val lists = listOf("jiosaavn", "tidal", "apple", "spotify", "deezer").filter { sourceEnabled(it) }.amap { src ->
+                        quick {
+                            when (src) {
+                                "jiosaavn" -> searchJioSaavnTracksOnly(query, 8)
+                                "tidal" -> searchTidalTracksOnly(query, 8)
+                                "apple" -> searchAppleTracksOnly(query, 8)
+                                "spotify" -> searchSpotifyTracksOnly(query, 6)
+                                "deezer" -> searchDeezerTracksOnly(query, 6)
+                                else -> emptyList()
+                            }
                         }
                     }
                     lists.flatten().forEach { out[it.url] = it }
@@ -215,13 +263,14 @@ class MusicBoxProvider : MainAPI() {
         if (primary.isNotEmpty()) return primary
 
         // Resilient multi-tier fallback so no home row is ever blank
-        val saavnFallback = searchJioSaavnTracksOnly(query, 15)
-        if (saavnFallback.isNotEmpty()) return saavnFallback
-
-        val appleFallback = searchAppleTracksOnly(query, 15)
+        if (sourceEnabled("jiosaavn")) {
+            val saavnFallback = quick { searchJioSaavnTracksOnly(query, 15) }
+            if (saavnFallback.isNotEmpty()) return saavnFallback
+        }
+        val appleFallback = quick { searchAppleTracksOnly(query, 15) }
         if (appleFallback.isNotEmpty()) return appleFallback
 
-        return searchTidalTracksOnly(query, 15)
+        return if (sourceEnabled("tidal")) quick { searchTidalTracksOnly(query, 15) } else emptyList()
     }
 
     private suspend fun getFeaturedAlbumsRow(catalogue: String, query: String): List<SearchResponse> {
@@ -233,7 +282,8 @@ class MusicBoxProvider : MainAPI() {
             "tidal" -> runCatching { TidalApi.searchAlbums(query, 15).map { it.toSearchResponse() } }.getOrDefault(emptyList())
             else -> {
                 val merged = LinkedHashMap<String, SearchResponse>()
-                val parts = listOf("jiosaavn", "tidal", "apple", "deezer").amap { src ->
+                val parts = listOf("jiosaavn", "tidal", "apple", "deezer").filter { sourceEnabled(it) }.amap { src ->
+                  quick {
                     when (src) {
                         "jiosaavn" -> runCatching { JioSaavnApi.searchAlbums("bollywood hits", 8).map { it.toSearchResponse() } }.getOrDefault(emptyList())
                         "tidal" -> runCatching { TidalApi.searchAlbums("hits", 8).map { it.toSearchResponse() } }.getOrDefault(emptyList())
@@ -241,6 +291,7 @@ class MusicBoxProvider : MainAPI() {
                         "deezer" -> runCatching { DeezerApi.searchAlbums("hits", 8).map { it.toSearchResponse() } }.getOrDefault(emptyList())
                         else -> emptyList()
                     }
+                  }
                 }
                 parts.flatten().forEach { merged[it.url] = it }
                 merged.values.toList()
@@ -257,7 +308,13 @@ class MusicBoxProvider : MainAPI() {
         if (query.isBlank()) return emptyList()
         loadSession()
 
-        val catalogue = getCatalogue()
+        val catalogue = effectiveCatalogue()
+        return cached("search:$catalogue:${enabledSignature()}:${query.lowercase().trim()}", 2 * 60_000L) {
+            searchUncached(query, catalogue)
+        }
+    }
+
+    private suspend fun searchUncached(query: String, catalogue: String): List<SearchResponse> {
         val primary = when (catalogue) {
             "jiosaavn" -> searchJioSaavn(query)
             "spotify" -> searchSpotify(query)
@@ -281,17 +338,19 @@ class MusicBoxProvider : MainAPI() {
                     "qobuz",
                     "soundcloud",
                     "ytmusic",
-                ).amap { src ->
-                    when (src) {
-                        "jiosaavn" -> searchJioSaavn(query, 10)
-                        "tidal" -> searchTidal(query, 10)
-                        "spotify" -> searchSpotify(query, 8)
-                        "apple" -> searchApple(query, 8)
-                        "deezer" -> searchDeezer(query, 8)
-                        "qobuz" -> searchQobuz(query, 6)
-                        "soundcloud" -> searchSoundCloud(query, 6)
-                        "ytmusic" -> searchYouTubeMusic(query, 5)
-                        else -> emptyList()
+                ).filter { sourceEnabled(it) }.amap { src ->
+                    quick {
+                        when (src) {
+                            "jiosaavn" -> searchJioSaavn(query, 10)
+                            "tidal" -> searchTidal(query, 10)
+                            "spotify" -> searchSpotify(query, 8)
+                            "apple" -> searchApple(query, 8)
+                            "deezer" -> searchDeezer(query, 8)
+                            "qobuz" -> searchQobuz(query, 6)
+                            "soundcloud" -> searchSoundCloud(query, 6)
+                            "ytmusic" -> searchYouTubeMusic(query, 5)
+                            else -> emptyList()
+                        }
                     }
                 }
                 groups.flatten().forEach { merged[it.url] = it }
@@ -301,12 +360,17 @@ class MusicBoxProvider : MainAPI() {
 
         if (primary.isNotEmpty()) return primary
 
-        // Fallback chain if selected catalogue was unreachable
-        val saavn = searchJioSaavn(query, 15)
-        if (saavn.isNotEmpty()) return saavn
-        val apple = searchApple(query, 15)
-        if (apple.isNotEmpty()) return apple
-        return searchTidal(query, 15)
+        // Fallback chain if selected catalogue was unreachable (enabled sources only)
+        if (sourceEnabled("jiosaavn") && catalogue != "jiosaavn") {
+            val saavn = quick { searchJioSaavn(query, 15) }
+            if (saavn.isNotEmpty()) return saavn
+        }
+        if (catalogue != "apple") {
+            val apple = quick { searchApple(query, 15) }
+            if (apple.isNotEmpty()) return apple
+        }
+        if (sourceEnabled("tidal") && catalogue != "tidal") return quick { searchTidal(query, 15) }
+        return emptyList()
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
@@ -744,9 +808,13 @@ class MusicBoxProvider : MainAPI() {
             callback.invoke(link)
         }
 
-        ZarzSessionManager.versions.forEach { v ->
-            runCatching { ZarzSessionManager.session(v).refreshIfNeeded() }
-                .onFailure { MusicBoxLog.w(TAG, "Session refresh failed for $v: ${it.message}") }
+        coroutineScope {
+            ZarzSessionManager.versions.filter { ZarzSessionManager.isUsable(it) }.map { v ->
+                async {
+                    runCatching { withTimeoutOrNull(5_000L) { ZarzSessionManager.session(v).refreshIfNeeded() } }
+                        .onFailure { MusicBoxLog.w(TAG, "Session refresh failed for $v: ${it.message}") }
+                }
+            }.awaitAll()
         }
 
         val resolverState = ZarzSessionManager.versions
@@ -793,7 +861,9 @@ class MusicBoxProvider : MainAPI() {
         // because nothing better is coming. If no lossless link appears, the whole list arrives.
         coroutineScope {
             val jobs = mutableListOf<Deferred<Boolean>>()
-            val fire: (suspend () -> Boolean) -> Unit = { task ->
+            fun fire(key: String, task: suspend () -> Boolean) {
+                if (!sourceEnabled(key) && key != "amazon") return
+                if (key == "amazon" && !MusicBoxSettings.enableAmazonDownload) return
                 jobs += async {
                     // one hanging host must not hold the rest
                     withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
@@ -804,31 +874,31 @@ class MusicBoxProvider : MainAPI() {
 
             // the entry's own service, with its exact id, alongside everything else
             when (source) {
-                "jiosaavn" -> fire { tryJioSaavn(id, searchQuery, emitLink) }
-                "tidal" -> fire { tryTidal(id, searchQuery, isrc, emitLink) }
-                "deezer" -> fire { tryDeezer(id, searchQuery, emitLink) }
-                "qobuz" -> fire { tryQobuz(id, searchQuery, emitLink) }
-                "spotify" -> fire { trySpotify(id, searchQuery, emitLink) }
-                "soundcloud" -> fire { trySoundCloud(id, searchQuery, emitLink) }
-                "jamendo" -> fire { tryJamendo(id, searchQuery, emitLink) }
-                "gdstudio" -> fire { tryGDStudio(id, searchQuery, emitLink) }
-                "ytmusic" -> fire { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
-                "amazon" -> fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+                "jiosaavn" -> fire("jiosaavn") { tryJioSaavn(id, searchQuery, emitLink) }
+                "tidal" -> fire("tidal") { tryTidal(id, searchQuery, isrc, emitLink) }
+                "deezer" -> fire("deezer") { tryDeezer(id, searchQuery, emitLink) }
+                "qobuz" -> fire("qobuz") { tryQobuz(id, searchQuery, emitLink) }
+                "spotify" -> fire("spotify") { trySpotify(id, searchQuery, emitLink) }
+                "soundcloud" -> fire("soundcloud") { trySoundCloud(id, searchQuery, emitLink) }
+                "jamendo" -> fire("jamendo") { tryJamendo(id, searchQuery, emitLink) }
+                "gdstudio" -> fire("gdstudio") { tryGDStudio(id, searchQuery, emitLink) }
+                "ytmusic" -> fire("ytmusic") { tryYouTubeMusic(id, searchQuery, subtitleCallback, emitLink) }
+                "amazon" -> fire("amazon") { tryAmazonMusic(title, artist, isrc, emitLink) }
             }
 
-            if (source != "jiosaavn") fire { tryJioSaavn("", searchQuery, emitLink) }
-            if (source != "tidal") fire { tryTidal("", searchQuery, isrc, emitLink) }
-            if (source != "deezer") fire { tryDeezer(deezerId, searchQuery, emitLink) }
-            if (source != "qobuz") fire { tryQobuz("", searchQuery, emitLink) }
-            if (source != "spotify") fire { trySpotify("", searchQuery, emitLink) }
-            if (source != "gdstudio") fire { tryGDStudio("", searchQuery, emitLink) }
-            if (source != "soundcloud") fire { trySoundCloud("", searchQuery, emitLink) }
-            if (source != "jamendo") fire { tryJamendo("", searchQuery, emitLink) }
+            if (source != "jiosaavn") fire("jiosaavn") { tryJioSaavn("", searchQuery, emitLink) }
+            if (source != "tidal") fire("tidal") { tryTidal("", searchQuery, isrc, emitLink) }
+            if (source != "deezer") fire("deezer") { tryDeezer(deezerId, searchQuery, emitLink) }
+            if (source != "qobuz") fire("qobuz") { tryQobuz("", searchQuery, emitLink) }
+            if (source != "spotify") fire("spotify") { trySpotify("", searchQuery, emitLink) }
+            if (source != "gdstudio") fire("gdstudio") { tryGDStudio("", searchQuery, emitLink) }
+            if (source != "soundcloud") fire("soundcloud") { trySoundCloud("", searchQuery, emitLink) }
+            if (source != "jamendo") fire("jamendo") { tryJamendo("", searchQuery, emitLink) }
             if (source != "ytmusic") {
-                fire { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
+                fire("ytmusic") { tryYouTubeMusic("", searchQuery, subtitleCallback, emitLink) }
             }
             if (ZarzSessionManager.anyUsable() && source != "amazon") {
-                fire { tryAmazonMusic(title, artist, isrc, emitLink) }
+                fire("amazon") { tryAmazonMusic(title, artist, isrc, emitLink) }
             }
 
             // stop at the first lossless link, otherwise wait for every provider
@@ -838,6 +908,9 @@ class MusicBoxProvider : MainAPI() {
                 allDone.onJoin { }
                 gotFlac.onJoin { }
             }
+            // whichever watcher lost the race would otherwise keep this scope open forever
+            allDone.cancel()
+            gotFlac.cancel()
             if (flacFound.get()) {
                 jobs.forEach { it.cancel() }
                 MusicBoxLog.d(TAG, "FLAC found - stopped searching the rest")
@@ -954,10 +1027,6 @@ class MusicBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableTidal) return false
-        if (upstreamDown("tidal")) {
-            MusicBoxLog.d(TAG, "Tidal ZARZ: skipped, upstream unavailable (retrying later)")
-            return false
-        }
         var added = false
 
         // resolve the tidal id once: the monochrome path and the resolver both need it, and
@@ -989,7 +1058,7 @@ class MusicBoxProvider : MainAPI() {
         }
 
         // 2. Optional ZARZ Tidal resolver if session is active
-        if (zarzTidal.record.isUsable()) {
+        if (zarzTidal.record.isUsable() && !upstreamDown("tidal-zarz")) {
             try {
                 val targetId = resolvedTidalId
                 if (targetId.isNotBlank()) {
@@ -1006,12 +1075,13 @@ class MusicBoxProvider : MainAPI() {
                         }
                         lastError = error.message.orEmpty()
                         MusicBoxLog.d(TAG, "Tidal ZARZ $quality: ${error.message}")
-                        if (!lastError.contains("503") && !lastError.contains("PROVIDER_UNAVAILABLE")) break
+                        // 503 PROVIDER_UNAVAILABLE is the whole upstream down: other qualities will not help
+                        break
                     }
                     if (descriptor == null) {
                         MusicBoxLog.w(TAG, "Tidal ZARZ: every quality refused ($lastError)")
                         if (lastError.contains("503") || lastError.contains("PROVIDER_UNAVAILABLE")) {
-                            markUpstreamDown("tidal")
+                            markUpstreamDown("tidal-zarz", 300)
                         }
                         return added
                     }

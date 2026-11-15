@@ -130,7 +130,7 @@ object OctaveCf {
     private fun manualNames() = manualCookie.split(";").map { it.trim().substringBefore("=") }.filter { it.isNotBlank() }.toSet()
 
     /** Keep everything the WebView holds for the site (Cloudflare + login cookies) in app storage. */
-    internal fun snapshotCookies() {
+    private fun snapshotCookies() {
         try {
             val cm = CookieManager.getInstance()
             cm.flush()
@@ -201,32 +201,63 @@ object OctaveCf {
      * the site's own page); plain HTTP with the saved cookie is only the fallback. When Cloudflare
      * still blocks, the user is asked to solve it in the window, then the call is retried once.
      */
+    /**
+     * Plain http first, the hidden WebView only when Cloudflare actually blocks.
+     *
+     * The order used to be the other way round - every request went through the WebView first - and
+     * that path can spend 15s waiting for clearance, reload, wait 25s more, then try again. With
+     * nine home rows making several calls each, the page never finished rendering: it looked like
+     * the home page "does not load", when in fact it was still waiting.
+     *
+     * A cookie-carrying GET takes about a second. The browser is the exception now, not the rule,
+     * and it is capped so it can never stall a row.
+     */
     private suspend fun once(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
         val hdr = LinkedHashMap<String, String>()
         hdr["Accept"] = "application/json"
         if (body != null) hdr["Content-Type"] = "application/json"
         hdr.putAll(extra)
         val tag = "$method ${url.substringBefore("?").takeLast(50)}"
-        try {
-            val b = OctaveBrowser.fetch(method, url, body, hdr)
-            if (b != null && !b.challenge && b.code != -1) { lastReport = "$tag via page -> HTTP ${b.code}"; return b }
-            lastReport = "$tag page: ${b?.code ?: "unavailable"}${if (b?.challenge == true) " (Cloudflare)" else ""}"
-        } catch (e: Throwable) {
-            lastReport = "$tag page threw ${e.message}"
-        }
         val key = accountKey
         val h = headers() + hdr + (if (key.isNotBlank() && !hdr.containsKey("Authorization")) mapOf("Authorization" to "Bearer $key") else emptyMap())
+
         val n = fromNice(
-            if (method == "GET") app.get(url, headers = h, timeout = 30L)
-            else app.post(url, headers = h, requestBody = (body ?: "").toRequestBody("application/json".toMediaType()), timeout = 40L)
+            if (method == "GET") app.get(url, headers = h, timeout = 20L)
+            else app.post(url, headers = h, requestBody = (body ?: "").toRequestBody("application/json".toMediaType()), timeout = 25L)
         )
-        lastReport += " | http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}"
+        lastReport = "$tag http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}"
+        if (!n.challenge) return n
+
+        // blocked: the browser is the only thing that can carry a fresh clearance cookie
+        try {
+            val b = withTimeoutOrNull(12_000L) { OctaveBrowser.fetch(method, url, body, hdr) }
+            if (b != null && !b.challenge && b.code != -1) {
+                lastReport = "$tag via page -> HTTP ${b.code}"
+                return b
+            }
+            lastReport += " | page: ${b?.code ?: "unavailable"}"
+        } catch (e: Throwable) {
+            lastReport += " | page threw ${e.message}"
+        }
         return n
     }
 
-    private suspend fun request(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
+    /**
+     * @param allowSolve open the Cloudflare window when the request is blocked.
+     *
+     * Only playback and the settings screen pass true. The home page and search do not: a blocked
+     * row used to call solveInteractive() and wait up to five minutes for a human, which is why the
+     * home page appeared to hang instead of simply coming back empty.
+     */
+    private suspend fun request(
+        method: String,
+        url: String,
+        body: String?,
+        extra: Map<String, String>,
+        allowSolve: Boolean = false,
+    ): OResp {
         var r = once(method, url, body, extra)
-        if (r.challenge) {
+        if (r.challenge && allowSolve) {
             r = retryAfterSolve { once(method, url, body, extra) } ?: r
         } else if (r.code >= 500) { // the origin sometimes answers 502 - once more
             kotlinx.coroutines.delay(600L)
@@ -235,10 +266,15 @@ object OctaveCf {
         return r
     }
 
-    suspend fun get(url: String, json: Boolean = true, extra: Map<String, String> = emptyMap()): OResp =
-        request("GET", url, null, extra)
+    suspend fun get(
+        url: String,
+        json: Boolean = true,
+        extra: Map<String, String> = emptyMap(),
+        allowSolve: Boolean = false,
+    ): OResp = request("GET", url, null, extra, allowSolve)
 
-    suspend fun postJson(url: String, body: String): OResp = request("POST", url, body, emptyMap())
+    suspend fun postJson(url: String, body: String, allowSolve: Boolean = false): OResp =
+        request("POST", url, body, emptyMap(), allowSolve)
 
     /** Status of a HEAD request made from the page (is the song file ready?). -1 = could not tell. */
     suspend fun head(url: String): Int = try {
@@ -281,7 +317,13 @@ object OctaveCf {
 
         suspend fun ask(): OResp {
             val key = accountKey
-            return get("$API/api/playback-token", true, if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap())
+            // playback is the one place where opening the Cloudflare window makes sense
+            return get(
+                "$API/api/playback-token",
+                true,
+                if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap(),
+                allowSolve = true
+            )
         }
 
         var r = ask()
@@ -325,16 +367,6 @@ object OctaveCf {
         }
     }
 
-    @Volatile private var lastToastAt = 0L
-
-    /** Like [toast] but at most once every 2 minutes - for failures that repeat on every row. */
-    fun toastOnce(msg: String) {
-        val now = System.currentTimeMillis()
-        if (now - lastToastAt < 120_000L) return
-        lastToastAt = now
-        toast(msg)
-    }
-
     fun clearCookies() {
         try {
             val cm = CookieManager.getInstance()
@@ -367,15 +399,15 @@ object OctaveCf {
             solving = null
             ok
         }
-        OctaveBrowser.afterSolve() // the SAME page keeps serving requests - nothing is rebuilt
         if (result) {
             lastSolvedAt = System.currentTimeMillis()
+            OctaveBrowser.reset() // restart the hidden page with the new cookies / login
         }
         return result
     }
 
     /** Finds the site's account key (octv_...) in the page's local storage, i.e. the logged-in account. */
-    internal const val KEY_JS =
+    private const val KEY_JS =
         "(function(){try{var f=function(s){var m=/octv_[0-9a-f]{16,}/.exec(s||'');return m?m[0]:null};" +
             "for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var r=f(localStorage.getItem(k))||f(k);if(r)return r}" +
             "for(var j=0;j<sessionStorage.length;j++){var r2=f(sessionStorage.getItem(sessionStorage.key(j)));if(r2)return r2}" +
@@ -416,13 +448,29 @@ object OctaveCf {
         bar.addView(info)
         bar.addView(close)
 
-        // THE page - the one hidden browser that makes every API call - is moved into this window, so
-        // the Cloudflare check and the login happen in the very WebView that is used afterwards.
-        root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        val wv = OctaveBrowser.attach(act, root)
-        if (wv == null) {
-            done.complete(false); return
+        val wv = WebView(act)
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            mediaPlaybackRequiresUserGesture = true
+            userAgentString = userAgent()
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        wv.webChromeClient = WebChromeClient()
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+
+            // keep the cookies and the account key up to date while the user browses/logs in
+            override fun onPageFinished(view: WebView?, url: String?) {
+                snapshotCookies()
+                view?.evaluateJavascript(KEY_JS) { r -> saveKeyFrom(r) }
+            }
+        }
+        root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(wv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         dialog.setContentView(root)
 
         var finished = false
@@ -434,7 +482,7 @@ object OctaveCf {
                 if (cleaned) return
                 cleaned = true
                 snapshotCookies()
-                OctaveBrowser.detach() // back to hidden duty, alive and logged in
+                try { wv.stopLoading(); wv.destroy() } catch (_: Throwable) {}
                 try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
                 val ok = hasClearance()
                 done.complete(ok)
@@ -460,18 +508,19 @@ object OctaveCf {
             } else false
         }
         dialog.setOnCancelListener { finish() }
-        dialog.setOnDismissListener { OctaveBrowser.detach() } // never leave the page parked in a dead window
 
         try {
             dialog.setCancelable(true)
             dialog.show()
             dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            // the app package name in X-Requested-With gives a WebView away
+            wv.loadUrl("$SITE/", mapOf("X-Requested-With" to ""))
         } catch (_: Throwable) {
             finish()
         }
     }
 
-    internal fun saveKeyFrom(jsResult: String?) {
+    private fun saveKeyFrom(jsResult: String?) {
         val k = jsResult?.trim('"')?.trim() ?: return
         if (k.startsWith("octv_") && k != accountKey) accountKey = k
     }

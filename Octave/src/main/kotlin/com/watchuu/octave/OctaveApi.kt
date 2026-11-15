@@ -34,7 +34,7 @@ object OctaveApi {
     const val SITE = "https://music.octavestreaming.com"
     const val API = "https://api.octavestreaming.com"
     const val DEEZER = "https://api.deezer.com"
-    const val BUILD = "v35"
+    const val BUILD = "v36"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -50,11 +50,22 @@ object OctaveApi {
 
     fun attach(context: Context) { appContext = context.applicationContext }
 
+    private fun restoreToken() {
+        if (token != null) return
+        val t = str("token")
+        val exp = str("token_exp").toLongOrNull() ?: 0L
+        if (t.isNotBlank() && exp > System.currentTimeMillis()) {
+            token = t
+            tokenExp = exp
+        }
+    }
+
     fun init(context: Context) {
         appContext = context.applicationContext
         if (prefs == null) {
             prefs = context.applicationContext.getSharedPreferences("octave_prefs", Context.MODE_PRIVATE)
         }
+        restoreToken()
     }
 
     private fun str(k: String) = prefs?.getString(k, "")?.trim().orEmpty()
@@ -140,8 +151,18 @@ object OctaveApi {
         return h
     }
 
-    /** headers a player must send for the audio url */
-    fun playerHeaders(): Map<String, String> = headers().toMutableMap().apply { remove("Accept") }
+    /**
+     * Headers for the audio url, copied from the request the site's own player makes:
+     * User-Agent, Origin, Accept: *\/\* - and no cookie, because the k token is the whole
+     * authorisation. The capture shows that request returning 200 with content-type: audio/flac.
+     */
+    fun playerHeaders(): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = userAgent()
+        h["Origin"] = SITE
+        h["Accept"] = "*/*"
+        return h
+    }
 
     // ------------------------------------------------------------------ requests
 
@@ -257,6 +278,8 @@ object OctaveApi {
                 val t = o.optString("token").ifBlank { return@withContext null }
                 token = t
                 tokenExp = System.currentTimeMillis() + o.optLong("expiresIn", 1800L) * 1000L
+                put("token", t)
+                put("token_exp", tokenExp.toString())
                 t
             }.getOrNull()
         } catch (e: Throwable) {
@@ -293,6 +316,8 @@ object OctaveApi {
             val t = o.optString("token").ifBlank { return null }
             token = t
             tokenExp = now + (o.optLong("expiresIn", 1800L) * 1000L)
+            put("token", t)
+            put("token_exp", tokenExp.toString())
             t
         }.getOrNull()
     }

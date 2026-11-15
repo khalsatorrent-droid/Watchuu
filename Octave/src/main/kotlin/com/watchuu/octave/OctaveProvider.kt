@@ -327,39 +327,33 @@ class OctaveProvider : MainAPI() {
             preview = OctaveApi.json("${OctaveApi.DEEZER}/track/$id")?.optString("preview").orEmpty()
         }
 
-        // 3. the lossless file, which needs a token, which needs the account key
+        // 3. the lossless file. The capture shows this request needs nothing but k:
+        //      HEAD 200, content-type: audio/flac
+        //      User-Agent, Origin, Accept: */*  - no cookie at all
+        //    So a token is the whole requirement, and the link is emitted as soon as there is one.
         val key = OctaveApi.quickToken()
         if (key != null) {
-            val candidates = listOfNotNull(
-                direct.takeIf { it.startsWith("http") },
-                "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0",
-            ).map { if (it.contains("k=")) it else "$it${if (it.contains("?")) "&" else "?"}k=$key" }
+            val base = direct.takeIf { it.startsWith("http") }
+                ?: "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0"
+            val url = if (base.contains("k=")) base else "$base${if (base.contains("?")) "&" else "?"}k=$key"
 
-            for (u in candidates.distinct()) {
-                val code = OctaveApi.serves(u)
-                // 403 here is Cloudflare refusing the probe, not the url being dead: the player is a
-                // different client and often gets through. The link is offered either way, and the
-                // preview is offered beside it, so there is always something that plays.
-                if (code in 200..299 || code == 416 || code == 403 || code == -1) {
-                    val certain = code in 200..299 || code == 416
-                    callback.invoke(
-                        newExtractorLink(
-                            name,
-                            if (certain) "$name FLAC (lossless)" else "$name FLAC (lossless, unverified)",
-                            u,
-                            ExtractorLinkType.VIDEO,
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                            this.headers = OctaveApi.playerHeaders()
-                        }
-                    )
-                    // and the preview next to it, so a refused flac is not a dead end
-                    emitPreview(preview, "preview, in case FLAC is refused")
-                    return true
+            val code = OctaveApi.serves(url)
+            val works = code in 200..299 || code == 416
+            callback.invoke(
+                newExtractorLink(
+                    name,
+                    if (works) "$name FLAC (lossless)" else "$name FLAC (lossless, HTTP $code)",
+                    url,
+                    ExtractorLinkType.VIDEO,
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = OctaveApi.playerHeaders()
                 }
-            }
-            if (emitPreview(preview, "lossless refused (HTTP 403)")) return true
+            )
+            // the preview beside it: if the player is refused, something still plays
+            emitPreview(preview, "preview, in case FLAC is refused")
+            return true
         }
 
         // 4. no key, or nothing above worked: the preview. Never silence - Cloudstream reports

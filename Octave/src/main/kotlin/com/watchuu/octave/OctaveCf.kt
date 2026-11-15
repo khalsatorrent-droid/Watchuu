@@ -43,7 +43,7 @@ object OctaveCf {
     const val SITE = "https://music.octavestreaming.com"
 
     /** shown in the report, so an outdated install is obvious at a glance */
-    const val BUILD_TAG = "v17"
+    const val BUILD_TAG = "v18"
     const val API = "https://api.octavestreaming.com"
 
     private const val FALLBACK_UA =
@@ -230,7 +230,10 @@ object OctaveCf {
         )
         val bodyHint = if (n.code in 200..299) "" else " " + n.text.trim().take(140).replace("\n", " ")
         lastReport = "$tag http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}$bodyHint"
-        if (!n.challenge) return n
+        if (!n.challenge) {
+            if (n.code in 200..299) snapshotCookies()
+            return n
+        }
 
         // blocked: the browser is the only thing that can carry a fresh clearance cookie
         try {
@@ -338,18 +341,31 @@ object OctaveCf {
         val now = System.currentTimeMillis()
         token?.let { if (!forceNew && now < tokenExp - 60_000L) return@withLock it }
 
-        suspend fun ask(): OResp {
+        suspend fun ask(anonymous: Boolean = false): OResp {
             val key = accountKey
             // playback is the one place where opening the Cloudflare window makes sense
             return get(
                 "$API/api/playback-token",
                 true,
-                if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap(),
+                if (!anonymous && key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap(),
                 allowSolve = true
             )
         }
 
         var r = ask()
+
+        // A stored key can go stale, and a stale key answers exactly like Cloudflare does - 403.
+        // Asking again without the Authorization header separates the two: if the anonymous call
+        // succeeds the cookie is fine and the key was the problem, and playback still works.
+        if (r.code in listOf(401, 403) && !r.challenge && accountKey.isNotBlank()) {
+            val anon = ask(anonymous = true)
+            if (anon.code in 200..299) {
+                lastReport += " | token: key rejected, anonymous accepted"
+                r = anon
+            } else {
+                lastReport += " | token: key and anonymous both refused (${anon.code})"
+            }
+        }
         if (r.code in listOf(401, 403) && !r.challenge && accountKey.isBlank()) {
             // anonymous not allowed -> try to create an account
             try {

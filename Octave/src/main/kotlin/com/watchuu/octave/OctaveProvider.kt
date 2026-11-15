@@ -47,7 +47,7 @@ class OctaveProvider : MainAPI() {
     private suspend fun getJson(path: String): JSONObject {
         val r = OctaveCf.get(if (path.startsWith("http")) path else "$api$path")
         if (OctaveCf.isChallenge(r)) {
-            throw ErrorLoadingException("Octave: Cloudflare check needed - open Extensions -> Octave -> settings -> Solve Cloudflare")
+            throw ErrorLoadingException("Octave: Cloudflare check needed - open Extensions -> Octave -> settings -> Cloudflare check + login")
         }
         if (r.code !in 200..299) throw ErrorLoadingException("Octave: HTTP ${r.code} for ${path.substringBefore("?").take(50)}")
         return try {
@@ -288,7 +288,7 @@ class OctaveProvider : MainAPI() {
         if (!OctaveCf.hasClearance()) {
             // try once to get through without asking; otherwise ask the user
             if (!OctaveCf.solveInteractive(null)) {
-                OctaveCf.toast("Octave: Cloudflare check needed - Extensions -> Octave -> settings -> Solve Cloudflare")
+                OctaveCf.toast("Octave: Cloudflare check needed - Extensions -> Octave -> settings -> Cloudflare check + login")
                 return false
             }
         }
@@ -302,12 +302,9 @@ class OctaveProvider : MainAPI() {
         // the server prepares the file on demand (HEAD answers 404 for a moment) - give it a few tries
         var url = streamUrl(key)
         for (i in 0 until 4) {
-            val code = try {
-                app.head(url, headers = OctaveCf.playerHeaders(), timeout = 10L).code
-            } catch (_: Throwable) {
-                -1
-            }
-            if (code in 200..299 || code == 206 || code == -1) break
+            // asked from inside the page (same login/cookies as the site's own player)
+            val code = OctaveCf.head(url)
+            if (code in 200..299 || code == -1) break
             if (code == 401 || code == 403) {
                 key = OctaveCf.playbackToken(forceNew = true) ?: break
                 url = streamUrl(key)

@@ -22,7 +22,6 @@ import android.widget.TextView
 import android.widget.Toast
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +64,7 @@ object OctaveCf {
 
     fun init(context: Context) {
         if (appContext == null) appContext = context.applicationContext
+        OctaveBrowser.init(context)
         if (prefs == null) prefs = context.applicationContext.getSharedPreferences("octave_settings", Context.MODE_PRIVATE)
     }
 
@@ -179,55 +179,72 @@ object OctaveCf {
     /** Headers the player must send with the audio request. */
     fun playerHeaders(): Map<String, String> = headers(false)
 
-    fun isChallenge(r: NiceResponse): Boolean {
-        if (r.headers["cf-mitigated"]?.contains("challenge", true) == true) return true
-        if (r.code !in listOf(403, 429, 503)) return false
-        val head = r.text.take(4000)
+    fun looksLikeChallenge(code: Int, body: String): Boolean {
+        if (code !in listOf(403, 429, 503, -1)) return false
+        val head = body.take(4000)
         return head.contains("Just a moment", true) || head.contains("challenge-platform", true) ||
             head.contains("bot challenge", true) || head.contains("Attention Required", true) ||
-            r.headers["content-type"]?.contains("text/html", true) == true || head.isBlank()
+            head.trimStart().startsWith("<") || head.isBlank() || code == -1
+    }
+
+    fun isChallenge(r: OResp): Boolean = r.challenge
+
+    private fun fromNice(r: NiceResponse): OResp {
+        val mitigated = r.headers["cf-mitigated"]?.contains("challenge", true) == true
+        return OResp(r.code, r.text, mitigated || looksLikeChallenge(r.code, r.text))
     }
 
     // ------------------------------------------------------------------ requests
 
-    /** GET with cookie + UA. When Cloudflare answers with a challenge, the user is asked to solve it, then retried once. */
-    suspend fun get(url: String, json: Boolean = true, extra: Map<String, String> = emptyMap()): NiceResponse {
-        var r = app.get(url, headers = headers(json) + extra, timeout = 30L)
-        if (isChallenge(r)) {
-            r = retryAfterSolve { app.get(url, headers = headers(json) + extra, timeout = 30L) } ?: r
+    /**
+     * Every request goes through the hidden WebView first (same login + cookies, made from inside
+     * the site's own page); plain HTTP with the saved cookie is only the fallback. When Cloudflare
+     * still blocks, the user is asked to solve it in the window, then the call is retried once.
+     */
+    private suspend fun once(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
+        val hdr = LinkedHashMap<String, String>()
+        hdr["Accept"] = "application/json"
+        if (body != null) hdr["Content-Type"] = "application/json"
+        hdr.putAll(extra)
+        try {
+            OctaveBrowser.fetch(method, url, body, hdr)?.let { if (!it.challenge) return it }
+        } catch (_: Throwable) {
         }
-        if (r.code >= 500 && !isChallenge(r)) { // the origin sometimes answers 502 - once more
-            kotlinx.coroutines.delay(600L)
-            r = app.get(url, headers = headers(json) + extra, timeout = 30L)
-        }
-        return r
-    }
-
-    suspend fun postJson(url: String, body: String): NiceResponse {
-        suspend fun go() = app.post(
-            url,
-            headers = headers() + mapOf("Content-Type" to "application/json"),
-            requestBody = body.toRequestBody("application/json".toMediaType()),
-            timeout = 40L
+        val key = accountKey
+        val h = headers() + hdr + (if (key.isNotBlank() && !hdr.containsKey("Authorization")) mapOf("Authorization" to "Bearer $key") else emptyMap())
+        return fromNice(
+            if (method == "GET") app.get(url, headers = h, timeout = 30L)
+            else app.post(url, headers = h, requestBody = (body ?: "").toRequestBody("application/json".toMediaType()), timeout = 40L)
         )
-        var r = go()
-        if (isChallenge(r)) r = retryAfterSolve { go() } ?: r
+    }
+
+    private suspend fun request(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
+        var r = once(method, url, body, extra)
+        if (r.challenge) {
+            r = retryAfterSolve { once(method, url, body, extra) } ?: r
+        } else if (r.code >= 500) { // the origin sometimes answers 502 - once more
+            kotlinx.coroutines.delay(600L)
+            r = once(method, url, body, extra)
+        }
         return r
     }
 
-    private suspend fun retryAfterSolve(block: suspend () -> NiceResponse): NiceResponse? {
-        // 1) Cloudstream's own non-interactive bypass (works when no click is needed)
-        if (!hasClearance()) {
-            try {
-                val k = CloudflareKiller()
-                val r = app.get(SITE, interceptor = k, timeout = 30L)
-                if (!isChallenge(r) && hasClearance()) return block()
-            } catch (_: Throwable) {
-            }
-        }
-        // 2) the user ticks the box in the solver window
+    suspend fun get(url: String, json: Boolean = true, extra: Map<String, String> = emptyMap()): OResp =
+        request("GET", url, null, extra)
+
+    suspend fun postJson(url: String, body: String): OResp = request("POST", url, body, emptyMap())
+
+    /** Status of a HEAD request made from the page (is the song file ready?). -1 = could not tell. */
+    suspend fun head(url: String): Int = try {
+        OctaveBrowser.fetch("HEAD", url, null, emptyMap())?.code ?: -1
+    } catch (_: Throwable) {
+        -1
+    }
+
+    private suspend fun retryAfterSolve(block: suspend () -> OResp): OResp? {
+        // the user passes Cloudflare (and logs in) in the window; nothing else can click the box
         if (!solveInteractive(null)) {
-            toast("Octave: Cloudflare check not done - open Extensions -> Octave -> settings -> Solve Cloudflare")
+            toast("Octave: Cloudflare check not done - open Extensions -> Octave -> settings -> Cloudflare check + login")
             return null
         }
         return block()
@@ -244,13 +261,13 @@ object OctaveCf {
         val now = System.currentTimeMillis()
         token?.let { if (!forceNew && now < tokenExp - 60_000L) return@withLock it }
 
-        suspend fun ask(): NiceResponse {
+        suspend fun ask(): OResp {
             val key = accountKey
             return get("$API/api/playback-token", true, if (key.isNotBlank()) mapOf("Authorization" to "Bearer $key") else emptyMap())
         }
 
         var r = ask()
-        if (r.code in listOf(401, 403) && !isChallenge(r) && accountKey.isBlank()) {
+        if (r.code in listOf(401, 403) && !r.challenge && accountKey.isBlank()) {
             // anonymous not allowed -> try to create an account
             try {
                 val c = postJson("$API/api/account/create", "{}")
@@ -322,7 +339,10 @@ object OctaveCf {
             solving = null
             ok
         }
-        if (result) lastSolvedAt = System.currentTimeMillis()
+        if (result) {
+            lastSolvedAt = System.currentTimeMillis()
+            OctaveBrowser.reset() // restart the hidden page with the new cookies / login
+        }
         return result
     }
 

@@ -285,16 +285,10 @@ class OctaveProvider : MainAPI() {
         val artist = param(data, "a") ?: ""
         val dur = param(data, "d") ?: "0"
 
-        if (!OctaveCf.hasClearance()) {
-            // try once to get through without asking; otherwise ask the user
-            if (!OctaveCf.solveInteractive(null)) {
-                OctaveCf.toast("Octave: Cloudflare check needed - Extensions -> Octave -> settings -> Cloudflare check + login")
-                return false
-            }
-        }
+        // no cookie gate here: the hidden page decides, and asks the user only if Cloudflare really blocks
 
         var key = OctaveCf.playbackToken() ?: run {
-            OctaveCf.toast("Octave: no playback key - open the settings and press Test connection (or paste the account key)")
+            OctaveCf.toast("Octave: no playback key - Settings -> Show last report")
             return false
         }
         fun streamUrl(k: String) = "$api/audio/lossless?track=$id&t=${enc(title)}&a=${enc(artist)}&d=$dur&x=0&k=$k"

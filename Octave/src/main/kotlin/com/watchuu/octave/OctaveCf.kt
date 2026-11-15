@@ -180,11 +180,11 @@ object OctaveCf {
     fun playerHeaders(): Map<String, String> = headers(false)
 
     fun looksLikeChallenge(code: Int, body: String): Boolean {
-        if (code !in listOf(403, 429, 503, -1)) return false
+        if (code !in listOf(403, 429, 503)) return false
         val head = body.take(4000)
         return head.contains("Just a moment", true) || head.contains("challenge-platform", true) ||
             head.contains("bot challenge", true) || head.contains("Attention Required", true) ||
-            head.trimStart().startsWith("<") || head.isBlank() || code == -1
+            head.trimStart().startsWith("<") || head.isBlank()
     }
 
     fun isChallenge(r: OResp): Boolean = r.challenge
@@ -206,16 +206,22 @@ object OctaveCf {
         hdr["Accept"] = "application/json"
         if (body != null) hdr["Content-Type"] = "application/json"
         hdr.putAll(extra)
+        val tag = "$method ${url.substringBefore("?").takeLast(50)}"
         try {
-            OctaveBrowser.fetch(method, url, body, hdr)?.let { if (!it.challenge) return it }
-        } catch (_: Throwable) {
+            val b = OctaveBrowser.fetch(method, url, body, hdr)
+            if (b != null && !b.challenge && b.code != -1) { lastReport = "$tag via page -> HTTP ${b.code}"; return b }
+            lastReport = "$tag page: ${b?.code ?: "unavailable"}${if (b?.challenge == true) " (Cloudflare)" else ""}"
+        } catch (e: Throwable) {
+            lastReport = "$tag page threw ${e.message}"
         }
         val key = accountKey
         val h = headers() + hdr + (if (key.isNotBlank() && !hdr.containsKey("Authorization")) mapOf("Authorization" to "Bearer $key") else emptyMap())
-        return fromNice(
+        val n = fromNice(
             if (method == "GET") app.get(url, headers = h, timeout = 30L)
             else app.post(url, headers = h, requestBody = (body ?: "").toRequestBody("application/json".toMediaType()), timeout = 40L)
         )
+        lastReport += " | http -> ${n.code}${if (n.challenge) " (Cloudflare)" else ""}"
+        return n
     }
 
     private suspend fun request(method: String, url: String, body: String?, extra: Map<String, String>): OResp {
@@ -241,7 +247,19 @@ object OctaveCf {
         -1
     }
 
+    /** Plain-language trace of the last request (browser step + http step). */
+    @Volatile var lastReport: String = "no request yet"
+
+    fun report(): String = "Hidden page: ${OctaveBrowser.lastInfo}\nLast request: $lastReport\n" +
+        "cf_clearance: ${if (hasClearance()) "yes" else "NO"}, account key: ${if (accountKey.isNotBlank()) "yes" else "no"}, " +
+        "saved cookies: ${if (savedCookies.isNotBlank()) "yes" else "no"}"
+
     private suspend fun retryAfterSolve(block: suspend () -> OResp): OResp? {
+        // just solved/logged in and still blocked: opening the window again will not help
+        if (System.currentTimeMillis() - lastSolvedAt < 120_000L && hasClearance()) {
+            toast("Octave: still blocked after login - Settings -> Show last report")
+            return null
+        }
         // the user passes Cloudflare (and logs in) in the window; nothing else can click the box
         if (!solveInteractive(null)) {
             toast("Octave: Cloudflare check not done - open Extensions -> Octave -> settings -> Cloudflare check + login")

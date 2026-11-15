@@ -45,6 +45,9 @@ object OctaveBrowser {
     /** Audio links the page itself requested (url -> seen), for debugging and as a fallback source. */
     val seenAudio = java.util.concurrent.CopyOnWriteArrayList<String>()
 
+    /** What happened in the last browser call - shown in Settings -> "Show last report". */
+    @Volatile var lastInfo: String = "no request yet"
+
     fun init(context: Context) {
         if (appContext == null) appContext = context.applicationContext
     }
@@ -61,6 +64,12 @@ object OctaveBrowser {
     @SuppressLint("SetJavaScriptEnabled")
     private fun create(ctx: Context): WebView {
         val wv = WebView(ctx)
+        // a real size: a page without layout renders no text and some scripts never start
+        wv.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+        )
+        wv.layout(0, 0, 1080, 1920)
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -104,7 +113,7 @@ object OctaveBrowser {
     private const val READY_JS =
         "(function(){try{return !/just a moment|attention required|security verification|un instant|einen moment/i.test(document.title)&&" +
             "document.readyState!=='loading'&&!document.querySelector('#challenge-form,#cf-challenge-running,#challenge-stage')&&" +
-            "document.body&&document.body.innerText.length>50&&location.hostname.indexOf('octavestreaming')>=0}catch(e){return false}})()"
+            "document.readyState==='complete'&&document.body&&document.body.innerHTML.length>2000&&location.hostname.indexOf('octavestreaming')>=0}catch(e){return false}})()"
 
     // NOTE: raw string, no dollar signs.
     private const val FETCH_JS = """
@@ -159,6 +168,9 @@ object OctaveBrowser {
             }
             delay(500L)
         }
+        val title = eval(webView, "document.title") ?: "?"
+        val loc = eval(webView, "location.href") ?: "?"
+        lastInfo = "hidden page NOT ready after ${timeoutMs / 1000}s: title=$title url=$loc"
         false
     }
 
@@ -179,6 +191,9 @@ object OctaveBrowser {
         lastUse = System.currentTimeMillis()
         val r = withTimeoutOrNull(35_000L) { d.await() }
         pending.remove(id)
+        lastInfo = if (r == null) "page fetch timed out: ${method} ${url.substringBefore("?").takeLast(60)}"
+        else "page fetch ${method} ${url.substringBefore("?").takeLast(60)} -> HTTP ${r.code}" +
+            (if (r.code !in 200..299) " body=${r.text.take(120).replace("\n", " ")}" else "")
         return r
     }
 

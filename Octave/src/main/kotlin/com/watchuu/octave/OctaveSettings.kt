@@ -69,13 +69,16 @@ object OctaveSettings {
                 val msg = try {
                     val r = OctaveCf.get("${OctaveCf.API}/api/lastfm/global-chart-tracks?limit=1")
                     val t = OctaveCf.playbackToken(true)
-                    "API: HTTP ${r.code}, playback key: ${if (t != null) "OK" else "failed (set an account key below?)"}"
+                    "API: HTTP ${r.code}, playback key: ${if (t != null) "OK" else "failed"} - see Show last report"
                 } catch (e: Throwable) {
                     "Test failed: ${e.message}"
                 }
                 OctaveCf.toast("Octave: $msg")
                 withContext(Dispatchers.Main) { refresh() }
             }
+        })
+        root.addView(button("Show last report") {
+            AlertDialog.Builder(act).setTitle("Octave report").setMessage(OctaveCf.report()).setPositiveButton("OK", null).show()
         })
         root.addView(button("Clear Cloudflare cookies") {
             OctaveCf.clearCookies(); refresh()

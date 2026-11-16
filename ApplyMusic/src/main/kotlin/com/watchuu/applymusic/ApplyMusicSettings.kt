@@ -68,6 +68,22 @@ object ApplyMusicSettings {
             Toast.makeText(act, "Apply Music: saved", Toast.LENGTH_SHORT).show()
         })
 
+        root.addView(button("Open the site (Cloudflare check)") {
+            scope.launch {
+                val msg = ApplyMusicLogin.runAndSave(act)
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(act).setTitle("Apply Music").setMessage(msg)
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+        })
+
+        root.addView(button("Clear cookies") {
+            ApplyMusicApi.clearCookies()
+            cookieField.setText("")
+            Toast.makeText(act, "Apply Music: cookies cleared", Toast.LENGTH_SHORT).show()
+        })
+
         root.addView(button("Test") {
             scope.launch {
                 val t0 = System.currentTimeMillis()

@@ -36,7 +36,7 @@ import java.util.Locale
  */
 object ApplyMusicApi {
     const val SITE = "https://music.ak1ra.de5.net"
-    const val BUILD = "v1"
+    const val BUILD = "v2"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -62,10 +62,27 @@ object ApplyMusicApi {
         get() = str("storefront").ifBlank { "in" }
         set(v) = put("storefront", v.ifBlank { "in" })
 
-    /** a cf_clearance cookie, only needed when the site's Cloudflare check is strict */
+    /** a cf_clearance cookie pasted by hand */
     var manualCookie: String
         get() = str("cookie")
         set(v) = put("cookie", v)
+
+    /** whatever the Cloudflare window ended up with */
+    var savedCookies: String
+        get() = str("saved_cookies")
+        set(v) = put("saved_cookies", v)
+
+    fun clearCookies() {
+        runCatching {
+            val cm = CookieManager.getInstance()
+            listOf(SITE, "https://ak1ra.de5.net", "https://de5.net").forEach {
+                cm.setCookie(it, "cf_clearance=; Max-Age=0")
+            }
+            cm.flush()
+        }
+        savedCookies = ""
+        manualCookie = ""
+    }
 
     fun userAgent(): String {
         uaCache?.let { return it }
@@ -83,9 +100,12 @@ object ApplyMusicApi {
             }
         }
         add(manualCookie)
+        add(savedCookies)
         runCatching {
             val cm = CookieManager.getInstance()
-            add(cm.getCookie(SITE)); add(cm.getCookie("https://ak1ra.de5.net"))
+            add(cm.getCookie(SITE))
+            add(cm.getCookie("https://ak1ra.de5.net"))
+            add(cm.getCookie("https://de5.net"))
         }
         return jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }
@@ -190,7 +210,7 @@ object ApplyMusicApi {
     fun report(): String = buildString {
         append("Apply Music build: $BUILD\n")
         append("storefront: ${storefront}\n")
-        append("cookie: ${if (cookieHeader().isNotBlank()) "present" else "none"}\n")
+        append("cookie: ${if (cookieHeader().contains("cf_clearance")) "cf_clearance present" else if (cookieHeader().isNotBlank()) "present, no cf_clearance" else "none"}\n")
         append("user agent: ${userAgent().take(110)}")
     }
 }

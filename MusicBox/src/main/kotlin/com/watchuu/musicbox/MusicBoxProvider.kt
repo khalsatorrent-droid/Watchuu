@@ -969,7 +969,25 @@ class MusicBoxProvider : MainAPI() {
             MusicBoxBrowser.openVerification(activity, authUrl) { grant ->
                 scope.launch {
                     try {
-                        ZarzSessionManager.session(ZarzSession.APP_VERSION_DEEZER).exchange(grant)
+                        // the url belongs to whichever provider asked for it; when that is not recorded,
+                        // offer the grant to each provider that has no session until one accepts it
+                        val matching = ZarzSessionManager.versions.filter {
+                            ZarzSessionManager.session(it).verificationUrl == authUrl
+                        }
+                        val candidates = matching.ifEmpty { ZarzSessionManager.versions.filter { !ZarzSessionManager.isUsable(it) } }
+                            .ifEmpty { ZarzSessionManager.versions }
+                        var owner = candidates.first()
+                        var done = false
+                        for (v in candidates) {
+                            try {
+                                ZarzSessionManager.session(v).exchange(grant)
+                                owner = v; done = true; break
+                            } catch (e: Exception) {
+                                MusicBoxLog.d(TAG, "Grant not accepted for $v: ${e.message}")
+                            }
+                        }
+                        if (!done) throw Exception("no provider accepted the grant")
+                        ZarzSessionManager.activateOthers(owner, grant)
                         saveSession()
                         withContext(Dispatchers.Main) {
                             android.widget.Toast.makeText(

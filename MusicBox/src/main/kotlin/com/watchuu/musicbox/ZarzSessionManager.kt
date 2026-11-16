@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 object ZarzSessionManager {
     private const val PREFS = "musicbox_prefs"
     private const val KEY_PREFIX = "musicbox_zarz_session"
+    private const val INSTALL_KEY = "musicbox_zarz_install_id"
 
     private val sessions = ConcurrentHashMap<String, ZarzSession>()
 
@@ -52,6 +53,59 @@ object ZarzSessionManager {
             if (stored.isNullOrBlank() && session.record.sessionId.isNotBlank()) return
         }
         session.loadState(stored)
+        // a provider that has no session of its own yet joins the shared install, so that one
+        // verification can cover all of them
+        if (session.record.sessionId.isBlank()) sharedInstallId(context)?.let { session.record.installId = it }
+    }
+
+    /**
+     * One install id for every provider. It is taken from an already working session if there is
+     * one (that install is the one the server has verified), otherwise it is made once and kept.
+     */
+    @Synchronized
+    fun sharedInstallId(context: Context? = contextOrNull()): String? {
+        val p = prefs(context) ?: return null
+        p.getString(INSTALL_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
+        val fromSession = versions.map { session(it).record }.firstOrNull { it.isUsable() }?.installId
+        val id = fromSession ?: versions.map { session(it).record.installId }.firstOrNull { it.isNotBlank() }
+            ?: return null
+        runCatching { p.edit().putString(INSTALL_KEY, id).apply() }
+        return id
+    }
+
+    /**
+     * After one provider has been verified, brings the others up on the same install: first by asking
+     * for a session directly (the server already knows this install), then by trying the grant just
+     * earned. Returns the providers that still have no session, so the caller can say so.
+     */
+    suspend fun activateOthers(primary: String, grant: String?, context: Context? = contextOrNull()): List<String> {
+        val install = session(primary).record.installId
+        val missing = ArrayList<String>()
+        for (v in versions) {
+            if (v == primary) continue
+            val s = session(v)
+            if (s.record.isUsable()) continue
+            s.record.installId = install
+            var ok = false
+            try {
+                ok = s.bootstrap().isBlank() && s.record.isUsable()
+                MusicBoxLog.d("ZarzSessionManager", "${label(v)}: direct bootstrap on shared install -> $ok")
+            } catch (e: Exception) {
+                MusicBoxLog.d("ZarzSessionManager", "${label(v)}: bootstrap failed: ${e.message}")
+            }
+            if (!ok && grant != null) {
+                try {
+                    s.exchange(grant)
+                    ok = s.record.isUsable()
+                    MusicBoxLog.d("ZarzSessionManager", "${label(v)}: shared grant exchange -> $ok")
+                } catch (e: Exception) {
+                    MusicBoxLog.d("ZarzSessionManager", "${label(v)}: shared grant refused: ${e.message}")
+                }
+            }
+            persist(v, context)
+            if (!ok) missing.add(v)
+        }
+        return missing
     }
 
     /** writes one provider's session so settings and playback agree next launch */

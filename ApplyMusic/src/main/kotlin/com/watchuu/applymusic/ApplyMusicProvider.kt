@@ -276,31 +276,46 @@ class ApplyMusicProvider : MainAPI() {
             "song resource: master=${if (master.isBlank()) "none" else "yes"}, preview=${if (preview.isBlank()) "none" else "yes"}"
         )
 
-        // the master is a plain HLS playlist: variants with CODECS, then their uri on the next line
+        // The master lists the variants. Most of them are Apple FairPlay - the variant playlist
+        // carries #EXT-X-KEY:METHOD=SAMPLE-AES with URI="skd://…" and
+        // KEYFORMAT="com.apple.streamingkeydelivery", which only an Apple client can unlock. Those
+        // are skipped: emitting one produces a link that loads and then refuses to play.
+        // A variant that is not encrypted is used when the catalogue has one.
         if (master.startsWith("http")) {
             val playlist = ApplyMusicApi.text(master)
             if (playlist != null) {
                 val variants = parseVariants(playlist, master)
                 ApplyMusicApi.log("step", "master: ${variants.size} variant(s)")
-                val best = variants.maxByOrNull { it.rank }
-                if (best != null) {
-                    ApplyMusicApi.log("step", "picked ${best.codecs} ${best.bandwidth / 1000}kbps")
+
+                for (v in variants.sortedByDescending { it.rank }.take(4)) {
+                    val media = ApplyMusicApi.text(v.url)
+                    if (media == null) {
+                        ApplyMusicApi.log("step", "${v.label}: playlist unreadable, skipped")
+                        continue
+                    }
+                    val protection = protectionOf(media)
+                    if (protection != null) {
+                        ApplyMusicApi.log("step", "${v.label}: protected ($protection), skipped")
+                        continue
+                    }
+                    ApplyMusicApi.log("step", "picked ${v.label} - not encrypted")
                     callback.invoke(
-                        newExtractorLink(name, "$name ${best.label}", best.url, ExtractorLinkType.M3U8) {
+                        newExtractorLink(name, "$name ${v.label}", v.url, ExtractorLinkType.M3U8) {
                             this.referer = "${ApplyMusicApi.SITE}/"
-                            this.quality = best.quality
+                            this.quality = v.quality
                             this.headers = ApplyMusicApi.headers(mapOf("Accept" to "*/*"))
                         }
                     )
                     return true
                 }
+                ApplyMusicApi.log("WARN", "every variant is DRM protected - only the preview can play")
             }
         }
 
         if (preview.startsWith("http")) {
             ApplyMusicApi.log("step", "emitted preview only")
             callback.invoke(
-                newExtractorLink(name, "$name preview (30s)", preview, ExtractorLinkType.VIDEO) {
+                newExtractorLink(name, "$name preview (30s) - catalogue is DRM protected", preview, ExtractorLinkType.VIDEO) {
                     this.referer = "${ApplyMusicApi.SITE}/"
                     this.quality = 128
                 }
@@ -310,6 +325,26 @@ class ApplyMusicProvider : MainAPI() {
 
         ApplyMusicApi.log("WARN", "nothing playable for $id")
         return false
+    }
+
+    /**
+     * What protects this media playlist, or null when nothing does.
+     *
+     * FairPlay is named first because that is what Apple's catalogue uses here; CENC/Widevine is
+     * reported too so the log says which one it is rather than just "encrypted".
+     */
+    private fun protectionOf(mediaPlaylist: String): String? {
+        if (!mediaPlaylist.contains("#EXT-X-KEY")) return null
+        val keys = Regex("#EXT-X-KEY:([^\\n]*)").findAll(mediaPlaylist).map { it.groupValues[1] }.toList()
+        for (k in keys) {
+            if (k.contains("METHOD=NONE")) continue
+            if (k.contains("skd://") || k.contains("streamingkeydelivery", true)) return "FairPlay (skd://)"
+            if (k.contains("SAMPLE-AES", true)) return "SAMPLE-AES"
+            if (k.contains("widevine", true)) return "Widevine"
+            if (k.contains("playready", true)) return "PlayReady"
+            return "encrypted key"
+        }
+        return null
     }
 
     private data class Variant(

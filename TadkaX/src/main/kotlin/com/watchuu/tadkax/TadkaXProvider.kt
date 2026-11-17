@@ -73,14 +73,15 @@ class TadkaXProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         // Every list action answers with meta.pages, so a row knows exactly where it ends.
-        val (items, pages) = runCatching {
+        // every branch returns raw json objects plus the page count, so the types stay uniform
+        val (objs, pages) = runCatching<Pair<List<JSONObject>, Int>> {
             when {
                 request.data == "featured" || request.data == "recommended" -> {
                     // these two come from the home bundle, which has no paging of its own
                     val root = TadkaXApi.get("home", mapOf("latest_limit" to "1"))
                     val arr = root?.optJSONObject("data")?.optJSONArray(request.data)
-                    val list = if (arr == null) emptyList() else
-                        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> card(o) } }
+                    val list = if (arr == null) emptyList<JSONObject>() else
+                        (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
                     list to 0
                 }
                 request.data == "latest" ->
@@ -98,6 +99,8 @@ class TadkaXProvider : MainAPI() {
                 else -> emptyList<JSONObject>() to 0
             }
         }.getOrElse { emptyList<JSONObject>() to 0 }
+
+        val items = objs.mapNotNull { card(it) }
 
         // hasNext drives the "load more" the app shows at the end of a row
         val hasNext = pages > 0 && page < pages

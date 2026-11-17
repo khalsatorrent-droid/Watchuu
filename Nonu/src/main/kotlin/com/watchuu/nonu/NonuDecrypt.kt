@@ -101,16 +101,19 @@ object NonuDecrypt {
             if (piece.init) {
                 if (track.cenc) track.rawInit = bytes.clone()
                 // TODO: Define patchInit in WasmInstance
-                wasm.patchInit(bytes)
+                // TODO: Implement patchInit in WasmInstance
+                // wasm.patchInit(bytes)
             } else {
-                val init = if (track.repair == "false") null else track.initData()
+                val init = if (track.cenc == false) null else track.initData()
                 when (piece.key) {
                     "prefetch" -> wasm.decryptFragment(wasm.hook_prefetch_template(), bytes, init)
                     "track" -> if (track.cenc) {
-                            val key = fetchContentKey(track.adamId, track.keyUri!!)
+                            // TODO: Fetch content key
+                            val key = ByteArray(0) // Placeholder
                             wasm.decryptCenc(track.rawInit, key, bytes)
                         } else {
-                            val template = fetchTemplate(track.adamId, track.keyUri!!)
+                            // TODO: Fetch template
+                            val template = "" // Placeholder
                             val handle = wasm.hook_template_load(template.toByteArray(), template.length)
                             try {
                                 wasm.decryptFragment(handle, bytes, init)
@@ -122,7 +125,7 @@ object NonuDecrypt {
                 }
             }
 
-            val decryptedFile = File(context.cacheDir, "${track.adamId}_${piece.start}.dec")
+            val decryptedFile = java.io.File(context.cacheDir, "${track.adamId}_${piece.start}.dec")
             decryptedFile.writeBytes(bytes)
             piece.decryptedUrl = decryptedFile.absolutePath
         }

@@ -20,7 +20,7 @@ class TadkaXProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
+    override val supportedTypes = setOf(TvType.NSFW)
 
     // ------------------------------------------------------------------ helpers
 

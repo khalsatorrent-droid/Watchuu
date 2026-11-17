@@ -269,16 +269,26 @@ class NonuProvider : MainAPI() {
         }
 
         // the song resource carries the HLS master and a preview
-        val root = NonuApi.json(
-            "/amp/v1/catalog/$cc/songs/$id?extend=extendedAssetUrls&include=albums,artists&l=en-GB&platform=web"
-        )
-        val songAttrs = root?.optJSONArray("data").objs().firstOrNull()?.let { attrs(it) }
-        val master = songAttrs?.optJSONObject("extendedAssetUrls")?.optString("enhancedHls").orEmpty()
+        NonuApi.log("step", "fetching song resource for $id")
+        val root = try {
+            NonuApi.json(
+                "/amp/v1/catalog/$cc/songs/$id?extend=extendedAssetUrls&include=albums,artists&l=en-GB&platform=web"
+            )
+        } catch (e: Exception) {
+            NonuApi.log("WARN", "song resource fetch threw: ${e.message}")
+            null
+        }
+        if (root == null) NonuApi.log("WARN", "song resource is null for $id")
+
+        val songData = root?.optJSONArray("data").objs().firstOrNull()
+        val songAttrs = songData?.let { attrs(it) }
+        val extUrls = songAttrs?.optJSONObject("extendedAssetUrls")
+        val master = extUrls?.optString("enhancedHls").orEmpty()
         val preview = songAttrs?.optJSONArray("previews").objs().firstOrNull()?.optString("url").orEmpty()
 
         NonuApi.log(
             "step",
-            "song resource: master=${if (master.isBlank()) "none" else "yes"}, preview=${if (preview.isBlank()) "none" else "yes"}"
+            "song $id: master=${if (master.isBlank()) "none" else master.take(80)}, preview=${if (preview.isBlank()) "none" else "yes"}"
         )
 
         // Try to decrypt the full track via the master HLS
@@ -287,7 +297,7 @@ class NonuProvider : MainAPI() {
                 val decryptedFile = decryptFullTrack(id, master)
                 if (decryptedFile != null) {
                     val streamUrl = NonuDecrypt.localUrl(decryptedFile)
-                    NonuApi.log("step", "serving decrypted file via loopback: $streamUrl")
+                    NonuApi.log("step", "serving decrypted file at $streamUrl (${decryptedFile.length()} bytes)")
                     callback.invoke(
                         newExtractorLink(name, "$name", streamUrl, ExtractorLinkType.VIDEO) {
                             this.referer = "$mainUrl/song/$id"
@@ -295,15 +305,17 @@ class NonuProvider : MainAPI() {
                         }
                     )
                     return true
+                } else {
+                    NonuApi.log("WARN", "decryptFullTrack returned null for $id")
                 }
             } catch (e: Exception) {
-                NonuApi.log("WARN", "decryption failed: ${e.message}")
+                NonuApi.log("WARN", "decryption failed for $id: ${e::class.simpleName}: ${e.message}")
             }
         }
 
         // Fallback: preview URL (30-second unencrypted preview)
         if (preview.isNotBlank()) {
-            NonuApi.log("step", "falling back to preview")
+            NonuApi.log("step", "falling back to preview for $id")
             callback.invoke(
                 newExtractorLink(name, "$name Preview", preview, ExtractorLinkType.M3U8) {
                     this.referer = "$mainUrl/song/$id"
@@ -313,7 +325,7 @@ class NonuProvider : MainAPI() {
             return true
         }
 
-        NonuApi.log("WARN", "nothing playable for $id")
+        NonuApi.log("WARN", "nothing playable for $id — master=${master.isNotBlank()}, preview=${preview.isNotBlank()}")
         return false
     }
 

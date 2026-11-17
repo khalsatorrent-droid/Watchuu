@@ -141,8 +141,13 @@ object NonuDecrypt {
      * Parse Apple's raw media m3u8 (with EXT-X-KEY), returning init segment and byte/time ranges of each segment.
      */
     fun parseMediaPlaylist(text: String, playlistUrl: String, adamIdHint: String?): MediaPlaylist {
+        val base = playlistUrl.substringBeforeLast("/") + "/"
         val fileName = playlistUrl.substringAfterLast("/")
         val adamId = adamIdHint ?: "_A(\\d+)[._]".toRegex().find(fileName)?.groupValues?.get(1) ?: ""
+
+        /** Resolve a URI (may be relative) against the playlist base URL. */
+        fun resolveUri(uri: String): String =
+            if (uri.startsWith("http://") || uri.startsWith("https://")) uri else base + uri
 
         var init: MediaSegment? = null
         var keyUri: String? = null
@@ -175,7 +180,7 @@ object NonuDecrypt {
                     val range = "BYTERANGE=\"([^\"]+)\"".toRegex().find(line)?.groupValues?.get(1)
                     if (uri == null || range == null) throw IllegalArgumentException("Invalid EXT-X-MAP: $line")
                     val (start, end) = byteRange(range, 0)
-                    init = MediaSegment(uri, start, end, 0f, 0f, null, isInit = true)
+                    init = MediaSegment(resolveUri(uri), start, end, 0f, 0f, null, isInit = true)
                     next = end + 1
                 }
                 line.startsWith("#EXTINF:") -> {
@@ -305,7 +310,7 @@ object NonuDecrypt {
             files.sortedByDescending { it.lastModified() }.drop(6).forEach { it.delete() }
         }
 
-        log("starting decrypt: adamId=${track.adamId}, segments=${track.segments.size}, cenc=${track.cenc}")
+        log("starting decrypt: adamId=${track.adamId}, segments=${track.segments.size}, cenc=${track.cenc}, initUrl=${track.init.url.take(100)}")
 
         // Pre-fetch the template/key if this track needs it (FairPlay only)
         var templateHandle = 0
@@ -315,7 +320,7 @@ object NonuDecrypt {
                 templateHandle = wasm.loadTemplate(templateJson.toByteArray(Charsets.UTF_8))
                 log("template loaded, handle=$templateHandle")
             } catch (e: Exception) {
-                log("WARNING: template fetch failed: ${e.message}")
+                log("WARNING: template fetch failed: ${e::class.simpleName}: ${e.message}")
             }
         }
 
@@ -323,7 +328,7 @@ object NonuDecrypt {
             val outputStream = ByteArrayOutputStream((track.size + 1024).toInt())
 
             // 1. Download and process init segment
-            log("downloading init segment: ${track.init.start}-${track.init.end}")
+            log("downloading init segment: url=${track.init.url.take(100)}, range=${track.init.start}-${track.init.end}")
             val initBytes = downloadPiece(track.init)
             log("init downloaded: ${initBytes.size} bytes")
 

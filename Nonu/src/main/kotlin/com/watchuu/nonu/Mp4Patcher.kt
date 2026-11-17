@@ -259,8 +259,8 @@ object Mp4Patcher {
     fun decryptFragmentInPlace(tpl: TemariCipher.Template, data: ByteArray) {
         val (samples, renames) = scanFragment(data)
         applyRenames(data, renames)
-        // Convert IntRange to pairs for the cipher
-        val ranges = samples.map { it.first to (it.last + 1) }
+        // Convert IntRange to (offset, length) pairs for the cipher
+        val ranges = samples.map { it.first to (it.last - it.first + 1) }
         TemariCipher.decryptRangesInPlace(tpl, data, ranges)
     }
 

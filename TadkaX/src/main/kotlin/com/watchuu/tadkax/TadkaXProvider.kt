@@ -74,7 +74,8 @@ class TadkaXProvider : MainAPI() {
         val items = runCatching {
             when {
                 request.data == "featured" || request.data == "recommended" -> {
-                    val root = TadkaXApi.get("home", mapOf("latest_limit" to "1")) ?: return emptyList<SearchResponse>()
+                    val root = TadkaXApi.get("home", mapOf("latest_limit" to "1"))
+                        ?: return@runCatching emptyList<SearchResponse>()
                     root.optJSONObject("data")?.optJSONArray(request.data).objs().mapNotNull { card(it) }
                 }
                 request.data == "latest" -> TadkaXApi.list("latest", mapOf("page" to "1", "limit" to "30"))

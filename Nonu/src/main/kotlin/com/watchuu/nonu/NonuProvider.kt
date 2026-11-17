@@ -297,12 +297,12 @@ class NonuProvider : MainAPI() {
             append("#EXT-X-ENDLIST")
         }
 
-        val variantUrl = java.io.File((com.lagradost.cloudstream3.CloudStreamApp.context ?: context).cacheDir, "${track.adamId}.m3u8").apply {
+        val variantUrl = java.io.File((com.lagradost.cloudstream3.CloudStreamApp.context).cacheDir, "${track.adamId}.m3u8").apply {
             writeText(variantM3u8)
         }.absolutePath
 
         callback.invoke(
-            newExtractorLink(name, "$name ${track.segments.sumOf { it.duration }.toInt() / 1000}kbps", variantUrl, ExtractorLinkType.M3U8) {
+            newExtractorLink(name, "$name ${track.segments.sumOf { it.duration.toInt() }.toInt() / 1000}kbps", variantUrl, ExtractorLinkType.M3U8) {
                 this.referer = "$mainUrl/song/${id}"
                 this.quality = Qualities.Unknown.value
             }

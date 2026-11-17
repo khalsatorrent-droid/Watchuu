@@ -152,7 +152,8 @@ data class MediaSegment(
     val end: Long,
     val time: Float,
     val duration: Float,
-    val key: String? // "prefetch", "track" or null
+    val key: String?, // "prefetch", "track" or null
+    var decryptedUrl: String? = null
 )
 
 private val LICENSE_SYSTEMS = listOf(

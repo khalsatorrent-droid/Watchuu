@@ -22,6 +22,9 @@ class TadkaXProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.NSFW)
 
+    /** items per page; the api caps this itself, so it is a request not a guarantee */
+    private val PAGE = "30"
+
     // ------------------------------------------------------------------ helpers
 
     private fun JSONObject.str(vararg keys: String): String? {
@@ -69,35 +72,53 @@ class TadkaXProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(request.name, emptyList(), false)
-
-        val items = runCatching {
+        // Every list action answers with meta.pages, so a row knows exactly where it ends.
+        val (items, pages) = runCatching {
             when {
                 request.data == "featured" || request.data == "recommended" -> {
+                    // these two come from the home bundle, which has no paging of its own
                     val root = TadkaXApi.get("home", mapOf("latest_limit" to "1"))
-                        ?: return@runCatching emptyList<SearchResponse>()
-                    root.optJSONObject("data")?.optJSONArray(request.data).objs().mapNotNull { card(it) }
+                    val arr = root?.optJSONObject("data")?.optJSONArray(request.data)
+                    val list = if (arr == null) emptyList() else
+                        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let { o -> card(o) } }
+                    list to 0
                 }
-                request.data == "latest" -> TadkaXApi.list("latest", mapOf("page" to "1", "limit" to "30"))
-                    .first.mapNotNull { card(it) }
-                request.data == "daily_top" -> TadkaXApi.list("daily_top", mapOf("limit" to "30"))
-                    .first.mapNotNull { card(it) }
+                request.data == "latest" ->
+                    TadkaXApi.list("latest", mapOf("page" to page.toString(), "limit" to PAGE))
+                request.data == "daily_top" ->
+                    TadkaXApi.list("daily_top", mapOf("page" to page.toString(), "limit" to PAGE))
                 request.data.startsWith("cat:") -> TadkaXApi.list(
                     "by_category",
-                    mapOf("category" to request.data.removePrefix("cat:"), "page" to "1", "limit" to "30")
-                ).first.mapNotNull { card(it) }
-                else -> emptyList()
+                    mapOf(
+                        "category" to request.data.removePrefix("cat:"),
+                        "page" to page.toString(),
+                        "limit" to PAGE,
+                    )
+                )
+                else -> emptyList<JSONObject>() to 0
             }
-        }.getOrElse { emptyList() }
+        }.getOrElse { emptyList<JSONObject>() to 0 }
 
-        return newHomePageResponse(HomePageList(request.name, items), false)
+        // hasNext drives the "load more" the app shows at the end of a row
+        val hasNext = pages > 0 && page < pages
+        return newHomePageResponse(HomePageList(request.name, items), hasNext)
     }
 
     // ------------------------------------------------------------------ search
 
+    /** paginated search - the app calls this and shows more as you scroll */
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
+        if (query.isBlank()) return newSearchResponseList(emptyList(), false)
+        val (items, pages) = TadkaXApi.list(
+            "search",
+            mapOf("q" to query.trim(), "page" to page.toString(), "limit" to PAGE)
+        )
+        return newSearchResponseList(items.mapNotNull { card(it) }, pages > 0 && page < pages)
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        val (items, _) = TadkaXApi.list("search", mapOf("q" to query.trim(), "page" to "1", "limit" to "50"))
+        val (items, _) = TadkaXApi.list("search", mapOf("q" to query.trim(), "page" to "1", "limit" to PAGE))
         return items.mapNotNull { card(it) }
     }
 

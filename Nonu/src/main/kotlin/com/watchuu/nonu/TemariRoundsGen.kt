@@ -547,6 +547,7 @@ object TemariRoundsGen {
         rax = (rax) + ((304092325))
         rax = rax xor (rdx)
         return Round1Mid(rax = rax, r11 = r11, r12 = r12, r13 = r13, r15 = r15, r8 = r8, r14 = r14, rbx = rbx, r10 = r10, rcx = rcx)
+    }
 
     fun round1Tail(ctx: ByteArray, st: IntArray, eax: Int, r13: Int, r15: Int, r8: Int, r14: Int): Round1Tail {
         var rax = 0
@@ -887,6 +888,7 @@ object TemariRoundsGen {
         rax = rax xor ((100))
         rdi = st[(64)]
         return Round1Tail(rdi = rdi, rsi = rsi, rdx = rdx, rcx = rcx, r8 = r8, r9 = r9, rax = rax, rbx = rbx, r10 = r10, r11 = r11, r12 = r12, r13 = r13, r14 = r14, r15 = r15)
+    }
 
     fun round2Sub6400(
         ctx: ByteArray, st: IntArray,
@@ -1189,6 +1191,7 @@ object TemariRoundsGen {
         st[(648)] = (v189 and 0xFF)
         st[(728)] = ((v189 ushr 8) and 0xFF)
         return Round2Vars(cp12 = cp12, v171 = v171, v187 = v187, v189 = v189)
+    }
 
     fun round3Sub8000(
         ctx: ByteArray, st: IntArray,

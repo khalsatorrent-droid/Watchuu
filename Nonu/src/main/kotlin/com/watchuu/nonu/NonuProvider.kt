@@ -281,35 +281,28 @@ class NonuProvider : MainAPI() {
             "song resource: master=${if (master.isBlank()) "none" else "yes"}, preview=${if (preview.isBlank()) "none" else "yes"}"
         )
 
-        // the master is a plain HLS playlist: variants with CODECS, then their uri on the next line
-        // Decrypt the track
-        val track = NonuDecrypt.parseMediaPlaylist(master, master, songAttrs?.str("id"))
-        NonuDecrypt.decrypt(context, track, false)
-
-        // Rebuild the playlist with local decrypted URLs
-        val variantM3u8 = buildString {
-            appendLine("#EXTM3U")
-            appendLine("#EXT-X-VERSION:6")
-            track.segments.forEach { seg ->
-                appendLine("#EXTINF:${seg.duration},")
-                appendLine(seg.decryptedUrl)
-            }
-            append("#EXT-X-ENDLIST")
+        // Serve the master HLS directly
+        // TODO: When decryption is fully implemented, decrypt segments and rebuild playlist
+        if (master.isNotBlank()) {
+            callback.invoke(
+                newExtractorLink(name, "$name HLS", master, ExtractorLinkType.M3U8) {
+                    this.referer = "$mainUrl/song/$id"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return true
         }
 
-        val variantUrl = java.io.File((context).cacheDir, "${track.adamId}.m3u8").apply {
-            writeText(variantM3u8)
-        }.absolutePath
-
-        callback.invoke(
-            newExtractorLink(name, "$name ${track.segments.sumOf { it.duration.toInt() }.toInt() / 1000}kbps", variantUrl, ExtractorLinkType.M3U8) {
-                this.referer = "$mainUrl/song/${id}"
-                this.quality = Qualities.Unknown.value
-            }
-        )
-        return true
-
-[delete the whole block]
+        // Fallback: preview URL
+        if (preview.isNotBlank()) {
+            callback.invoke(
+                newExtractorLink(name, "$name Preview", preview, ExtractorLinkType.M3U8) {
+                    this.referer = "$mainUrl/song/$id"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return true
+        }
 
         NonuApi.log("WARN", "nothing playable for $id")
         return false

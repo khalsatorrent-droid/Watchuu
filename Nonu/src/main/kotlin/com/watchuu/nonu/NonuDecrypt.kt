@@ -36,9 +36,10 @@ object NonuDecrypt {
         val segments = mutableListOf<MediaSegment>()
 
         fun byteRange(value: String, fallbackOffset: Long): Pair<Long, Long> {
-            val (len, off) = value.replace("\"", "").trim().split("@")
-            val start = off?.toLongOrNull() ?: fallbackOffset
-            return start to start + len.toLong() - 1
+            val parts = value.replace("\"", "").trim().split("@")
+            val len = parts[0].toLong()
+            val start = if (parts.size > 1) parts[1].toLongOrNull() ?: fallbackOffset else fallbackOffset
+            return start to start + len - 1
         }
 
         for (raw in text.lineSequence()) {
@@ -59,11 +60,11 @@ object NonuDecrypt {
                     if (uri == null || range == null) throw IllegalArgumentException("Invalid EXT-X-MAP: $line")
 
                     val (start, end) = byteRange(range, 0)
-                    init = MediaSegment(uri, start, end, 0f, 0f, true)
+                    init = MediaSegment(uri, start, end, 0f, 0f, null, isInit = true)
                     next = end + 1
                 }
                 line.startsWith("#EXTINF:") -> {
-                    pendingDuration = line.substring(8).toFloatOrNull()
+                    pendingDuration = line.substring(8).trimEnd(',').toFloatOrNull()
                 }
                 line.startsWith("#EXT-X-BYTERANGE:") -> {
                     val (start, end) = byteRange(line.substring(17), next)
@@ -88,6 +89,10 @@ object NonuDecrypt {
         return MediaPlaylist(init!!.url, adamId, keyUri, cenc, init!!, segments, duration, segments.last().end + 1)
     }
 
+    /**
+     * Decrypt all segments of a media playlist using the WASM native library.
+     * TODO: Implement actual segment downloading and key fetching.
+     */
     suspend fun decrypt(context: Context, track: MediaPlaylist, aborted: Boolean = false) = withContext(Dispatchers.IO) {
         val wasm = WasmInstance(context)
 
@@ -96,32 +101,31 @@ object NonuDecrypt {
         for (piece in pieces) {
             if (aborted) break
 
-            // TODO: Implement downloadPiece
+            // TODO: Implement downloadPiece - download the byte range from the URL
             val bytes = ByteArray(0) // Placeholder
-            if (piece.init) {
+
+            if (piece.isInit) {
                 if (track.cenc) track.rawInit = bytes.clone()
-                // TODO: Define patchInit in WasmInstance
-                // TODO: Implement patchInit in WasmInstance
-                // wasm.patchInit(bytes)
+                wasm.patchInit(bytes)
             } else {
-                val init = if (track.cenc == false) null else track.initData()
+                val initBytes = if (!track.cenc) null else track.rawInit
                 when (piece.key) {
-                    "prefetch" -> wasm.decryptFragment(wasm.hook_prefetch_template(), bytes, init)
+                    "prefetch" -> wasm.decryptFragment(wasm.hook_prefetch_template(), bytes, initBytes)
                     "track" -> if (track.cenc) {
-                            // TODO: Fetch content key
-                            val key = ByteArray(0) // Placeholder
-                            wasm.decryptCenc(track.rawInit, key, bytes)
-                        } else {
-                            // TODO: Fetch template
-                            val template = "" // Placeholder
-                            val handle = wasm.hook_template_load(template.toByteArray(), template.length)
-                            try {
-                                wasm.decryptFragment(handle, bytes, init)
-                            } finally {
-                                wasm.hook_template_free(handle)
-                            }
+                        // TODO: Fetch content key via license server
+                        val key = fetchContentKey(track.adamId, track.keyUri ?: "")
+                        wasm.decryptCenc(track.rawInit ?: ByteArray(0), key, bytes)
+                    } else {
+                        // TODO: Fetch template via key server
+                        val template = fetchTemplate(track.adamId, track.keyUri ?: "")
+                        val handle = wasm.loadTemplate(template.toByteArray())
+                        try {
+                            wasm.decryptFragment(handle, bytes, initBytes)
+                        } finally {
+                            wasm.hook_template_free(handle)
                         }
-                    null -> if (init != null) wasm.decryptFragment(0, bytes, init)
+                    }
+                    null -> if (initBytes != null) wasm.decryptFragment(0, bytes, initBytes)
                 }
             }
 
@@ -132,12 +136,12 @@ object NonuDecrypt {
     }
 
     private suspend fun fetchContentKey(adamId: String, keyUri: String): ByteArray {
-        // TODO
+        // TODO: Implement license server request for content key
         return ByteArray(0)
     }
 
     private suspend fun fetchTemplate(adamId: String, keyUri: String): String {
-        // TODO
+        // TODO: Implement key server request for template
         return ""
     }
 }
@@ -151,7 +155,10 @@ data class MediaPlaylist(
     val segments: List<MediaSegment>,
     val duration: Float,
     val size: Long
-)
+) {
+    /** Raw init segment bytes, stored after first download for CENC decryption */
+    var rawInit: ByteArray? = null
+}
 
 data class MediaSegment(
     val url: String,
@@ -160,40 +167,6 @@ data class MediaSegment(
     val time: Float,
     val duration: Float,
     val key: String?, // "prefetch", "track" or null
+    val isInit: Boolean = false,
     var decryptedUrl: String? = null
 )
-
-private val LICENSE_SYSTEMS = listOf(
-    LicenseSystem("widevine", emptyMap()),
-    LicenseSystem("playready", mapOf("drm-type" to "pr"))
-)
-
-data class LicenseSystem(val type: String, val body: Map<String, String>)
-
-data class LicenseChallenge(val adamId: String, val uri: String, val challenge: String)
-
-private suspend fun fetchContentKey(adamId: String, keyUri: String): ByteArray {
-    val data = NonuApi.license(adamId, keyUri, getLicenseChallenge(keyUri)).body()
-    return mediaLicense(data.license)
-}
-
-private suspend fun fetchTemplate(adamId: String, keyUri: String): String =
-    NonuApi.key(adamId, keyUri).body()
-
-private suspend fun getLicenseChallenge(keyUri: String): String {
-    val drm = LICENSE_SYSTEMS.first()
-    val challenge = mediaChallenge(keyUri, drm.type)
-    return mapOf(
-        "adamId" to challenge.adamId,
-        "uri" to challenge.uri,
-        "challenge" to challenge.challenge
-    ) + drm.body
-}
-
-private suspend fun mediaChallenge(keyUri: String, drm: String): LicenseChallenge {
-    // TODO: Port media.wasm challenge generation
-}
-
-private suspend fun mediaLicense(license: String): ByteArray {
-    // TODO: Port media.wasm license parsing
-}

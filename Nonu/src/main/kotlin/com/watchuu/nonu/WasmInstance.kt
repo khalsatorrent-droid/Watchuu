@@ -63,6 +63,14 @@ class WasmInstance(private val context: Context) {
         }
     }
 
+    fun loadTemplate(templateBytes: ByteArray): Int {
+        var handle = 0
+        copyToMemory(templateBytes) { ptr, len ->
+            handle = hook_template_load(ptr, len)
+        }
+        return handle
+    }
+
     private inline fun copyToMemory(bytes: ByteArray, block: (Int, Int) -> Unit) {
         val ptr = hook_alloc(bytes.size)
         try {

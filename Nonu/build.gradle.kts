@@ -12,7 +12,7 @@ cloudstream {
 
 android {
     sourceSets.getByName("main") {
-        jniLibs.srcDir("src/main/jniLibs")
+        assets.srcDir("src/main/assets")
     }
 }
 

@@ -1,86 +1,124 @@
 package com.watchuu.nonu
 
 import android.content.Context
-import com.lagradost.cloudstream3.BuildConfig
+import android.util.Log
 
+/**
+ * Pure Kotlin replacement for the WASM-based decryption instance.
+ * Manages template handles and delegates to TemariCipher, Mp4Patcher, and AlacRepair.
+ */
 class WasmInstance(private val context: Context) {
+
     companion object {
-        init {
-            System.loadLibrary("hook")
-        }
+        private const val TAG = "WasmInstance"
+        private var prefetchTpl: TemariCipher.Template? = null
+        private val templates = HashMap<Int, TemariCipher.Template>()
+        private var nextHandle = 1
+
+        // ALAC track info parsed from init segment, cached per-instance
+        private var cachedAlacTrack: AlacRepair.AlacTrack? = null
+        private var cachedAlacInitHash: Int = 0
     }
 
-    external fun hook_alloc(len: Int): Int
-    external fun hook_free(ptr: Int, len: Int)
-    external fun hook_error_ptr(): Int
-    external fun hook_error_len(): Int
-    external fun hook_patch_init(ptr: Int, len: Int)
-    external fun hook_decrypt_cenc(initPtr: Int, initLen: Int, keyPtr: Int, ptr: Int, len: Int): Boolean
-    external fun hook_decrypt_fragment(handle: Int, ptr: Int, len: Int): Boolean
-    external fun hook_repair_alac(ptr: Int, len: Int, initPtr: Int, initLen: Int): Boolean
-    external fun hook_prefetch_template(): Int
-    external fun hook_template_load(ptr: Int, len: Int): Int
-    external fun hook_template_free(handle: Int)
-
-    private var memory: ByteArray? = null
-
-    fun lastError(): String {
-        val ptr = hook_error_ptr()
-        val len = hook_error_len()
-        return String(memory!!, ptr, len)
-    }
-
-    fun patchInit(bytes: ByteArray) {
-        copyToMemory(bytes) { ptr, len ->
-            hook_patch_init(ptr, len)
-        }
-    }
-
-    fun decryptCenc(init: ByteArray, key: ByteArray, bytes: ByteArray) {
-        copyToMemory(init) { initPtr, initLen ->
-            copyToMemory(key) { keyPtr, _ ->
-                copyToMemory(bytes) { ptr, len ->
-                    if (!hook_decrypt_cenc(initPtr, initLen, keyPtr, ptr, len)) {
-                        throw IllegalStateException("CENC decryption failed: ${lastError()}")
-                    }
-                }
+    /**
+     * Load the embedded prefetch template from assets.
+     * Returns a handle (always 0xFFFF for prefetch).
+     */
+    fun hook_prefetch_template(): Int {
+        if (prefetchTpl == null) {
+            try {
+                val data = context.assets.open("prefetch_template.bin").use { it.readBytes() }
+                prefetchTpl = TemariTemplate.prefetchTemplate(data)
+                Log.d(TAG, "Prefetch template loaded: ${data.size} bytes")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load prefetch template", e)
+                return 0
             }
         }
+        return 0xFFFF
     }
 
-    fun decryptFragment(handle: Int, bytes: ByteArray, init: ByteArray?) {
-        copyToMemory(bytes) { ptr, len ->
-            if (handle != 0 && !hook_decrypt_fragment(handle, ptr, len)) {
-                throw IllegalStateException("Fragment decryption failed: ${lastError()}")
-            }
-            if (init != null) {
-                copyToMemory(init) { initPtr, initLen ->
-                    if (!hook_repair_alac(ptr, len, initPtr, initLen)) {
-                        throw IllegalStateException("ALAC repair failed: ${lastError()}")
-                    }
-                }
-            }
-        }
-    }
-
+    /**
+     * Parse a JSON template string and return a handle.
+     */
     fun loadTemplate(templateBytes: ByteArray): Int {
-        var handle = 0
-        copyToMemory(templateBytes) { ptr, len ->
-            handle = hook_template_load(ptr, len)
+        return try {
+            val json = String(templateBytes, Charsets.UTF_8)
+            val tpl = TemariTemplate.templateFromJson(json)
+            val handle = synchronized(templates) {
+                val h = nextHandle++
+                templates[h] = tpl
+                h
+            }
+            Log.d(TAG, "Template loaded, handle=$handle")
+            handle
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load template: ${e.message}", e)
+            0
         }
-        return handle
     }
 
-    private inline fun copyToMemory(bytes: ByteArray, block: (Int, Int) -> Unit) {
-        val ptr = hook_alloc(bytes.size)
+    /**
+     * Free a template handle.
+     */
+    fun hook_template_free(handle: Int) {
+        if (handle == 0xFFFF) return // prefetch template is static
+        synchronized(templates) { templates.remove(handle) }
+    }
+
+    /**
+     * Patch init segment in-place: remove DRM box markers (enca→original codec, sinf→free, pssh→free).
+     */
+    fun patchInit(bytes: ByteArray) {
         try {
-            memory?.let {
-                System.arraycopy(bytes, 0, it, ptr, bytes.size)
-                block(ptr, bytes.size)
-                System.arraycopy(it, ptr, bytes, 0, bytes.size)
+            Mp4Patcher.patchInitInPlace(bytes)
+            Log.d(TAG, "Init segment patched")
+        } catch (e: Exception) {
+            Log.e(TAG, "patchInit failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Decrypt a fragment in-place using the given template handle, then repair ALAC if applicable.
+     * @param handle Template handle (0xFFFF for prefetch, >0 for track template, 0 for no decryption)
+     * @param bytes Fragment data, modified in-place
+     * @param init Patched init segment for ALAC repair (may be null)
+     */
+    fun decryptFragment(handle: Int, bytes: ByteArray, init: ByteArray?) {
+        try {
+            // Get the template
+            val tpl = when {
+                handle == 0xFFFF -> prefetchTpl
+                handle > 0 -> synchronized(templates) { templates[handle] }
+                else -> null
             }
-        } finally {
-            hook_free(ptr, bytes.size)
+
+            // Decrypt the fragment using the template
+            if (tpl != null) {
+                Mp4Patcher.decryptFragmentInPlace(tpl, bytes)
+            }
+
+            // Repair ALAC if init segment is available
+            if (init != null) {
+                repairAlac(bytes, init)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "decryptFragment failed: ${e.message}", e)
+        }
+    }
+
+    private fun repairAlac(fragData: ByteArray, initData: ByteArray) {
+        try {
+            // Cache the ALAC track info from the init segment
+            val initHash = initData.contentHashCode()
+            if (cachedAlacTrack == null || cachedAlacInitHash != initHash) {
+                cachedAlacTrack = AlacRepair.parseAlacTrack(initData)
+                cachedAlacInitHash = initHash
+            }
+            val track = cachedAlacTrack ?: return
+            AlacRepair.repairAlacFragment(track, fragData)
+        } catch (e: Exception) {
+            Log.d(TAG, "ALAC repair skipped: ${e.message}")
         }
     }
 }

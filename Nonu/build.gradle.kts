@@ -9,3 +9,13 @@ cloudstream {
     tvTypes = listOf("Music", "Others")
     iconUrl = "https://www.google.com/s2/favicons?domain=ak1ra.de5.net&sz=%size%"
 }
+
+android {
+    sourceSets.getByName("main") {
+        jniLibs.srcDir("src/main/jniLibs")
+    }
+}
+
+dependencies {
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+}

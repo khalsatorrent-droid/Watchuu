@@ -282,7 +282,32 @@ class NonuProvider : MainAPI() {
         )
 
         // the master is a plain HLS playlist: variants with CODECS, then their uri on the next line
-        if (master.startsWith("http")) {
+        // Decrypt the track
+        val track = NonuDecrypt.parseMediaPlaylist(playlist, master, songAttrs?.str("id"))
+        NonuDecrypt.decrypt(context, track, AbortSignal())
+
+        // Rebuild the playlist with local decrypted URLs
+        val variantM3u8 = buildString {
+            appendLine("#EXTM3U")
+            appendLine("#EXT-X-VERSION:6")
+            track.segments.forEach { seg ->
+                appendLine("#EXTINF:${seg.duration},")
+                appendLine(seg.decryptedUrl)
+            }
+            append("#EXT-X-ENDLIST")
+        }
+
+        val variantUrl = File(context.cacheDir, "${track.adamId}.m3u8").apply {
+            writeText(variantM3u8)
+        }.absolutePath
+
+        callback.invoke(
+            newExtractorLink(name, "$name ${track.segments.sumOf { it.duration }.toInt() / 1000}kbps", variantUrl, ExtractorLinkType.M3U8) {
+                this.referer = "$mainUrl/song/${id}"
+                this.quality = Qualities.Unknown.value
+            }
+        )
+        return true
             val playlist = NonuApi.text(master)
             if (playlist != null) {
                 val variants = parseVariants(playlist, master)

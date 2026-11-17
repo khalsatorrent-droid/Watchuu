@@ -35,7 +35,7 @@ object NonuApi {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     private var prefs: SharedPreferences? = null
-    private var appContext: Context? = null
+    internal var appContext: Context? = null
     @Volatile private var uaCache: String? = null
 
     fun init(context: Context) {

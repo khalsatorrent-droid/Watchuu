@@ -281,20 +281,29 @@ class NonuProvider : MainAPI() {
             "song resource: master=${if (master.isBlank()) "none" else "yes"}, preview=${if (preview.isBlank()) "none" else "yes"}"
         )
 
-        // Serve the master HLS directly
-        // TODO: When decryption is fully implemented, decrypt segments and rebuild playlist
+        // Try to decrypt the full track via the master HLS
         if (master.isNotBlank()) {
-            callback.invoke(
-                newExtractorLink(name, "$name HLS", master, ExtractorLinkType.M3U8) {
-                    this.referer = "$mainUrl/song/$id"
-                    this.quality = Qualities.Unknown.value
+            try {
+                val decryptedFile = decryptFullTrack(id, master)
+                if (decryptedFile != null) {
+                    val streamUrl = NonuDecrypt.localUrl(decryptedFile)
+                    NonuApi.log("step", "serving decrypted file via loopback: $streamUrl")
+                    callback.invoke(
+                        newExtractorLink(name, "$name", streamUrl, ExtractorLinkType.VIDEO) {
+                            this.referer = "$mainUrl/song/$id"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return true
                 }
-            )
-            return true
+            } catch (e: Exception) {
+                NonuApi.log("WARN", "decryption failed: ${e.message}")
+            }
         }
 
-        // Fallback: preview URL
+        // Fallback: preview URL (30-second unencrypted preview)
         if (preview.isNotBlank()) {
+            NonuApi.log("step", "falling back to preview")
             callback.invoke(
                 newExtractorLink(name, "$name Preview", preview, ExtractorLinkType.M3U8) {
                     this.referer = "$mainUrl/song/$id"
@@ -306,6 +315,51 @@ class NonuProvider : MainAPI() {
 
         NonuApi.log("WARN", "nothing playable for $id")
         return false
+    }
+
+    /**
+     * Decrypt a full track: fetch master HLS → pick best variant → fetch media playlist
+     * → download & decrypt all segments → return decrypted M4A file.
+     */
+    private suspend fun decryptFullTrack(adamId: String, masterUrl: String): java.io.File? {
+        val ctx = NonuApi.appContext ?: return null
+
+        // 1. Fetch the master playlist
+        NonuApi.log("step", "fetching master playlist")
+        val masterText = NonuApi.text(masterUrl)
+        if (masterText.isNullOrBlank()) {
+            NonuApi.log("WARN", "empty master playlist")
+            return null
+        }
+
+        // 2. Parse variants and pick the best one
+        val variants = parseVariants(masterText, masterUrl)
+        if (variants.isEmpty()) {
+            NonuApi.log("WARN", "no variants in master playlist")
+            return null
+        }
+        val best = variants.maxByOrNull { it.rank } ?: return null
+        NonuApi.log("step", "picked variant: ${best.label} (${best.codecs}, bw=${best.bandwidth})")
+
+        // 3. Fetch the media playlist for the chosen variant
+        val mediaText = NonuApi.text(best.url)
+        if (mediaText.isNullOrBlank()) {
+            NonuApi.log("WARN", "empty media playlist for ${best.label}")
+            return null
+        }
+
+        // 4. Parse the media playlist to get segments and key info
+        val track = NonuDecrypt.parseMediaPlaylist(mediaText, best.url, adamId)
+        NonuApi.log("step", "media playlist: ${track.segments.size} segments, cenc=${track.cenc}, keyUri=${track.keyUri?.take(40)}")
+
+        // Skip CENC tracks for now (would need Widevine license flow)
+        if (track.cenc) {
+            NonuApi.log("WARN", "CENC track not yet supported, skipping decrypt")
+            return null
+        }
+
+        // 5. Decrypt all segments and get the output file
+        return NonuDecrypt.decryptTrack(ctx, track)
     }
 
     // ------------------------------------------------------------------ HLS parsing

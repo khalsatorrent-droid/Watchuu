@@ -309,16 +309,7 @@ class NonuProvider : MainAPI() {
         )
         return true
 
-        if (preview.startsWith("http")) {
-            NonuApi.log("step", "emitted preview only")
-            callback.invoke(
-                newExtractorLink(name, "$name preview (30s)", preview, ExtractorLinkType.VIDEO) {
-                    this.referer = "${NonuApi.SITE}/"
-                    this.quality = 128
-                }
-            )
-            return true
-        }
+[delete the whole block]
 
         NonuApi.log("WARN", "nothing playable for $id")
         return false

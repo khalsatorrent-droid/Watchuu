@@ -284,7 +284,7 @@ class NonuProvider : MainAPI() {
         // the master is a plain HLS playlist: variants with CODECS, then their uri on the next line
         // Decrypt the track
         val track = NonuDecrypt.parseMediaPlaylist(master, master, songAttrs?.str("id"))
-        NonuDecrypt.decrypt(com.lagradost.cloudstream3.CloudStreamApp.context ?: context, track)
+        NonuDecrypt.decrypt(context, track)
 
         // Rebuild the playlist with local decrypted URLs
         val variantM3u8 = buildString {
@@ -308,24 +308,6 @@ class NonuProvider : MainAPI() {
             }
         )
         return true
-            val playlist = NonuApi.text(master)
-            if (playlist != null) {
-                val variants = parseVariants(playlist, master)
-                NonuApi.log("step", "master: ${variants.size} variant(s)")
-                val best = variants.maxByOrNull { it.rank }
-                if (best != null) {
-                    NonuApi.log("step", "picked ${best.codecs} ${best.bandwidth / 1000}kbps")
-                    callback.invoke(
-                        newExtractorLink(name, "$name ${best.label}", best.url, ExtractorLinkType.M3U8) {
-                            this.referer = "${NonuApi.SITE}/"
-                            this.quality = best.quality
-                            this.headers = NonuApi.headers(mapOf("Accept" to "*/*"))
-                        }
-                    )
-                    return true
-                }
-            }
-        }
 
         if (preview.startsWith("http")) {
             NonuApi.log("step", "emitted preview only")

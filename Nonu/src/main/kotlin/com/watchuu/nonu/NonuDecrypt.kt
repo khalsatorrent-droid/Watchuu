@@ -88,20 +88,22 @@ object NonuDecrypt {
         return MediaPlaylist(init!!.url, adamId, keyUri, cenc, init!!, segments, duration, segments.last().end + 1)
     }
 
-    suspend fun decrypt(context: Context, track: MediaPlaylist, signal: AbortSignal) = withContext(Dispatchers.IO) {
+    suspend fun decrypt(context: Context, track: MediaPlaylist, aborted: Boolean = false) = withContext(Dispatchers.IO) {
         val wasm = WasmInstance(context)
 
         // Download and decrypt each segment
         val pieces = listOf(track.init) + track.segments
         for (piece in pieces) {
-            if (signal.isAborted()) break
+            if (aborted) break
 
-            val bytes = downloadPiece(piece.url, piece.start, piece.end - piece.start + 1L)
+            // TODO: Implement downloadPiece
+            val bytes = ByteArray(0) // Placeholder
             if (piece.init) {
                 if (track.cenc) track.rawInit = bytes.clone()
+                // TODO: Define patchInit in WasmInstance
                 wasm.patchInit(bytes)
             } else {
-                val init = if (track.repair == false) null else track.initData()
+                val init = if (track.repair == "false") null else track.initData()
                 when (piece.key) {
                     "prefetch" -> wasm.decryptFragment(wasm.hook_prefetch_template(), bytes, init)
                     "track" -> if (track.cenc) {
@@ -128,10 +130,12 @@ object NonuDecrypt {
 
     private suspend fun fetchContentKey(adamId: String, keyUri: String): ByteArray {
         // TODO
+        return ByteArray(0)
     }
 
     private suspend fun fetchTemplate(adamId: String, keyUri: String): String {
         // TODO
+        return ""
     }
 }
 

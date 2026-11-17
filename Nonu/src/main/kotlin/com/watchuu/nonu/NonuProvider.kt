@@ -283,8 +283,8 @@ class NonuProvider : MainAPI() {
 
         // the master is a plain HLS playlist: variants with CODECS, then their uri on the next line
         // Decrypt the track
-        val track = NonuDecrypt.parseMediaPlaylist(playlist, master, songAttrs?.str("id"))
-        NonuDecrypt.decrypt(context, track, AbortSignal())
+        val track = NonuDecrypt.parseMediaPlaylist(master, master, songAttrs?.str("id"))
+        NonuDecrypt.decrypt(com.lagradost.cloudstream3.CloudStreamApp.context ?: context, track)
 
         // Rebuild the playlist with local decrypted URLs
         val variantM3u8 = buildString {
@@ -297,7 +297,7 @@ class NonuProvider : MainAPI() {
             append("#EXT-X-ENDLIST")
         }
 
-        val variantUrl = File(context.cacheDir, "${track.adamId}.m3u8").apply {
+        val variantUrl = java.io.File((com.lagradost.cloudstream3.CloudStreamApp.context ?: context).cacheDir, "${track.adamId}.m3u8").apply {
             writeText(variantM3u8)
         }.absolutePath
 

@@ -125,9 +125,45 @@ object ZarzSessionManager {
     fun anyUsable(): Boolean = versions.any { isUsable(it) }
 
     /**
-     * After one provider is verified, cascade the same install id and grant to bootstrap the
-     * remaining providers. The server recognises the shared install and usually hands out sessions
-     * directly without another challenge.
+     * Exchange the grant for ALL provider app_versions at once.
+     *
+     * The grant token from the verification challenge is typically single-use, so it must be
+     * exchanged for every app_version before any single exchange consumes it. Each exchange
+     * sends its own `app_version` in the payload, telling the server which session to mint.
+     */
+    suspend fun exchangeAll(
+        grant: String,
+        context: Context? = contextOrNull(),
+    ): List<String> {
+        val install = versions.firstNotNullOfOrNull {
+            sessions[it]?.record?.installId?.takeIf { id -> id.isNotBlank() }
+        } ?: sharedInstallId(context) ?: return emptyList()
+
+        val activated = mutableListOf<String>()
+        for (v in versions) {
+            val s = session(v)
+            if (s.record.isUsable()) { activated.add(v); continue }
+            s.record.installId = install
+            try {
+                s.exchange(grant)
+                if (s.record.isUsable()) {
+                    activated.add(v)
+                    MusicBoxLog.d(TAG, "exchangeAll: $v ✓")
+                } else {
+                    MusicBoxLog.w(TAG, "exchangeAll: $v exchange returned but session not usable")
+                }
+            } catch (e: Exception) {
+                MusicBoxLog.w(TAG, "exchangeAll: $v failed: ${e.message}")
+            }
+        }
+        persist(context)
+        return activated
+    }
+
+    /**
+     * After one provider is verified, try to bootstrap the remaining providers using the shared
+     * install id. The server may recognise a verified install and hand out sessions directly.
+     * Falls back to exchanging the grant if bootstrap returns a challenge.
      */
     suspend fun activateOthers(
         primary: String,

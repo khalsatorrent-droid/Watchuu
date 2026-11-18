@@ -966,9 +966,8 @@ class MusicBoxProvider : MainAPI() {
             MusicBoxBrowser.openVerification(activity, authUrl) { grant ->
                 scope.launch {
                     try {
-                        val primary = ZarzSession.APP_VERSION_DEEZER
-                        ZarzSessionManager.session(primary).exchange(grant)
-                        ZarzSessionManager.activateOthers(primary, grant)
+                        // exchange the grant for all app_versions at once
+                        ZarzSessionManager.exchangeAll(grant)
                         saveSession()
                         val count = ZarzSessionManager.versions.count { ZarzSessionManager.isUsable(it) }
                         withContext(Dispatchers.Main) {

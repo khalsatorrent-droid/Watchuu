@@ -325,8 +325,10 @@ object MusicBoxSettings {
                             MusicBoxBrowser.openVerification(act, url) { grant ->
                                 scope.launch {
                                     try {
-                                        session.exchange(grant)
-                                        ZarzSessionManager.activateOthers(primary, grant, act)
+                                        // exchange the grant for ALL app_versions at once
+                                        // (the grant may be single-use, so do not consume
+                                        //  it on one version before the others try)
+                                        ZarzSessionManager.exchangeAll(grant, act)
                                         withContext(Dispatchers.Main) { finish() }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {

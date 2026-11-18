@@ -218,7 +218,7 @@ class ArcodProvider : MainAPI() {
         // the api answers with a signed url on the same host; nothing else is needed to play it
         val (url, label) = ArcodApi.streamUrl(id) ?: return false
         callback.invoke(
-            newExtractorLink(name, "$name $label", url, ExtractorLinkType.VIDEO) {
+            newExtractorLink(name, label, url, ExtractorLinkType.VIDEO) {
                 this.referer = "${ArcodApi.SITE}/"
                 this.quality = Qualities.Unknown.value
             }

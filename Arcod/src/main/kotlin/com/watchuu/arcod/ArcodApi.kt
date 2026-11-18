@@ -143,11 +143,25 @@ object ArcodApi {
             val json = get("/api/player/stream/$trackId", mapOf("quality" to quality)) ?: continue
             val url = json.optString("url")
             if (url.startsWith("http")) {
-                val mime = json.optString("mimeType").ifBlank { "audio" }
-                return url to "$mime q$quality"
+                return url to qualityName(quality, json.optString("mimeType"))
             }
         }
         return null
+    }
+
+    /**
+     * A readable name for the stream. The api answers with a mime type and a quality number; showing
+     * "audio/flac q7" to a listener means nothing, so it is turned into what they would call it.
+     */
+    private fun qualityName(quality: String, mime: String): String {
+        val lossless = mime.contains("flac", true) || mime.contains("alac", true)
+        return when {
+            lossless && quality == "7" -> "FLAC Hi-Res (24-bit)"
+            lossless -> "FLAC (lossless)"
+            mime.contains("mpeg", true) || mime.contains("mp3", true) -> "MP3 320kbps"
+            mime.isBlank() -> if (quality == "7") "FLAC Hi-Res (24-bit)" else "Audio"
+            else -> mime.removePrefix("audio/").uppercase()
+        }
     }
 
     fun report(): String = buildString {

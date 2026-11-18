@@ -54,6 +54,8 @@ class WasmInstance(private val context: Context) {
             handle
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load template: ${e.message}", e)
+            val trace = e.stackTraceToString().take(500)
+            NonuDecrypt.log("ERROR: loadTemplate failed: ${e::class.simpleName}: ${e.message}\n$trace")
             0
         }
     }

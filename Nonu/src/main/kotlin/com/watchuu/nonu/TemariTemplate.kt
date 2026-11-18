@@ -48,30 +48,10 @@ object TemariTemplate {
     }
 
     // ---------------------------------------------------------------------------
-    // base64 decode (RFC 4648, standard alphabet, with padding)
+    // base64 decode — delegates to Android's built-in decoder
     // ---------------------------------------------------------------------------
     private fun base64Decode(s: String): ByteArray {
-        val out = java.io.ByteArrayOutputStream(s.length * 3 / 4)
-        var buf = 0
-        var bits = 0
-        for (c in s) {
-            val v = when {
-                c == '=' -> break
-                c in 'A'..'Z' -> c - 'A'
-                c in 'a'..'z' -> c - 'a' + 26
-                c in '0'..'9' -> c - '0' + 52
-                c == '+' -> 62
-                c == '/' -> 63
-                else -> continue
-            }
-            buf = (buf shl 6) or v
-            bits += 6
-            if (bits >= 8) {
-                bits -= 8
-                out.write((buf ushr bits) and 0xFF)
-            }
-        }
-        return out.toByteArray()
+        return android.util.Base64.decode(s, android.util.Base64.DEFAULT)
     }
 
     // ---------------------------------------------------------------------------
@@ -228,10 +208,14 @@ object TemariTemplate {
         val map = HashMap<String, String>()
         for ((k, v) in fields) map[k] = v
 
+        android.util.Log.d("TemariTemplate", "parsed keys: ${map.keys}")
+
         // Format 1: contentKey — a single base64 blob identical to prefetch_template.bin
         val contentKey = map["contentKey"]
         if (contentKey != null && contentKey.length > 100) {
+            android.util.Log.d("TemariTemplate", "contentKey found, length=${contentKey.length}")
             val binary = base64Decode(contentKey)
+            android.util.Log.d("TemariTemplate", "decoded binary size=${binary.size}, required=${CTX_SIZE + ST_SIZE * 4 + 20}")
             return prefetchTemplate(binary)
         }
 

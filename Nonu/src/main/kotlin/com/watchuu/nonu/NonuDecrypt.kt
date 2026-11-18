@@ -14,6 +14,7 @@ import java.net.ServerSocket
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.Executors
+import org.json.JSONObject
 
 object NonuDecrypt {
     private const val TAG = "NonuDecrypt"
@@ -283,10 +284,148 @@ object NonuDecrypt {
         template
     }
 
+    // ------------------------------------------------------------------ CENC key exchange
+
+    /**
+     * Extract PSSH data from a data: URI (base64-encoded PSSH box).
+     * Returns the raw PSSH bytes for MediaDrm, or null on parse failure.
+     */
+    fun parsePssh(dataUri: String): ByteArray? {
+        // data:text/plain;base64,AAAA...
+        val b64 = dataUri.substringAfter("base64,", "")
+        if (b64.isBlank()) return null
+        return try {
+            android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        } catch (_: Exception) { null }
+    }
+
+    /**
+     * Attempt Widevine license exchange with the proxy to obtain a 16-byte content key.
+     *
+     * Flow:
+     *   1. Use Android MediaDrm to generate a Widevine challenge from the PSSH
+     *   2. POST the challenge to the proxy's /mv/license endpoint
+     *   3. Feed the license response back to MediaDrm
+     *   4. Attempt to extract the raw key via CryptoSession
+     *
+     * Returns the 16-byte key or null if extraction is not possible.
+     */
+    suspend fun obtainCencKey(adamId: String, psshBytes: ByteArray): ByteArray? = withContext(Dispatchers.IO) {
+        val widevineUuid = java.util.UUID(-0x121074568629b532L, -0x6386f2893e3cbc19L)
+        var drm: android.media.MediaDrm? = null
+        var session: ByteArray? = null
+
+        try {
+            if (!android.media.MediaDrm.isCryptoSchemeSupported(widevineUuid)) {
+                log("MediaDrm: Widevine not supported on this device")
+                return@withContext null
+            }
+
+            drm = android.media.MediaDrm(widevineUuid)
+            // Force L3 (software) so we might get access to keys
+            runCatching { drm.setPropertyString("securityLevel", "L3") }
+            session = drm.openSession()
+
+            // 1. Generate challenge
+            val keyRequest = drm.getKeyRequest(
+                session, psshBytes, "cenc",
+                android.media.MediaDrm.KEY_TYPE_STREAMING, null
+            )
+            val challenge = keyRequest.data
+            log("MediaDrm: challenge generated, ${challenge.size} bytes")
+
+            // 2. Exchange with proxy
+            val challengeB64 = android.util.Base64.encodeToString(challenge, android.util.Base64.NO_WRAP)
+            val body = JSONObject().apply {
+                put("adamId", adamId)
+                put("uri", keyRequest.defaultUrl ?: "")
+                put("challenge", challengeB64)
+            }
+
+            val conn = URL("${NonuApi.SITE}/mv/license").openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 20_000
+            conn.doOutput = true
+            NonuApi.headers(mapOf("Content-Type" to "application/json")).forEach { (k, v) ->
+                conn.setRequestProperty(k, v)
+            }
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                log("MediaDrm: license exchange failed HTTP $code")
+                return@withContext null
+            }
+
+            val respText = conn.inputStream.use { it.bufferedReader().readText() }
+            val respJson = JSONObject(respText)
+            val licenseB64 = respJson.optJSONObject("data")?.optString("license")
+                ?: respJson.optString("license")
+            if (licenseB64.isNullOrBlank()) {
+                log("MediaDrm: no license in response")
+                return@withContext null
+            }
+
+            val licenseBytes = android.util.Base64.decode(licenseB64, android.util.Base64.DEFAULT)
+            log("MediaDrm: license received, ${licenseBytes.size} bytes")
+
+            // 3. Provide license to MediaDrm
+            drm.provideKeyResponse(session, licenseBytes)
+            log("MediaDrm: key response loaded")
+
+            // 4. Try to extract the key
+            // Method A: queryKeyStatus - some implementations expose key material
+            val status = drm.queryKeyStatus(session)
+            log("MediaDrm: keyStatus entries=${status.size}")
+            for ((k, v) in status) {
+                log("MediaDrm: status[$k] = ${v.take(60)}")
+            }
+
+            // Method B: CryptoSession decrypt of known plaintext
+            // If the CDM exposes content keys through CryptoSession, we can recover the key
+            // by encrypting a known block and comparing
+            try {
+                val cs = drm.getCryptoSession(session, "AES/CTR/NoPadding", "HmacSHA256")
+                // Try decrypting 16 zero bytes with zero IV - if it returns non-zero, the CDM
+                // is doing AES-CTR decryption and we can derive the key
+                val testIv = ByteArray(16)
+                val testData = ByteArray(16)
+                val kid = ByteArray(16) // Will be replaced with actual KID
+                val result = cs.decrypt(kid, testData, testIv)
+                if (result != null && result.size == 16 && !result.all { it == 0.toByte() }) {
+                    // The CDM decrypted with the content key! The result is AES-CTR(key, 0x00...)
+                    // For AES-CTR: decrypt(key, plaintext, iv) = plaintext XOR AES(key, iv)
+                    // So decrypt(key, 0x00..., 0x00...) = AES(key, 0x00...)
+                    // We can't directly get the key from this, but it means CryptoSession works
+                    log("MediaDrm: CryptoSession decrypt works, but raw key extraction not available")
+                }
+            } catch (e: Exception) {
+                log("MediaDrm: CryptoSession not available: ${e.message?.take(80)}")
+            }
+
+            // Raw key extraction not available through standard MediaDrm APIs
+            // The CENC variant fallback to FairPlay AAC will be used instead
+            log("MediaDrm: raw key not extractable, will fall back to FairPlay variant")
+            null
+
+        } catch (e: Exception) {
+            log("MediaDrm: error: ${e::class.simpleName}: ${e.message?.take(100)}")
+            null
+        } finally {
+            try {
+                if (session != null && drm != null) drm.closeSession(session)
+            } catch (_: Exception) {}
+            try {
+                drm?.close()
+            } catch (_: Exception) {}
+        }
+    }
+
     // ------------------------------------------------------------------ decrypt pipeline
 
     /**
-     * Decrypt all segments of a media playlist using the WASM native library.
+     * Decrypt all segments of a FairPlay media playlist using the temari cipher.
      * Returns the path to a decrypted M4A file in the app's cache directory.
      */
     suspend fun decryptTrack(context: Context, track: MediaPlaylist): File = withContext(Dispatchers.IO) {
@@ -323,7 +462,7 @@ object NonuDecrypt {
             val initBytes = downloadPiece(track.init)
             log("init downloaded: ${initBytes.size} bytes")
 
-            // For CENC, save raw init before patching (needed for decryptCenc)
+            // For CENC, save raw init before patching (needed for CencDecrypt)
             if (track.cenc) {
                 track.rawInit = initBytes.clone()
             }
@@ -352,8 +491,7 @@ object NonuDecrypt {
                     }
                     "track" -> {
                         if (track.cenc) {
-                            // CENC decryption not yet supported (needs Widevine license flow)
-                            log("WARNING: CENC track, segment not decrypted")
+                            log("WARNING: CENC segment in FairPlay pipeline, not decrypted")
                         } else {
                             // FairPlay decryption using template
                             if (templateHandle != 0) {
@@ -382,6 +520,61 @@ object NonuDecrypt {
             }
         }
 
+        outFile
+    }
+
+    /**
+     * Decrypt all segments of a CENC media playlist using AES-128-CTR with the provided key.
+     * Returns the path to a decrypted M4A file in the app's cache directory.
+     */
+    suspend fun decryptCencTrack(context: Context, track: MediaPlaylist, cencKey: ByteArray): File = withContext(Dispatchers.IO) {
+        require(cencKey.size == 16) { "CENC key must be 16 bytes" }
+        val wasm = WasmInstance(context)
+        val dir = File(context.cacheDir, "nonu_dec").apply { mkdirs() }
+        val outFile = File(dir, "nonu_${track.adamId}.m4a")
+
+        // Clean up old files
+        dir.listFiles()?.let { files ->
+            val now = System.currentTimeMillis()
+            files.filter { now - it.lastModified() > 6 * 3600_000L }.forEach { it.delete() }
+            files.sortedByDescending { it.lastModified() }.drop(6).forEach { it.delete() }
+        }
+
+        log("starting CENC decrypt: adamId=${track.adamId}, segments=${track.segments.size}")
+
+        val outputStream = ByteArrayOutputStream((track.size + 1024).toInt())
+
+        // 1. Download init segment and extract CENC track info BEFORE patching
+        log("downloading init segment")
+        val initBytes = downloadPiece(track.init)
+        log("init downloaded: ${initBytes.size} bytes")
+
+        val trackInfo = CencDecrypt.parseTrackInfo(initBytes)
+            ?: throw IllegalStateException("failed to parse CENC track info from init segment")
+        log("CENC track info: ivSize=${trackInfo.ivSize}, codec=${trackInfo.originalCodec}, kid=${trackInfo.kid.joinToString("") { "%02x".format(it) }}")
+
+        // Patch init (removes DRM boxes, rewrites enca→original codec)
+        val patchedInit = initBytes.clone()
+        wasm.patchInit(patchedInit)
+        outputStream.write(patchedInit)
+        log("init segment patched and written")
+
+        // 2. Download and decrypt each fragment
+        for ((idx, piece) in track.segments.withIndex()) {
+            if (idx % 10 == 0 || idx == track.segments.size - 1) {
+                log("CENC segment ${idx + 1}/${track.segments.size}")
+            }
+
+            val segBytes = downloadPiece(piece)
+
+            // CENC AES-128-CTR decryption + DRM box neutralisation
+            CencDecrypt.decryptFragment(segBytes, cencKey, trackInfo)
+
+            outputStream.write(segBytes)
+        }
+
+        outFile.writeBytes(outputStream.toByteArray())
+        log("CENC decrypted file written: ${outFile.length()} bytes -> ${outFile.absolutePath}")
         outFile
     }
 }

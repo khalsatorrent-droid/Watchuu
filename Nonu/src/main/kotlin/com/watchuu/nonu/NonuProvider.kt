@@ -344,34 +344,58 @@ class NonuProvider : MainAPI() {
             return null
         }
 
-        // 2. Parse variants and pick the best one
-        val variants = parseVariants(masterText, masterUrl)
+        // 2. Parse variants and sort by rank (best first)
+        val variants = parseVariants(masterText, masterUrl).sortedByDescending { it.rank }
         if (variants.isEmpty()) {
             NonuApi.log("WARN", "no variants in master playlist")
             return null
         }
-        val best = variants.maxByOrNull { it.rank } ?: return null
-        NonuApi.log("step", "picked variant: ${best.label} (${best.codecs}, bw=${best.bandwidth})")
 
-        // 3. Fetch the media playlist for the chosen variant
-        val mediaText = NonuApi.text(best.url)
-        if (mediaText.isNullOrBlank()) {
-            NonuApi.log("WARN", "empty media playlist for ${best.label}")
-            return null
+        // 3. Try each variant until we find one that is not CENC
+        for (variant in variants) {
+            NonuApi.log("step", "trying variant: ${variant.label} (${variant.codecs}, bw=${variant.bandwidth})")
+
+            val mediaText = NonuApi.text(variant.url)
+            if (mediaText.isNullOrBlank()) {
+                NonuApi.log("WARN", "empty media playlist for ${variant.label}")
+                continue
+            }
+
+            val track = NonuDecrypt.parseMediaPlaylist(mediaText, variant.url, adamId)
+            NonuApi.log("step", "media playlist: ${track.segments.size} segments, cenc=${track.cenc}, keyUri=${track.keyUri?.take(40)}")
+
+            if (track.cenc) {
+                NonuApi.log("step", "variant ${variant.label} is CENC, trying next variant")
+                continue
+            }
+
+            // Found a non-CENC variant — decrypt it
+            return NonuDecrypt.decryptTrack(ctx, track)
         }
 
-        // 4. Parse the media playlist to get segments and key info
-        val track = NonuDecrypt.parseMediaPlaylist(mediaText, best.url, adamId)
-        NonuApi.log("step", "media playlist: ${track.segments.size} segments, cenc=${track.cenc}, keyUri=${track.keyUri?.take(40)}")
+        // All variants are CENC — attempt Widevine key exchange + CENC decryption
+        NonuApi.log("step", "all ${variants.size} variants are CENC, attempting Widevine key exchange")
+        for (variant in variants) {
+            val mediaText = NonuApi.text(variant.url)
+            if (mediaText.isNullOrBlank()) continue
+            val track = NonuDecrypt.parseMediaPlaylist(mediaText, variant.url, adamId)
+            if (!track.cenc || track.keyUri == null) continue
 
-        // Skip CENC tracks for now (would need Widevine license flow)
-        if (track.cenc) {
-            NonuApi.log("WARN", "CENC track not yet supported, skipping decrypt")
-            return null
+            val psshBytes = NonuDecrypt.parsePssh(track.keyUri)
+            if (psshBytes == null) {
+                NonuApi.log("WARN", "failed to parse PSSH from key URI")
+                continue
+            }
+
+            val cencKey = NonuDecrypt.obtainCencKey(adamId, psshBytes)
+            if (cencKey != null) {
+                NonuApi.log("step", "CENC key obtained, decrypting ${variant.label}")
+                return NonuDecrypt.decryptCencTrack(ctx, track, cencKey)
+            }
         }
 
-        // 5. Decrypt all segments and get the output file
-        return NonuDecrypt.decryptTrack(ctx, track)
+        NonuApi.log("WARN", "CENC key exchange failed for all variants, no decrypted track available")
+        return null
     }
 
     // ------------------------------------------------------------------ HLS parsing

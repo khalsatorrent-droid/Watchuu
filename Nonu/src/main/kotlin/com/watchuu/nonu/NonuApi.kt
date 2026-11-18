@@ -29,7 +29,7 @@ import java.util.Locale
  */
 object NonuApi {
     const val SITE = "https://music.1412.tech"
-    const val BUILD = "v5"
+    const val BUILD = "v9"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

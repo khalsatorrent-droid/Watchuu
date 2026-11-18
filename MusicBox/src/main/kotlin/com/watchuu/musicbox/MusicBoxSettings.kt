@@ -280,14 +280,15 @@ object MusicBoxSettings {
         root.addView(sessionStatus)
 
         ensurePrefs()
-        ZarzSessionManager.loadFromPrefs(act)
+        ZarzSessionManager.versions.forEach { ZarzSessionManager.loadFromPrefs(it, act) }
 
-        fun statusLine(): String = ZarzSessionManager.statusText()
+        fun statusLines(): String =
+            ZarzSessionManager.versions.joinToString("\n") { ZarzSessionManager.statusText(it) }
 
-        sessionStatus.text = statusLine()
+        sessionStatus.text = statusLines()
 
         val btnBootstrap = Button(act).apply {
-            text = "Bootstrap ZARZ session"
+            text = "Bootstrap ZARZ session (all providers)"
             isAllCaps = false
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -295,33 +296,42 @@ object MusicBoxSettings {
             )
         }
         btnBootstrap.setOnClickListener {
-            if (ZarzSessionManager.isUsable()) {
-                Toast.makeText(act, "ZARZ session already active", Toast.LENGTH_SHORT).show()
+            // One verification for all four providers. The first one that has no session is
+            // bootstrapped; the others then join the same install (and the same grant is offered
+            // to them), so the page is opened once rather than once per provider.
+            val primary = ZarzSessionManager.versions.firstOrNull { !ZarzSessionManager.isUsable(it) }
+            if (primary == null) {
+                Toast.makeText(act, "All ZARZ sessions are already active", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val session = ZarzSessionManager.session()
+            val session = ZarzSessionManager.session(primary)
             ZarzSessionManager.sharedInstallId(act)?.let { if (session.record.sessionId.isBlank()) session.record.installId = it }
 
-            fun finish() {
-                ZarzSessionManager.persist(act)
-                sessionStatus.text = statusLine()
-                Toast.makeText(act, "ZARZ session active", Toast.LENGTH_LONG).show()
+            fun finish(missing: List<String>) {
+                ZarzSessionManager.persist(primary, act)
+                sessionStatus.text = statusLines()
+                val msg = if (missing.isEmpty()) "ZARZ session active for all providers"
+                else "Active, but " + missing.joinToString { ZarzSessionManager.label(it) } +
+                    " still need verification - tap Bootstrap again"
+                Toast.makeText(act, msg, Toast.LENGTH_LONG).show()
             }
 
             scope.launch {
                 try {
                     val url = session.bootstrap()
-                    ZarzSessionManager.persist(act)
+                    ZarzSessionManager.persist(primary, act)
                     if (url.isBlank()) {
-                        withContext(Dispatchers.Main) { finish() }
+                        val missing = ZarzSessionManager.activateOthers(primary, null, act)
+                        withContext(Dispatchers.Main) { finish(missing) }
                     } else {
                         withContext(Dispatchers.Main) {
-                            sessionStatus.text = "⚠ Verification required"
+                            sessionStatus.text = "⚠ Verification required - complete it once"
                             MusicBoxBrowser.openVerification(act, url) { grant ->
                                 scope.launch {
                                     try {
                                         session.exchange(grant)
-                                        withContext(Dispatchers.Main) { finish() }
+                                        val missing = ZarzSessionManager.activateOthers(primary, grant, act)
+                                        withContext(Dispatchers.Main) { finish(missing) }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {
                                             sessionStatus.text = "✗ Exchange failed: ${e.message}"
@@ -351,9 +361,11 @@ object MusicBoxSettings {
             )
         }
         btnClear.setOnClickListener {
-            ZarzSessionManager.session().record.clear()
-            ZarzSessionManager.persist(act)
-            sessionStatus.text = statusLine()
+            ZarzSessionManager.versions.forEach {
+                ZarzSessionManager.session(it).record.clear()
+                ZarzSessionManager.persist(it, act)
+            }
+            sessionStatus.text = statusLines()
             Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)

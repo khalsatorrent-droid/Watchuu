@@ -246,7 +246,6 @@ class ZarzSession(
         path: String,
         body: String? = null,
         extraHeaders: Map<String, String> = emptyMap(),
-        appVersionOverride: String? = null,
     ): SignedResponse {
         if (!record.isUsable()) {
             val url = bootstrap()
@@ -265,7 +264,7 @@ class ZarzSession(
 
         refreshIfNeeded()
 
-        val response = signedRequest(method, path, body ?: "", extraHeaders, appVersionOverride)
+        val response = signedRequest(method, path, body ?: "", extraHeaders)
         val responseBody = response.text
 
         val contract = try {
@@ -285,7 +284,7 @@ class ZarzSession(
                 return SignedResponse(ok = false, needsVerification = true, error = "VERIFY_REQUIRED", authUrl = url)
             }
             if (record.isUsable()) {
-                val retryResp = signedRequest(method, path, body ?: "", extraHeaders, appVersionOverride)
+                val retryResp = signedRequest(method, path, body ?: "", extraHeaders)
                 return SignedResponse(
                     ok = retryResp.code in 200..299,
                     statusCode = retryResp.code,
@@ -314,7 +313,6 @@ class ZarzSession(
         path: String,
         body: Any? = null,
         extraHeaders: Map<String, String> = emptyMap(),
-        appVersionOverride: String? = null,
     ): JSONObject {
         val bodyStr = when (body) {
             null -> ""
@@ -322,7 +320,7 @@ class ZarzSession(
             is JSONObject -> body.toString()
             else -> body.toJson()
         }
-        val response = signedFetch(method, path, bodyStr, extraHeaders, appVersionOverride)
+        val response = signedFetch(method, path, bodyStr, extraHeaders)
         if (response.needsVerification) {
             throw VerificationRequiredException(response.authUrl)
         }
@@ -332,14 +330,14 @@ class ZarzSession(
         return JSONObject(response.body ?: "{}")
     }
 
-    suspend fun signedTicket(provider: String, type: String = "track", id: String, appVersionOverride: String? = null): String {
+    suspend fun signedTicket(provider: String, type: String = "track", id: String): String {
         val resourceHash = sha256Hex("$provider:$type:${id.lowercase()}")
         val payload = JSONObject().apply {
             put("capability", "download_ticket")
             put("provider", provider)
             put("resource_hash", resourceHash)
         }
-        val result = signedJson("POST", "/tickets", payload, appVersionOverride = appVersionOverride)
+        val result = signedJson("POST", "/tickets", payload)
         val ticketId = (result.optString("ticket_id", "").ifBlank { result.optString("ticket", "") }).trim()
         if (ticketId.isBlank()) throw Exception("Signed ticket response missing ticket_id")
         return ticketId
@@ -347,7 +345,7 @@ class ZarzSession(
 
     suspend fun resolveDownloadDescriptor(trackId: String): JSONObject {
         val trackUrl = "https://www.deezer.com/track/$trackId"
-        val ticket = signedTicket("dzr", "track", trackUrl, appVersionOverride = APP_VERSION_DEEZER)
+        val ticket = signedTicket("dzr", "track", trackUrl)
         return signedJson(
             "POST", resolverDownloadPath,
             JSONObject().apply {
@@ -357,12 +355,11 @@ class ZarzSession(
                 put("url", trackUrl)
             },
             mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_DEEZER,
         )
     }
 
     suspend fun resolveAmazonDownload(asin: String, codec: String = "flac"): JSONObject {
-        val ticket = signedTicket("amazeamazeamaze", "track", asin, appVersionOverride = APP_VERSION_AMAZON)
+        val ticket = signedTicket("amazeamazeamaze", "track", asin)
         return signedJson(
             "POST", "/dl/amazeamazeamaze",
             JSONObject().apply {
@@ -370,12 +367,11 @@ class ZarzSession(
                 put("codec", codec)
             },
             mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_AMAZON,
         )
     }
 
     suspend fun resolveTidalDownload(trackId: String, quality: String = "LOSSLESS"): JSONObject {
-        val ticket = signedTicket("tid", "track", trackId, appVersionOverride = APP_VERSION_TIDAL)
+        val ticket = signedTicket("tid", "track", trackId)
         return signedJson(
             "POST", "/dl/tid",
             JSONObject().apply {
@@ -383,7 +379,6 @@ class ZarzSession(
                 put("quality", quality)
             },
             mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_TIDAL,
         )
     }
 
@@ -398,7 +393,7 @@ class ZarzSession(
     suspend fun searchQobuzTrackId(query: String, limit: Int = 10): String? {
         val q = java.net.URLEncoder.encode(query, "UTF-8")
         val path = "/qbz/track/search?query=$q&limit=$limit&offset=0&app_id=798273057"
-        val payload = runCatching { signedJson("GET", path, null, appVersionOverride = APP_VERSION_QOBUZ) }
+        val payload = runCatching { signedJson("GET", path, null) }
             .getOrNull() ?: return null
 
         val items = payload.optJSONObject("tracks")?.optJSONArray("items")
@@ -415,7 +410,7 @@ class ZarzSession(
     suspend fun resolveQobuzDownload(trackId: String, quality: Int = 27): JSONObject {
         // musicdl hashes the *track url*, not the bare id, and sends a string quality plus the url
         val trackUrl = "https://open.qobuz.com/track/$trackId"
-        val ticket = signedTicket("qbz", "track", trackUrl, appVersionOverride = APP_VERSION_QOBUZ)
+        val ticket = signedTicket("qbz", "track", trackUrl)
         val qualityStr = when (quality) {
             27 -> "hi-res-max"
             7 -> "hi-res"
@@ -431,7 +426,6 @@ class ZarzSession(
                 put("url", trackUrl)
             },
             mapOf("${headerPrefix}Ticket" to ticket),
-            appVersionOverride = APP_VERSION_QOBUZ,
         )
     }
 
@@ -518,13 +512,12 @@ class ZarzSession(
         path: String,
         body: String,
         extraHeaders: Map<String, String>,
-        appVersionOverride: String? = null,
     ): com.lagradost.nicehttp.NiceResponse {
         val url = resolveEndpoint(path)
-        val headers = buildSignedHeaders(method.uppercase(), url, body.toByteArray(), appVersionOverride)
+        val headers = buildSignedHeaders(method.uppercase(), url, body.toByteArray())
             .toMutableMap()
         headers["Accept"] = "application/json"
-        headers["User-Agent"] = userAgent(appVersionOverride ?: appVersion)
+        headers["User-Agent"] = userAgent(appVersion)
         if (body.isNotEmpty()) headers["Content-Type"] = "application/json"
         headers.putAll(extraHeaders.map { (k, v) -> k.lowercase() to v })
 
@@ -551,9 +544,8 @@ class ZarzSession(
         method: String,
         fullUrl: String,
         body: ByteArray,
-        appVersionOverride: String? = null,
     ): Map<String, String> {
-        val effectiveAppVersion = appVersionOverride ?: appVersion
+        val effectiveAppVersion = appVersion
         val now = System.currentTimeMillis()
         val nowSeconds = now / 1000
 

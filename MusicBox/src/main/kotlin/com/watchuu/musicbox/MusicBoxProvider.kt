@@ -71,15 +71,10 @@ class MusicBoxProvider : MainAPI() {
     }
 
     /**
-     * Per-provider ZARZ sessions.  The server scopes each session to its app_version, so a
-     * session minted as deezer@1.2.0 cannot sign requests for tidal-web@1.1.0 endpoints.
-     * Four sessions, one bootstrap: [ZarzSessionManager.activateOthers] cascades a single
-     * verification to all providers.
+     * One session per provider. The app scopes a signed session to
+     * Single ZARZ session shared by all providers. One bootstrap, one verification.
      */
-    private val zarzDeezer  get() = ZarzSessionManager.session(ZarzSession.APP_VERSION_DEEZER)
-    private val zarzQobuz   get() = ZarzSessionManager.session(ZarzSession.APP_VERSION_QOBUZ)
-    private val zarzTidal   get() = ZarzSessionManager.session(ZarzSession.APP_VERSION_TIDAL)
-    private val zarzAmazon  get() = ZarzSessionManager.session(ZarzSession.APP_VERSION_AMAZON)
+    private val zarz get() = ZarzSessionManager.session()
 
     @Volatile
     private var pendingAuthUrl: String? = null
@@ -804,20 +799,12 @@ class MusicBoxProvider : MainAPI() {
             callback.invoke(link)
         }
 
-        if (ZarzSessionManager.anyUsable()) {
-            runCatching {
-                withTimeoutOrNull(5_000L) {
-                    coroutineScope {
-                        ZarzSessionManager.versions
-                            .filter { ZarzSessionManager.isUsable(it) }
-                            .map { async { ZarzSessionManager.session(it).refreshIfNeeded() } }
-                            .awaitAll()
-                    }
-                }
-            }.onFailure { MusicBoxLog.w(TAG, "Session refresh failed: ${it.message}") }
+        if (ZarzSessionManager.isUsable()) {
+            runCatching { withTimeoutOrNull(5_000L) { ZarzSessionManager.session().refreshIfNeeded() } }
+                .onFailure { MusicBoxLog.w(TAG, "Session refresh failed: ${it.message}") }
         }
 
-        val resolverState = if (ZarzSessionManager.anyUsable()) "active" else "not active"
+        val resolverState = if (ZarzSessionManager.isUsable()) "active" else "not active"
         MusicBoxLog.d(
             TAG,
             "play ${source.ifBlank { "?" }}/$id \"${title.take(40)}\" - resolver $resolverState"
@@ -966,14 +953,12 @@ class MusicBoxProvider : MainAPI() {
             MusicBoxBrowser.openVerification(activity, authUrl) { grant ->
                 scope.launch {
                     try {
-                        // exchange the grant for all app_versions at once
-                        ZarzSessionManager.exchangeAll(grant)
+                        ZarzSessionManager.session().exchange(grant)
                         saveSession()
-                        val count = ZarzSessionManager.versions.count { ZarzSessionManager.isUsable(it) }
                         withContext(Dispatchers.Main) {
                             android.widget.Toast.makeText(
                                 activity,
-                                "MusicBox: ZARZ verified ($count/${ZarzSessionManager.versions.size} providers) - press play again",
+                                "MusicBox: ZARZ resolver verified - press play again",
                                 android.widget.Toast.LENGTH_LONG
                             ).show()
                         }
@@ -1060,7 +1045,7 @@ class MusicBoxProvider : MainAPI() {
             }
             val zarz = async<Unit> {
         // 2. Optional ZARZ Tidal resolver if session is active
-        if (zarzTidal.record.isUsable() && !upstreamDown("tidal-zarz")) {
+        if (zarz.record.isUsable() && !upstreamDown("tidal-zarz")) {
             try {
                 val targetId = resolvedTidalId
                 if (targetId.isNotBlank()) {
@@ -1068,7 +1053,7 @@ class MusicBoxProvider : MainAPI() {
                     var lastError = ""
                     for (quality in listOf("LOSSLESS", "HIGH", "LOW")) {
                         val attempt = runCatching {
-                            zarzTidal.resolveTidalDownload(targetId, quality)
+                            zarz.resolveTidalDownload(targetId, quality)
                         }
                         val error = attempt.exceptionOrNull()
                         if (error == null) {
@@ -1091,7 +1076,7 @@ class MusicBoxProvider : MainAPI() {
                     // TIDAL answers a base64 dash manifest, not a link. Decode it and take the
                     // audio url; a PREVIEW asset is rejected outright, as musicdl does.
                     val url = extractDownloadUrl(descriptor)
-                        ?: zarzTidal.tidalPlayableUrl(descriptor)
+                        ?: zarz.tidalPlayableUrl(descriptor)
                     if (url != null && url.startsWith("http")) {
                         val isHls = url.contains(".m3u8", true)
                         callback.invoke(
@@ -1161,7 +1146,7 @@ class MusicBoxProvider : MainAPI() {
             }
             val zarz = async<Unit> {
         // 2. ZARZ Deezer resolver
-        if (zarzDeezer.record.isUsable()) {
+        if (zarz.record.isUsable()) {
             val deezerTarget = trackId.ifBlank {
                 runCatching { DeezerApi.search(query, 1).firstOrNull()?.sourceId }.getOrNull().orEmpty()
             }
@@ -1169,13 +1154,13 @@ class MusicBoxProvider : MainAPI() {
                 MusicBoxLog.d(TAG, "Deezer ZARZ: no track id to ask for")
             } else
             try {
-                val descriptor = zarzDeezer.resolveDownloadDescriptor(deezerTarget)
+                val descriptor = zarz.resolveDownloadDescriptor(deezerTarget)
                 saveSession()
                 // an error envelope or a Blowfish-encrypted stream is not playable, and handing
                 // one to the player is how deezer tracks used to fail after "succeeding"
                 if (descriptor.optBoolean("success", true).not() ||
                     descriptor.has("error") || descriptor.has("detail") ||
-                    zarzDeezer.requiresClientDecryption(descriptor)
+                    zarz.requiresClientDecryption(descriptor)
                 ) {
                     MusicBoxLog.d(TAG, "Deezer ZARZ: unusable descriptor (encrypted or error)")
                 } else {
@@ -1201,7 +1186,7 @@ class MusicBoxProvider : MainAPI() {
                         added = true
                     }
                 } else {
-                    val cdnUrl = zarzDeezer.descriptorUrl(descriptor)
+                    val cdnUrl = zarz.descriptorUrl(descriptor)
                         ?: descriptor.optString("url", "")
                     if (cdnUrl.isNotBlank()) {
                         callback.invoke(
@@ -1239,8 +1224,8 @@ class MusicBoxProvider : MainAPI() {
         // The id has to come from the resolver: qobuz.com answers 401 "User authentication is
         // required" for anonymous search on every public app_id, so the store lookup cannot work.
         var resolvedQobuzId = qobuzId
-        if (resolvedQobuzId.isBlank() && zarzQobuz.record.isUsable()) {
-            resolvedQobuzId = runCatching { zarzQobuz.searchQobuzTrackId(query) }
+        if (resolvedQobuzId.isBlank() && zarz.record.isUsable()) {
+            resolvedQobuzId = runCatching { zarz.searchQobuzTrackId(query) }
                 .getOrNull().orEmpty()
             if (resolvedQobuzId.isNotBlank()) {
                 MusicBoxLog.d(TAG, "Qobuz ZARZ: resolved id $resolvedQobuzId")
@@ -1272,7 +1257,7 @@ class MusicBoxProvider : MainAPI() {
             }
             }
             val zarz = async<Unit> {
-        if (zarzQobuz.record.isUsable()) {
+        if (zarz.record.isUsable()) {
             try {
                 val targetId = resolvedQobuzId
                 if (targetId.isBlank()) {
@@ -1283,7 +1268,7 @@ class MusicBoxProvider : MainAPI() {
                     var descriptor: JSONObject? = null
                     for (quality in listOf(27, 7, 6)) {
                         val attempt = runCatching {
-                            zarzQobuz.resolveQobuzDownload(targetId, quality)
+                            zarz.resolveQobuzDownload(targetId, quality)
                         }.getOrNull()
                         if (attempt != null && extractDownloadUrl(attempt) != null) {
                             descriptor = attempt
@@ -1471,7 +1456,7 @@ class MusicBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!MusicBoxSettings.enableAmazonDownload) return false
-        if (!zarzAmazon.record.isUsable()) return false
+        if (!zarz.record.isUsable()) return false
         if (upstreamDown("amazon")) {
             MusicBoxLog.d(TAG, "Amazon: skipped, upstream unavailable (retrying later)")
             return false
@@ -1498,14 +1483,14 @@ class MusicBoxProvider : MainAPI() {
                 for (id in listOfNotNull(canonical, cand).distinct()) {
                     if (!tried.add(id)) continue
                     if (System.currentTimeMillis() - startedAt > 14_000) break@outer
-                    val ticket = zarzAmazon.signedTicket(
+                    val ticket = zarz.signedTicket(
                         "amazeamazeamaze", "track", id
                     )
                     val body = JSONObject().apply {
                         put("asin", id)
                         put("codec", "flac")
                     }.toString()
-                    val attempt = zarzAmazon.signedFetch(
+                    val attempt = zarz.signedFetch(
                         "POST", "/dl/amazeamazeamaze", body,
                         mapOf("X-Zarz-Ticket" to ticket),
                     )
@@ -1630,7 +1615,7 @@ class MusicBoxProvider : MainAPI() {
                     if (MusicBoxSettings.mirrorEnabled("yt_cobalt")) jobs += async<Unit> {
                         withTimeoutOrNull(15_000L) {
                             runCatching {
-                                val cobalt = zarzDeezer.resolveYouTubeDownload("https://music.youtube.com/watch?v=$videoId")
+                                val cobalt = zarz.resolveYouTubeDownload("https://music.youtube.com/watch?v=$videoId")
                                 // cobalt is asked for audio only; anything else is ignored
                                 val url = cobalt.optString("url", "")
                                 if (url.isNotBlank()) emit("YouTube Music · Cobalt", url, Qualities.Unknown.value, null, emptyMap())
@@ -1692,8 +1677,8 @@ class MusicBoxProvider : MainAPI() {
         ) {
             return null
         }
-        if (zarzDeezer.requiresClientDecryption(descriptor)) return null
-        zarzDeezer.descriptorUrl(descriptor)?.let { return it }
+        if (zarz.requiresClientDecryption(descriptor)) return null
+        zarz.descriptorUrl(descriptor)?.let { return it }
 
         val url = descriptor.optString("url", "")
         if (url.isNotBlank() && url.startsWith("http")) return url

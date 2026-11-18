@@ -274,18 +274,9 @@ object NonuDecrypt {
         val text = conn.inputStream.use { it.bufferedReader().readText() }
         if (text.isBlank()) throw Exception("Empty template response")
 
-        // The server may wrap in { code: 0, data: "..." } or return raw text
-        val template = try {
-            val json = org.json.JSONObject(text)
-            if (json.has("data")) {
-                val data = json.opt("data")
-                if (data is String) data else data?.toString() ?: text
-            } else {
-                text
-            }
-        } catch (_: Exception) {
-            text
-        }
+        // Return the raw JSON text — templateFromJson handles both
+        // contentKey format and legacy ctx/state format
+        val template = text
 
         templateCache[cacheKey] = template
         log("template fetched: ${template.length} chars")

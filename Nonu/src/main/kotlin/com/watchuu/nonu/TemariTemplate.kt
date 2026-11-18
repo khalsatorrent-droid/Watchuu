@@ -208,7 +208,16 @@ object TemariTemplate {
     /**
      * Parse a JSON template response (from the key server) into a [TemariCipher.Template].
      *
-     * Expected format:
+     * The server returns one of two formats:
+     *
+     * 1. **contentKey format** (current ak1ra proxy):
+     * ```json
+     * { "adamId": "...", "keyUri": "...", "contentKey": "<base64 of binary template>" }
+     * ```
+     * where `contentKey` decodes to 40 980 bytes in the same layout as prefetch_template.bin:
+     * ctx[0x8000] | st[2048×4 LE] | rdx u32 | rcx u32 | rax u32 | r9 u32 | rbp u32
+     *
+     * 2. **Split-field format** (am-hook legacy):
      * ```json
      * { "ctx": "<b64>", "state": "<b64>",
      *   "rcx": "0x..", "rax": "0x..", "rdx": "0x..", "r9": "0x..", "rbp": "0x.." }
@@ -219,7 +228,15 @@ object TemariTemplate {
         val map = HashMap<String, String>()
         for ((k, v) in fields) map[k] = v
 
-        val ctxB64   = map["ctx"]   ?: throw IllegalArgumentException("no ctx field")
+        // Format 1: contentKey — a single base64 blob identical to prefetch_template.bin
+        val contentKey = map["contentKey"]
+        if (contentKey != null && contentKey.length > 100) {
+            val binary = base64Decode(contentKey)
+            return prefetchTemplate(binary)
+        }
+
+        // Format 2: separate ctx / state / register fields
+        val ctxB64   = map["ctx"]   ?: throw IllegalArgumentException("no ctx field (and no contentKey)")
         val stateB64 = map["state"] ?: throw IllegalArgumentException("no state field")
         val rcx = parseHex(map["rcx"] ?: "0x0")
         val rax = parseHex(map["rax"] ?: "0x0")

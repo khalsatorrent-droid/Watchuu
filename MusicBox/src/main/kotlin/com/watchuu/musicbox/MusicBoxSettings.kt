@@ -295,32 +295,38 @@ object MusicBoxSettings {
             )
         }
         btnBootstrap.setOnClickListener {
-            if (ZarzSessionManager.isUsable()) {
-                Toast.makeText(act, "ZARZ session already active", Toast.LENGTH_SHORT).show()
+            val usable = ZarzSessionManager.versions.count { ZarzSessionManager.isUsable(it) }
+            if (usable == ZarzSessionManager.versions.size) {
+                Toast.makeText(act, "All ZARZ sessions already active", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val session = ZarzSessionManager.session()
+            val primary = ZarzSession.APP_VERSION_DEEZER
+            val session = ZarzSessionManager.session(primary)
             ZarzSessionManager.sharedInstallId(act)?.let { if (session.record.sessionId.isBlank()) session.record.installId = it }
 
             fun finish() {
                 ZarzSessionManager.persist(act)
                 sessionStatus.text = statusLine()
-                Toast.makeText(act, "ZARZ session active", Toast.LENGTH_LONG).show()
+                val count = ZarzSessionManager.versions.count { ZarzSessionManager.isUsable(it) }
+                Toast.makeText(act, "ZARZ active ($count/${ZarzSessionManager.versions.size} providers)", Toast.LENGTH_LONG).show()
             }
 
             scope.launch {
                 try {
                     val url = session.bootstrap()
-                    ZarzSessionManager.persist(act)
                     if (url.isBlank()) {
+                        // bootstrapped without challenge — cascade to others
+                        ZarzSessionManager.activateOthers(primary, null, act)
                         withContext(Dispatchers.Main) { finish() }
                     } else {
+                        ZarzSessionManager.persist(act)
                         withContext(Dispatchers.Main) {
                             sessionStatus.text = "⚠ Verification required"
                             MusicBoxBrowser.openVerification(act, url) { grant ->
                                 scope.launch {
                                     try {
                                         session.exchange(grant)
+                                        ZarzSessionManager.activateOthers(primary, grant, act)
                                         withContext(Dispatchers.Main) { finish() }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {
@@ -351,10 +357,9 @@ object MusicBoxSettings {
             )
         }
         btnClear.setOnClickListener {
-            ZarzSessionManager.session().record.clear()
-            ZarzSessionManager.persist(act)
+            ZarzSessionManager.clearAll(act)
             sessionStatus.text = statusLine()
-            Toast.makeText(act, "Session cleared", Toast.LENGTH_SHORT).show()
+            Toast.makeText(act, "All sessions cleared", Toast.LENGTH_SHORT).show()
         }
         root.addView(btnClear)
 

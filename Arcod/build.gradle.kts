@@ -1,8 +1,8 @@
-version = 1
+version = 2
 
 cloudstream {
     language = "en"
-    description = "Arcod - lossless music from player.arcod.xyz. Sign in with your email and password in settings, then search songs and albums and play them in FLAC."
+    description = "Arcod - lossless music from player.arcod.xyz. Search songs and albums and play them in FLAC. Signing in from settings is optional - the catalogue plays without it."
     authors = listOf("khalsatorrent-droid")
 
     status = 1

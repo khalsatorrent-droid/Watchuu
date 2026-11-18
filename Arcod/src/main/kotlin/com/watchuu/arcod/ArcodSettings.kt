@@ -54,7 +54,7 @@ object ArcodSettings {
         }
 
         root.addView(text("Arcod", 20f))
-        root.addView(text("Sign in with the email and password you use on player.arcod.xyz. The details are kept on this device so the extension can sign in again when the site expires the session."))
+        root.addView(text("Signing in is optional - the catalogue and playback work without it. Use the email and password you have on player.arcod.xyz if you want your account attached; the details stay on this device so the extension can sign in again when the site expires the session."))
 
         val status = TextView(act).apply {
             textSize = 13f

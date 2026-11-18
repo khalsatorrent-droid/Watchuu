@@ -211,12 +211,17 @@ object TemariTemplate {
         android.util.Log.d("TemariTemplate", "parsed keys: ${map.keys}")
 
         // Format 1: contentKey — a single base64 blob identical to prefetch_template.bin
+        // Only use this path if the decoded blob is actually large enough (40980+ bytes).
+        // Some servers return a short contentKey alongside separate ctx/state fields.
         val contentKey = map["contentKey"]
         if (contentKey != null && contentKey.length > 100) {
             android.util.Log.d("TemariTemplate", "contentKey found, length=${contentKey.length}")
             val binary = base64Decode(contentKey)
             android.util.Log.d("TemariTemplate", "decoded binary size=${binary.size}, required=${CTX_SIZE + ST_SIZE * 4 + 20}")
-            return prefetchTemplate(binary)
+            if (binary.size >= CTX_SIZE + ST_SIZE * 4 + 20) {
+                return prefetchTemplate(binary)
+            }
+            android.util.Log.d("TemariTemplate", "contentKey too short for prefetch format, trying split fields")
         }
 
         // Format 2: separate ctx / state / register fields

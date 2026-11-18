@@ -11,7 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Nonu - Apple's catalogue through music.ak1ra.de5.net.
+ * Nonu - Apple's catalogue through music.1412.tech.
  *
  * Card urls:
  *   /song/<id>?t=<title>&a=<artist>&al=<album>&d=<ms>&art=<artwork>

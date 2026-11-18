@@ -251,7 +251,7 @@ object NonuDecrypt {
     // ------------------------------------------------------------------ key / template fetching
 
     /**
-     * Fetch the FairPlay decryption template from the ak1ra proxy.
+     * Fetch the FairPlay decryption template from the 1412 proxy.
      * Calls GET /key?adamId=X&uri=Y which returns JSON text used by hook_template_load.
      */
     private suspend fun fetchTemplate(adamId: String, keyUri: String): String = withContext(Dispatchers.IO) {

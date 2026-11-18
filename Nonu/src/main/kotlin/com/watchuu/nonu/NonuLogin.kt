@@ -87,8 +87,7 @@ object NonuLogin {
                 cm.flush()
                 listOf(
                     cm.getCookie(NonuApi.SITE),
-                    cm.getCookie("https://ak1ra.de5.net"),
-                    cm.getCookie("https://de5.net"),
+                    cm.getCookie("https://1412.tech"),
                 ).filterNotNull().joinToString("; ")
             }.getOrDefault("")
             done.complete(cookies)

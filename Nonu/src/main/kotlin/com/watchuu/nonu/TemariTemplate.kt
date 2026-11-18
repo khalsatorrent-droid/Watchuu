@@ -210,7 +210,7 @@ object TemariTemplate {
      *
      * The server returns one of two formats:
      *
-     * 1. **contentKey format** (current ak1ra proxy):
+     * 1. **contentKey format** (current 1412 proxy):
      * ```json
      * { "adamId": "...", "keyUri": "...", "contentKey": "<base64 of binary template>" }
      * ```

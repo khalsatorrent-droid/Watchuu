@@ -17,7 +17,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Nonu - the Apple Music catalogue served by music.ak1ra.de5.net.
+ * Nonu - the Apple Music catalogue served by music.1412.tech.
  *
  * API endpoints (from site traffic):
  *   GET /amp/v1/catalog/{cc}/search?term=&types=songs,albums,artists&limit=&l=
@@ -28,8 +28,8 @@ import java.util.Locale
  * Playback: enhancedHls is an HLS master on aod.itunes.apple.com.
  */
 object NonuApi {
-    const val SITE = "https://music.ak1ra.de5.net"
-    const val BUILD = "v4"
+    const val SITE = "https://music.1412.tech"
+    const val BUILD = "v5"
 
     private const val UA_FALLBACK =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -77,7 +77,7 @@ object NonuApi {
     fun clearCookies() {
         runCatching {
             val cm = CookieManager.getInstance()
-            listOf(SITE, "https://ak1ra.de5.net", "https://de5.net").forEach {
+            listOf(SITE, "https://1412.tech").forEach {
                 cm.setCookie(it, "cf_clearance=; Max-Age=0")
             }
             cm.flush()
@@ -106,8 +106,7 @@ object NonuApi {
         runCatching {
             val cm = CookieManager.getInstance()
             add(cm.getCookie(SITE))
-            add(cm.getCookie("https://ak1ra.de5.net"))
-            add(cm.getCookie("https://de5.net"))
+            add(cm.getCookie("https://1412.tech"))
         }
         return jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }

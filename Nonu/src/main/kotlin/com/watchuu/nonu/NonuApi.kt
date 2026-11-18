@@ -203,8 +203,11 @@ object NonuApi {
         return runCatching {
             val r = app.get(url, headers = headers(mapOf("Accept" to "*/*")), timeout = 20L)
             log("net", "text $short -> ${r.code}")
-            if (r.code in 200..299) r.text else null
-        }.getOrNull()
+            if (r.code in 200..299) r.text else {
+                log("WARN", "text $short non-200: ${r.code}")
+                null
+            }
+        }.onFailure { log("WARN", "text $short threw: ${it::class.simpleName}: ${it.message}") }.getOrNull()
     }
 
     fun report(): String = buildString {

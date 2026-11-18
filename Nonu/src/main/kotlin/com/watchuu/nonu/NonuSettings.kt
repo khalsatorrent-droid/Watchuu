@@ -62,7 +62,7 @@ object NonuSettings {
         root.addView(text("Cloudflare cookie", 15f))
         root.addView(cookieField)
 
-        val passwordField = field("Extension password (leave empty to disable)", "")
+        val passwordField = field("Extension password (leave empty to disable)", NonuApi.password)
         root.addView(text("Password protection", 15f))
         root.addView(passwordField)
 
@@ -70,10 +70,8 @@ object NonuSettings {
             NonuApi.storefront = ccField.text.toString()
             NonuApi.manualCookie = cookieField.text.toString()
             val pw = passwordField.text.toString().trim()
-            if (pw.isNotBlank()) {
-                NonuApi.password = pw
-                NonuApi.savedPassword = pw
-            }
+            NonuApi.password = pw
+            NonuApi.savedPassword = pw
             Toast.makeText(act, "Nonu: saved", Toast.LENGTH_SHORT).show()
         })
 

@@ -178,7 +178,7 @@ class NonuProvider : MainAPI() {
         ) {
             this.posterUrl = cover
             this.plot = listOfNotNull(artist.ifBlank { null }, album.ifBlank { null }).joinToString(" · ")
-            this.duration = (dur / 1000).toInt()
+            this.duration = (dur / 60000).toInt()
         }
     }
 
@@ -317,7 +317,7 @@ class NonuProvider : MainAPI() {
         if (preview.isNotBlank()) {
             NonuApi.log("step", "falling back to preview for $id")
             callback.invoke(
-                newExtractorLink(name, "$name Preview", preview, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, "$name Preview", preview, ExtractorLinkType.VIDEO) {
                     this.referer = "$mainUrl/song/$id"
                     this.quality = Qualities.Unknown.value
                 }

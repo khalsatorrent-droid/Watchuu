@@ -180,15 +180,14 @@ class EchoProvider : MainAPI() {
 
         // Cloudstream ships a YouTube resolver that already handles signatures, `n` transforms and
         // po tokens; asking it is far more reliable than reimplementing the player endpoint here.
-        // The resolver is registered for www.youtube.com, so ask with that link first; the music
-        // domain is only tried if the first ask gives nothing.
+        // Ask with the music.youtube.com link first; www.youtube.com is only tried if that gives nothing.
         val found = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
-        for (watch in listOf(
-            "https://www.youtube.com/watch?v=$videoId",
-            "https://music.youtube.com/watch?v=$videoId",
+        for ((watch, referer) in listOf(
+            "https://music.youtube.com/watch?v=$videoId" to "${EchoApi.SITE}/",
+            "https://www.youtube.com/watch?v=$videoId" to "https://www.youtube.com/",
         )) {
             runCatching {
-                loadExtractor(watch, "https://www.youtube.com/", subtitleCallback) { found.add(it) }
+                loadExtractor(watch, referer, subtitleCallback) { found.add(it) }
             }
             if (found.isNotEmpty()) break
         }

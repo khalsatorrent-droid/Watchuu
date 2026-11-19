@@ -206,6 +206,8 @@ object AtlanticNative {
      * This blocks for as long as the source takes, so callers run it off the main thread.
      */
     fun resolve(sourceId: String, r: Request): String? {
+        // aphrodite does not use the library, so it still works when the library cannot load
+        if (sourceId == "aphrodite") return AtlanticAphrodite.resolve(r)
         if (!loaded) return null
         val raw = runCatching {
             when (sourceId) {
@@ -241,9 +243,6 @@ object AtlanticNative {
                     r.tmdbId, r.season, r.ep, r.word, r.title, r.year, r.febboxKey, r.preferredVariantId
                 )
 
-                // aphrodite is deliberately absent: it is the one source the app does not route
-                // through the library. It runs its own signed handshake in Kotlin, so it needs a
-                // port of its own rather than a JNI call.
                 else -> null
             }
         }.onFailure { Log.d(TAG, "$sourceId failed: ${it.javaClass.simpleName} ${it.message}") }
@@ -253,28 +252,18 @@ object AtlanticNative {
         return raw?.takeIf { it.isNotBlank() && it.trim() != "{}" }
     }
 
-    /** the sources, in the plugin's own order and with its own names */
+    /** the sources of plugin v11, in its order and with its names (older ones no longer exist) */
     val SOURCES: List<Pair<String, String>> = listOf(
-        "aether" to "Aether [4K]",
-        "amethyst" to "Amethyst (4K)",
-        "apollo" to "Apollo",
-        "artemis" to "Artemis [4K]",
-        "aspera" to "Ardua",
+        "aphrodite" to "Aphrodite",
         "aurora" to "Aurora API",
-        "cosmic" to "Cosmic",
-        "dizipal" to "Dizipal",
-        "eclipse" to "Penumbra",
-        "fuji" to "Fuji",
-        "halcyon" to "Halcyon",
-        "lumi" to "Lumi [4K]",
-        "magnolia" to "Camellia",
-        "nepu" to "Nepu",
-        "nesterov" to "Perigee",
-        "nexus" to "Nexus (DDL)",
-        "shibuya" to "Shibuya",
         "stellar" to "Nebula",
-        "thalia" to "Thalia",
+        "nesterov" to "Perigee",
+        "magnolia" to "Camellia",
         "tokyo" to "Tokyo",
         "valley" to "Canyon [4K HDR]",
+        "aether" to "Aether [4K]",
+        "lumi" to "Lumi [4K]",
+        "aspera" to "Ardua",
+        "nexus" to "Nexus (DDL)",
     )
 }

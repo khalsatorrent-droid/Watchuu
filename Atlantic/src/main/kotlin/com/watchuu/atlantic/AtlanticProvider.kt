@@ -192,9 +192,9 @@ class AtlanticProvider : MainAPI() {
         val ep = show?.groupValues?.get(3).orEmpty()
 
         // nothing below can answer until the library is in; this is what loads it on first play
+        // Aphrodite works without it, so a library that will not load must not stop playback
         if (!AtlanticNative.ensureLoaded()) {
             Log.w(TAG, "resolver library not available: ${AtlanticNative.error}")
-            return false
         }
 
         // several resolvers match on title and year instead of the id, and nepu wants the poster

@@ -117,7 +117,7 @@ class EchoProvider : MainAPI() {
         return null
     }
 
-    private fun loadTrack(videoId: String, url: String): LoadResponse? {
+    private suspend fun loadTrack(videoId: String, url: String): LoadResponse? {
         val title = param(url, "t") ?: "Track"
         val artist = param(url, "a").orEmpty().substringBefore('•').trim()
         val art = param(url, "art")?.takeIf { it.startsWith("http") }

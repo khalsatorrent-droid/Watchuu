@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 class MmsvibexProvider : MainAPI() {
-    override var mainUrl = "https://mmsvibex.fit"
+    override var mainUrl = "https://mmsvibex.life"
     override var name = "Mmsvibex"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
@@ -52,13 +52,20 @@ class MmsvibexProvider : MainAPI() {
         return results
     }
 
+    // Items saved from the old domain (mmsvibex.fit) are moved to the current one.
+    private fun fixUrl2(u: String) = u.replace(Regex("^https?://(www\\.)?mmsvibex\\.(fit|com|net|xyz)"), mainUrl)
+
     override suspend fun load(url: String): LoadResponse {
+        val url = fixUrl2(url)
         val document = app.get(url).document
 
         val title = document.selectFirst("h1")?.text() ?: "Unknown"
-        val poster = document.selectFirst(".post-thumbnail img")?.attr("src")
-        val plot = document.selectFirst(".entry-content p")?.text()
-        val tags = document.select(".tag-link").map { it.text() }
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
+            ?: document.selectFirst(".post-thumbnail img")?.attr("src")
+        val plot = document.selectFirst("meta[itemprop=description]")?.attr("content")
+            ?: document.selectFirst(".entry-content p")?.text()
+        val tags = document.select(".tags-list a, .tag-link").map { it.text().trim() }.filter { it.isNotEmpty() }
 
         val episodes = document.select("a.mms-image-album-item").mapIndexed { index, element ->
             newEpisode(element.attr("href").takeIf { it.isNotEmpty() } ?: url) {
@@ -90,26 +97,43 @@ class MmsvibexProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val page = fixUrl2(data)
+        val html = app.get(page).text
 
-        val videoLinks = document.select("iframe").mapNotNull { it.attr("src").takeIf { s -> s.isNotEmpty() } } +
-            document.select("video source").mapNotNull { it.attr("src").takeIf { s -> s.isNotEmpty() } } +
-            document.select("[src*='cdn.mmsvibex.fit']").mapNotNull { it.attr("src").takeIf { s -> s.isNotEmpty() } }
-
-        videoLinks.forEach { link ->
-            if (link.contains("mmsvibex.fit")) {
-                callback(
-                    newExtractorLink(name, name, link,
-                        if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+        // The player markup sits inside a <template>, so an HTML parser never sees the <video>;
+        // read the raw page instead. Order: direct play button / <source> / schema contentUrl / any mp4|m3u8.
+        val found = linkedSetOf<String>()
+        val patterns = listOf(
+            Regex("""<source[^>]+src=["']([^"']+)["']"""),
+            Regex("""class=["']mvp-button[^"']*["'][^>]*href=["']([^"']+)["']"""),
+            Regex("""itemprop=["']contentUrl["'][^>]*content=["']([^"']+)["']"""),
+            Regex("""https?:(?:\\?/){2}[^"'\s<>\\]+?\.(?:mp4|m3u8)(?:\?[^"'\s<>\\]*)?"""),
+        )
+        for (re in patterns) {
+            re.findAll(html).forEach { m ->
+                val u = (m.groupValues.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: m.value)
+                    .replace("\\/", "/").replace("&amp;", "&")
+                if (u.startsWith("http") &&
+                    (u.contains(".mp4") || u.contains(".m3u8")) &&
+                    !u.contains("/trailers/") && !u.contains("thumbnail")
+                ) found.add(u)
             }
         }
+        // the same file is often listed with and without ?v=; keep the versioned one
+        val links = found.groupBy { it.substringBefore('?') }.map { (_, v) -> v.maxByOrNull { it.length }!! }
 
-        return videoLinks.isNotEmpty()
+        links.forEachIndexed { i, link ->
+            callback(
+                newExtractorLink(name, if (links.size > 1) "$name ${i + 1}" else name, link,
+                    if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
+
+        return links.isNotEmpty()
     }
 
     private fun Element.toSearchResult(): SearchResponse? {

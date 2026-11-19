@@ -225,7 +225,7 @@ class AtlanticProvider : MainAPI() {
                     gate.withPermit {
                         val raw = AtlanticNative.resolve(id, request)
                         val json = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
-                        if (json != null) emitSource(label, json, subtitleCallback, callback, seen, emitted)
+                        if (json != null) emitSource(label, AtlanticNative.defaultType(id), json, subtitleCallback, callback, seen, emitted)
                     }
                 }
             }.awaitAll()
@@ -238,13 +238,14 @@ class AtlanticProvider : MainAPI() {
     /** turns one source's answer into links and subtitles */
     private suspend fun emitSource(
         label: String,
+        defaultType: String,
         json: JSONObject,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
         seen: MutableSet<String>,
         emitted: AtomicInteger,
     ) {
-        val streamType = json.optString("streamType")
+        val streamType = json.optString("streamType", defaultType)
         val topHeaders = json.optJSONObject("headers")
 
         suspend fun emit(url: String, display: String, type: String, quality: Int, headers: JSONObject?) {
@@ -274,7 +275,7 @@ class AtlanticProvider : MainAPI() {
                 emit(
                     v.optString("streamUrl"),
                     if (q.isBlank()) label else "$label · $q",
-                    v.optString("streamType").ifBlank { streamType },
+                    v.optString("streamType", streamType).ifBlank { streamType },
                     qualityOf(q),
                     v.optJSONObject("headers") ?: topHeaders,
                 )

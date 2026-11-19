@@ -249,7 +249,13 @@ object AtlanticNative {
             .getOrNull()
 
         // "{}" is the library saying "not available"; "" is a failure
-        return raw?.takeIf { it.isNotBlank() && it.trim() != "{}" }
+        // the plugin also treats the string "null" as nothing, and {"error"...} / cfChallenge as no stream
+        val t = raw?.trim().orEmpty()
+        if (t.isEmpty() || t == "{}" || t == "null" || t.startsWith("{\"error\"")) {
+            if (t.startsWith("{\"error\"")) Log.d(TAG, "$sourceId native error: ${t.take(160)}")
+            return null
+        }
+        return raw
     }
 
     /** the sources of plugin v11, in its order and with its names (older ones no longer exist) */
@@ -264,6 +270,12 @@ object AtlanticNative {
         "aether" to "Aether [4K]",
         "lumi" to "Lumi [4K]",
         "aspera" to "Ardua",
-        "nexus" to "Nexus (DDL)",
+        // nexus is download-only in the plugin (kept out of the watch list), so it is not played here
     )
+
+    /** what a source's streamType means when it leaves it out - the plugin's own defaults differ */
+    fun defaultType(sourceId: String): String = when (sourceId) {
+        "valley", "aether", "lumi" -> "file"
+        else -> "hls"
+    }
 }

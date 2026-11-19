@@ -40,7 +40,7 @@ settings; this page deliberately does not list them.
 | TV series | 12 |
 | Anime, including anime movies | 8 |
 | Asian and short drama | 3 |
-| Music | 5 |
+| Music, lossless | 5 |
 | Adult | 26 |
 | Other catalogue types | 4 |
 

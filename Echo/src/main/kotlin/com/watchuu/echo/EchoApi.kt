@@ -63,7 +63,7 @@ object EchoApi {
                 url,
                 headers = headers(),
                 requestBody = body.toString().toRequestBody("application/json".toMediaType()),
-                timeout = 25_000L
+                timeout = 25L
             )
             if (r.code !in 200..299) null else runCatching { JSONObject(r.text) }.getOrNull()
         } catch (e: Throwable) {

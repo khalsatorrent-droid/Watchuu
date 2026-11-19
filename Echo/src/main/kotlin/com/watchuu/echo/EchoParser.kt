@@ -135,12 +135,47 @@ object EchoParser {
     private fun durationOf(line: String): String? =
         Regex("\\b(\\d{1,2}:\\d{2}(?::\\d{2})?)\\b").find(line)?.groupValues?.get(1)
 
+    /** album and playlist rows carry the length in a fixed column instead of the subtitle line */
+    private fun fixedDuration(item: JSONObject): String? {
+        val cols = item.optJSONArray("fixedColumns") ?: return null
+        for (i in 0 until cols.length()) {
+            val t = text(cols.optJSONObject(i)?.optJSONObject("musicResponsiveListItemFixedColumnRenderer")?.optJSONObject("text"))
+            durationOf(t)?.let { return it }
+        }
+        return null
+    }
+
     fun track(item: JSONObject): Track? {
         val id = videoIdOf(item) ?: return null
         val cols = flexColumns(item)
         val title = cols.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return null
         val sub = cols.getOrNull(1).orEmpty()
-        return Track(id, title, sub, thumb(item), durationOf(sub))
+        return Track(id, title, sub, thumb(item), durationOf(sub) ?: fixedDuration(item))
+    }
+
+    private val TYPE_WORDS = setOf("song", "video", "single", "ep", "album", "episode", "podcast", "playlist", "artist")
+
+    /**
+     * The artist from a subtitle line such as "Song • Arijit Singh • Aashiqui 2 • 4:22": the first
+     * part that is not the item type, a duration, a play/view count or a year.
+     */
+    fun artistOf(subtitle: String): String =
+        subtitle.split('•').map { it.trim() }.firstOrNull { part ->
+            part.isNotEmpty() &&
+                part.lowercase() !in TYPE_WORDS &&
+                durationOf(part) == null &&
+                !Regex("(?i)\\b(views|plays|subscribers|songs)\\b").containsMatchIn(part) &&
+                !Regex("^\\d{4}$").matches(part)
+        }.orEmpty()
+
+    /** "4:22" or "1:02:03" to seconds */
+    fun seconds(duration: String?): Int? {
+        val parts = duration?.split(':')?.map { it.toIntOrNull() ?: return null } ?: return null
+        return when (parts.size) {
+            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
+            2 -> parts[0] * 60 + parts[1]
+            else -> null
+        }
     }
 
     fun tile(item: JSONObject): Tile? {

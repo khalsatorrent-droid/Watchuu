@@ -1,79 +1,52 @@
-import json, sys, hashlib, urllib.request, urllib.parse, urllib.error
-
+import json, re, urllib.request, urllib.parse, urllib.error
 UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
-
-def req(url, method="GET", body=None, headers=None, show=700):
-    h = {"Accept": "application/json", "User-Agent": UA}
-    h.update(headers or {})
+def req(url, method="GET", body=None, headers=None, show=600):
+    h = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8", "User-Agent": UA}; h.update(headers or {})
     data = json.dumps(body).encode() if body is not None else None
     if data: h["Content-Type"] = "application/json"
-    r = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
-        with urllib.request.urlopen(r, timeout=25) as resp:
-            code, text, final = resp.status, resp.read().decode("utf-8", "replace"), resp.geturl()
-    except urllib.error.HTTPError as e:
-        code, text, final = e.code, e.read().decode("utf-8", "replace"), url
+        with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h, method=method), timeout=25) as r:
+            code, text, final = r.status, r.read().decode("utf-8", "replace"), r.geturl()
+    except urllib.error.HTTPError as e: code, text, final = e.code, e.read().decode("utf-8", "replace"), url
     except Exception as e:
-        print(f"  {method} {url}\n  !! {type(e).__name__}: {e}")
-        return None, None
+        print(f"  {method} {url}\n  !! {type(e).__name__}: {e}"); return None, ""
     print(f"  {method} {url} -> {code}" + (f" (final {final})" if final != url else ""))
-    print("  " + text[:show].replace("\n", " "))
-    try: return code, json.loads(text)
-    except Exception: return code, None
+    if show: print("  " + text[:show].replace("\n", " "))
+    return code, text
+def js(t):
+    try: return json.loads(t)
+    except Exception: return None
+qe = urllib.parse.urlencode
 
-def q(d): return urllib.parse.urlencode(d)
+print("== Deezer ISRC")
+c, t = req("https://api.deezer.com/search?" + qe({"q": "Believer Imagine Dragons", "limit": 1}), show=0)
+did = js(t)["data"][0]["id"]
+c, t = req(f"https://api.deezer.com/track/{did}", show=0); isrc = js(t)["isrc"]; print("  isrc", isrc)
+req("https://dzr.tabs-vs-spaces.wtf/", show=1500)
+for p in (f"/track/?isrc={isrc}", f"/track?isrc={isrc}", f"/track/?isrc={isrc}&quality=FLAC", f"/track/?isrc={isrc}&format=FLAC"):
+    req("https://dzr.tabs-vs-spaces.wtf" + p, show=1500)
 
-Q = "Believer Imagine Dragons"
+print("== LastBabe page")
+c, t = req("https://lastbabe.velixir.run/", show=0)
+print("  scripts:", re.findall(r'<script[^>]*src="([^"]+)"', t))
+for m in sorted(set(re.findall(r'''(?:fetch\(|['"`])(/[a-zA-Z0-9_/\-\.]{2,60})''', t))): print("  path:", m)
+inline = re.findall(r"<script[^>]*>(.*?)</script>", t, re.S)
+for s in inline: print("  INLINE JS:", s[:4000].replace("\n", " "))
+print("  TEXT:", re.sub(r"<[^>]+>", " ", re.sub(r"<(script|style)[^>]*>.*?</\1>", "", t, flags=re.S)).split()[:150])
 
-print("== Qobuz-DL")
-base = "https://qobuz-dll.foreyou.workers.dev"
-c, j = req(f"{base}/api/get-music?{q({'q': Q, 'offset': '0'})}")
-tid = None
-try: tid = j["data"]["tracks"]["items"][0]["id"]
-except Exception: pass
-if tid:
-    for qual in ("27", "7", "6"):
-        req(f"{base}/api/download-music?{q({'track_id': tid, 'quality': qual})}")
-
-print("== Instable")
-base = "https://instable.arcod.xyz"
-ih = {"Referer": base + "/", "Origin": base, "Accept-Language": "en-US,en;q=0.9"}
-c, j = req(f"{base}/api/search?{q({'q': Q})}", headers=ih)
-tid = None
-try: tid = j["data"]["tracks"]["items"][0]["id"]
-except Exception: pass
-if tid:
-    req(f"{base}/api/player/stream/{tid}?{q({'quality': '27'})}", headers=ih)
-
-for name, base in (("Deezer", "https://dzr.tabs-vs-spaces.wtf"),
-                   ("Eljohnzc", "https://eljohnzc-addon.de.deplexo.com/4433c7caff7fd070309e")):
-    print("== " + name)
-    req(f"{base}/manifest.json", show=400)
-    c, j = req(f"{base}/search?{q({'q': Q, 'quality': 'LOSSLESS', 'atmos': 'auto'})}")
-    tid = None
+print("== Qobuz-DL instances")
+for base in ("https://qobuz.squid.wtf", "https://eu.qobuz.squid.wtf", "https://us.qobuz.squid.wtf", "https://qobuz-dll.foreyou.workers.dev"):
+    c, t = req(base + "/api/get-music?" + qe({"q": "Believer Imagine Dragons", "offset": 0}), show=300)
+    j = js(t)
     try:
-        items = j["tracks"] if isinstance(j, dict) else j
-        tid = items[0]["id"]
+        tid = j["data"]["tracks"]["items"][0]["id"]
+        req(base + "/api/download-music?" + qe({"track_id": tid, "quality": 27}), show=500)
     except Exception: pass
-    if tid:
-        req(f"{base}/stream/{urllib.parse.quote(str(tid))}?{q({'quality': 'LOSSLESS', 'atmos': 'auto'})}")
 
-print("== LastBabe")
-root = "https://lastbabe.velixir.run/"
-c, ch = req(root + "challenge")
-if isinstance(ch, dict) and isinstance(ch.get("challenge"), str):
-    d = ch.get("difficulty") if isinstance(ch.get("difficulty"), int) and 1 <= ch.get("difficulty") <= 8 else 4
-    n = 0
-    while True:
-        n += 1
-        if hashlib.sha256((ch["challenge"] + str(n)).encode()).hexdigest().startswith("0" * d): break
-    print(f"  solved difficulty {d} nonce {n}")
-    c, m = req(root + "mint", "POST", {"challenge": ch["challenge"], "nonce": str(n)})
-    mu = isinstance(m, dict) and (m.get("manifestUrl") or m.get("addonUrl"))
-    if mu:
-        b = mu.removesuffix("/manifest.json").rstrip("/")
-        c, j = req(f"{b}/search?{q({'q': Q})}")
-        try:
-            t = j["tracks"][0]; tid = t.get("trackId") or t.get("id")
-            req(f"{b}/stream/{urllib.parse.quote(str(tid))}?{q({'quality': 'LOSSLESS'})}")
-        except Exception as e: print("  no track", e)
+print("== Instable / Arcod")
+req("https://instable.arcod.xyz/", show=800)
+req("https://instable.arcod.xyz/api/auth/login", "POST", {"email": "", "password": ""}, show=400)
+req("https://player.arcod.xyz/api/player/search?" + qe({"q": "Believer", "limit": 2, "offset": 0}), show=300)
+
+print("== Eljohnzc host")
+req("https://eljohnzc-addon.de.deplexo.com/", show=300)

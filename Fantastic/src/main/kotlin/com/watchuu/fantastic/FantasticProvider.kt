@@ -130,10 +130,11 @@ class FantasticProvider : MainAPI() {
         val (kind, id) = parseUrl(data)
         if (kind != "song") return false
         val available = json("song/$id/qualities?basic=1").optJSONArray("qualities").objects()
-        val supported = setOf("SQ", "HQ", "MP3128", "WEB", "AAC192", "AAC48", "OGG96", "OGG192")
-        val playable = available.filter { it.optBoolean("available") && it.string("quality") in supported }
+        val qualityOrder = listOf("RS", "SQ", "HQ", "AAC192", "OGG192", "MP3128", "OGG96", "WEB", "AAC48")
+        val playable = available.filter { it.optBoolean("available") && it.string("quality") in qualityOrder }
+            .sortedBy { qualityOrder.indexOf(it.string("quality")) }
         playable.forEach { row ->
-            callback(newExtractorLink(name, "$name · ${row.string("format")}",
+            callback(newExtractorLink(name, "$name · ${row.string("quality")} · ${row.string("format")}",
                 "$mainUrl/qq/song/$id/download?quality=${row.string("quality")}", ExtractorLinkType.VIDEO) {
                 referer = "$mainUrl/"
                 quality = Qualities.Unknown.value

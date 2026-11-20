@@ -16,7 +16,7 @@ class FantasticProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = false
-    override val supportedTypes = setOf(TvType.Music)
+    override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     private val headers get() = mapOf("Referer" to "$mainUrl/", "Origin" to mainUrl, "User-Agent" to "Mozilla/5.0")
     private val kinds = listOf("song", "album", "playlist", "artist")

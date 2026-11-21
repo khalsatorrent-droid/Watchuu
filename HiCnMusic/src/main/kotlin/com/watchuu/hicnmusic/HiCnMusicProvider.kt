@@ -11,7 +11,7 @@ class HiCnMusicProvider : MainAPI() {
     override var mainUrl = "https://flac.music.hi.cn"
     override var name = "hi.cn music"
     override val hasMainPage = true
-    override val hasSearch = true
+    override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
 
     companion object {
@@ -150,6 +150,8 @@ class HiCnMusicProvider : MainAPI() {
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
+
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()

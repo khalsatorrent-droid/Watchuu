@@ -231,7 +231,7 @@ class HiCnMusicProvider : MainAPI() {
                     source  = name,
                     name    = label,
                     url     = urlResp,
-                    type    = ExtractorLinkType.AUDIO
+                    type    = ExtractorLinkType.VIDEO
                 ) {
                     this.quality  = quality
                     this.referer  = "$mainUrl/"

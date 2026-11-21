@@ -56,12 +56,9 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
         val data = request.data
         var list = catalog()[data].orEmpty()
         if (data == ADULT_ROW && !showAdult()) list = emptyList()
-
-        val from = ((page - 1) * PAGE_SIZE).coerceAtLeast(0)
-        val slice = if (from < list.size) list.subList(from, minOf(from + PAGE_SIZE, list.size)) else emptyList()
         return newHomePageResponse(
-            HomePageList(request.name, slice.map { it.toSearchResult() }, true),
-            hasNext = from + PAGE_SIZE < list.size
+            HomePageList(request.name, list.map { it.toSearchResult() }, isHorizontalImages = true),
+            hasNext = false
         )
     }
 
@@ -137,7 +134,6 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
         private const val ADULT_ROW = "Adult (18+)"
         private const val SEP = '\u0001'
         private const val CACHE_TTL_MS = 30L * 60L * 1000L
-        private const val PAGE_SIZE = 60
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
         private val LOGO = Regex("tvg-logo=\"([^\"]*)\"")

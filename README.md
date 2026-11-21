@@ -8,7 +8,7 @@
 [![Cloudstream](https://img.shields.io/badge/Cloudstream-repository-blueviolet)](https://github.com/recloudstream/cloudstream)
 [![Language](https://img.shields.io/badge/Kotlin-2.4-7F52FF)](https://kotlinlang.org)
 
-**44 extensions** · movies, TV, anime, short drama, music and more
+**43 extensions** · movies, TV, anime, short drama, music and more
 
 </div>
 
@@ -31,7 +31,7 @@ its version makes Cloudstream offer the update.
 
 ## 🧩 What is inside
 
-The repository carries **44 modules**. Each one appears in Cloudstream under its own name with its own
+The repository carries **43 modules**. Each one appears in Cloudstream under its own name with its own
 settings; this page deliberately does not list them.
 
 | Type tag | Modules |
@@ -40,7 +40,7 @@ settings; this page deliberately does not list them.
 | TV series | 13 |
 | Anime, including anime movies | 8 |
 | Asian and short drama | 3 |
-| Music, lossless | 5 |
+| Music, lossless | 4 |
 | Adult | 26 |
 | Other catalogue types | 3 |
 

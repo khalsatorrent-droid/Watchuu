@@ -21,38 +21,50 @@ class ClownIPTVPlusPlugin : Plugin() {
 
     private fun showSettings(ctx: Context, prefs: SharedPreferences) {
         val context: Activity = (ctx as? Activity) ?: CommonActivity.activity ?: return
-        val entries = CountryData.SELECTABLE
-        val current = prefs.getString(ClownIPTVPlusProvider.KEY_COUNTRY, CountryData.ALL)
-        val checked = entries.indexOf(current).coerceAtLeast(0)
-        var selected = checked
+
+        // The selectable list is every row name (excluding "All countries" sentinel)
+        val entries = CountryData.ROW_ORDER.toTypedArray<CharSequence>()
+
+        // Current selection: set of saved country names
+        val savedRaw = prefs.getString(ClownIPTVPlusProvider.KEY_COUNTRIES, "") ?: ""
+        val savedSet = savedRaw.split(',').map { it.trim() }.filter { it.isNotEmpty() && it != ClownIPTVPlusProvider.ALL }.toMutableSet()
+
+        // BooleanArray parallel to entries
+        val checked = BooleanArray(entries.size) { entries[it].toString() in savedSet }
+        val current = checked.copyOf()   // tracks live toggles
+
         var adult = prefs.getBoolean(ClownIPTVPlusProvider.KEY_ADULT, false)
-        fun label() = if (adult) "NSFW: ON" else "NSFW: OFF"
+        fun adultLabel() = if (adult) "NSFW: ON" else "NSFW: OFF"
 
         val dialog = AlertDialog.Builder(context)
-            .setTitle("Clown IPTV+ — Country")
-            .setSingleChoiceItems(entries.toTypedArray<CharSequence>(), checked) { _, which -> selected = which }
+            .setTitle("Clown IPTV+ — Countries")
+            .setMultiChoiceItems(entries, current) { _, which, isChecked ->
+                current[which] = isChecked
+            }
             .setPositiveButton("Save") { _, _ ->
-                val value = entries[selected]
+                val newSet = entries.filterIndexed { i, _ -> current[i] }.map { it.toString() }.toSet()
+                val value = newSet.joinToString(",")
                 prefs.edit()
-                    .putString(ClownIPTVPlusProvider.KEY_COUNTRY, value)
+                    .putString(ClownIPTVPlusProvider.KEY_COUNTRIES, value)
                     .putBoolean(ClownIPTVPlusProvider.KEY_ADULT, adult)
                     .apply()
-                CommonActivity.showToast(
-                    if (value == CountryData.ALL) "All countries selected. Reload the home page."
-                    else "$value selected. Reload the home page.",
-                    Toast.LENGTH_LONG
-                )
+                val msg = when {
+                    newSet.isEmpty() -> "All countries shown. Reload the home page."
+                    newSet.size == 1 -> "${newSet.first()} selected. Reload the home page."
+                    else -> "${newSet.size} countries selected. Reload the home page."
+                }
+                CommonActivity.showToast(msg, Toast.LENGTH_LONG)
             }
             .setNegativeButton("Cancel", null)
-            .setNeutralButton(label(), null)
+            .setNeutralButton(adultLabel(), null)
             .create()
 
-        // the neutral button toggles NSFW without closing the dialog
+        // Neutral button toggles NSFW without closing the dialog
         dialog.setOnShowListener {
             dialog.getButton(DialogInterface.BUTTON_NEUTRAL)?.setOnClickListener {
                 adult = !adult
                 prefs.edit().putBoolean(ClownIPTVPlusProvider.KEY_ADULT, adult).apply()
-                (it as? Button)?.text = label()
+                (it as? Button)?.text = adultLabel()
             }
         }
         dialog.show()

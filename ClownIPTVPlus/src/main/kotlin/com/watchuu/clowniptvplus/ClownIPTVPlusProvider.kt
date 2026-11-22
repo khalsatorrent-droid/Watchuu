@@ -5,9 +5,13 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
 /**
- * Clown IPTV playlist with a country / region filter. Each channel belongs to exactly one
- * region row; only the row picked in the plugin settings is shown on the home page and
- * returned by search. The cache always holds every row, the filter is applied on read.
+ * Clown IPTV playlist with a country / region filter.
+ *
+ * The home page always exposes EVERY row so CNCVerse Bridge (and similar bridges) can
+ * enumerate all channels. The country filter is applied inside [getMainPage] when
+ * rendering for the CloudStream UI, and in [search]. The bridge's "All TV channels"
+ * catalog therefore always contains the full playlist regardless of which countries are
+ * selected in the extension settings.
  */
 class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
     override var mainUrl = MAIN_URL
@@ -31,31 +35,40 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
 
     // ---- settings
 
-    private fun selectedCountry(): String? = runCatching {
-        prefs?.getString(KEY_COUNTRY, CountryData.ALL)?.takeIf { it.isNotEmpty() && it != CountryData.ALL }
-    }.getOrNull()
+    /**
+     * Returns the user-selected countries as a set, or empty set when "All countries" is selected.
+     * Empty set = no filter (all countries visible).
+     */
+    fun selectedCountries(): Set<String> = runCatching {
+        val raw = prefs?.getString(KEY_COUNTRIES, "") ?: ""
+        raw.split(',').map { it.trim() }.filter { it.isNotEmpty() && it != ALL }.toSet()
+    }.getOrDefault(emptySet())
 
     private fun showAdult(): Boolean = runCatching { prefs?.getBoolean(KEY_ADULT, false) == true }.getOrDefault(false)
 
     // ---- home page
 
-    // the rows depend on the settings, so they are read on every home-page load
+    /**
+     * Always returns every row in the playlist so the bridge can enumerate all channels.
+     * The country filter is applied per-row inside [getMainPage].
+     */
     override val mainPage: List<MainPageData>
-        get() = mainPageOf(*visibleRowNames().map { it to it }.toTypedArray())
-
-    private fun visibleRowNames(): List<String> {
-        val country = selectedCountry()
-        val out = CountryData.ROW_ORDER.filter { row ->
-            (country == null || country == row) && !(row == ADULT_ROW && !showAdult())
-        }
-        // never hand the UI an empty home page because of a stale preference
-        return if (out.isEmpty() && country != null) listOf(country) else out
-    }
+        get() = mainPageOf(*CountryData.ROW_ORDER.map { it to it }.toTypedArray())
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val data = request.data
-        var list = catalog()[data].orEmpty()
-        if (data == ADULT_ROW && !showAdult()) list = emptyList()
+        val countries = selectedCountries()   // empty = show all
+        val adult = showAdult()
+
+        // Adult row: skip entirely when NSFW is off
+        if (data == ADULT_ROW && !adult) {
+            return newHomePageResponse(HomePageList(request.name, emptyList(), isHorizontalImages = true), hasNext = false)
+        }
+
+        // Country filter: skip this row when it doesn't match the selection
+        val countryMatch = countries.isEmpty() || data in countries
+        val list = if (countryMatch) catalog()[data].orEmpty() else emptyList()
+
         return newHomePageResponse(
             HomePageList(request.name, list.map { it.toSearchResult() }, isHorizontalImages = true),
             hasNext = false
@@ -66,11 +79,11 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         catalog()
-        val country = selectedCountry()
+        val countries = selectedCountries()
         val adult = showAdult()
         return channels.filter { ch ->
             (adult || !ch.adult) &&
-                (country == null || country == rowOf(ch)) &&
+                (countries.isEmpty() || rowOf(ch) in countries) &&
                 (ch.name.contains(query, true) || ch.section.contains(query, true))
         }.map { it.toSearchResult() }
     }
@@ -79,9 +92,7 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val (_, title) = split(url)
-        return newLiveStreamLoadResponse(title.ifEmpty { name }, url, url) {
-            // channel logo is not carried in the payload; the card already shows it
-        }
+        return newLiveStreamLoadResponse(title.ifEmpty { name }, url, url) {}
     }
 
     override suspend fun loadLinks(
@@ -92,9 +103,7 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
     ): Boolean {
         val (url, title) = split(data)
         if (url.isEmpty()) return false
-        callback(
-            newExtractorLink(name, title.ifEmpty { name }, url, ExtractorLinkType.M3U8)
-        )
+        callback(newExtractorLink(name, title.ifEmpty { name }, url, ExtractorLinkType.M3U8))
         return true
     }
 
@@ -111,7 +120,7 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
                 loadedAt = System.currentTimeMillis()
             }
             rows
-        }.getOrDefault(rows) // keep serving the previous catalogue; the next call retries
+        }.getOrDefault(rows)
     }
 
     private fun Channel.toSearchResult(): SearchResponse =
@@ -126,8 +135,10 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
 
     companion object {
         const val PREFS_NAME = "ClownIPTVPlus"
-        const val KEY_COUNTRY = "country"
+        /** Multi-select countries, stored as comma-joined string; empty / "All countries" = no filter. */
+        const val KEY_COUNTRIES = "countries"
         const val KEY_ADULT = "show_adult"
+        const val ALL = "All countries"
         const val MAIN_URL = "https://sxcce.dpdns.org"
         const val PLAYLIST_PATH = "/playlist.m3u"
 

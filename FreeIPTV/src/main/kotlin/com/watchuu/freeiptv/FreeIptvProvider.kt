@@ -7,6 +7,11 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Free IPTV: live channels from an Xtream-codes server. The login is a 24 hour account that
@@ -36,18 +41,37 @@ class FreeIptvProvider(private val accounts: FreeIptvAccounts) : MainAPI() {
     )
 
     @Volatile private var categories: List<Category> = emptyList()
-    @Volatile private var allStreams: List<LiveStream> = emptyList()
-    @Volatile private var allLoadedAt = 0L
+    @Volatile private var rows: List<Pair<String, List<LiveStream>>> = emptyList()
+    @Volatile private var loadedAt = 0L
 
     // ---- Xtream calls
 
-    /** A list action; an expired or refused account answers with an object, so renew once and retry. */
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Accept" to "*/*",
+    )
+
+    /**
+     * A list action. A JSON array is the answer; a JSON object is the server refusing the login, in
+     * which case the account is renewed once and the call repeated. Anything else is reported.
+     */
     private suspend fun xtreamList(action: String, extra: String = ""): String? {
         for (attempt in 0..1) {
-            val acc = accounts.current(force = attempt == 1) ?: return null
+            val acc = accounts.current(force = attempt == 1) ?: run {
+                accounts.report("no account: could not create one")
+                return null
+            }
             val url = "${acc.server}/player_api.php?username=${acc.user}&password=${acc.pass}&action=$action$extra"
-            val text = runCatching { app.get(url, timeout = 120L).text }.getOrNull()
-            if (text != null && text.trimStart().startsWith("[")) return text
+            val text = try {
+                app.get(url, headers = headers, timeout = 60L).text.trim().trimStart('\uFEFF')
+            } catch (e: Throwable) {
+                accounts.report("$action failed: ${e.javaClass.simpleName} ${e.message}")
+                return null
+            }
+            if (text.startsWith("[")) return text
+            val refused = text.contains("\"auth\":0") || text.contains("\"user_info\"") || text.contains("Disabled", true) || text.contains("Expired", true)
+            accounts.report("$action gave ${text.take(80).ifEmpty { "an empty answer" }}")
+            if (!refused) return null
         }
         return null
     }
@@ -60,11 +84,33 @@ class FreeIptvProvider(private val accounts: FreeIptvAccounts) : MainAPI() {
         return list
     }
 
-    private suspend fun everything(): List<LiveStream> {
-        if (allStreams.isNotEmpty() && System.currentTimeMillis() - allLoadedAt < CACHE_TTL_MS) return allStreams
-        val list = tryParseJson<List<LiveStream>>(xtreamList("get_live_streams").orEmpty()).orEmpty()
-        if (list.isNotEmpty()) { allStreams = list; allLoadedAt = System.currentTimeMillis() }
-        return allStreams
+    private suspend fun fetchStreams(extra: String): List<LiveStream> =
+        tryParseJson<List<LiveStream>>(xtreamList("get_live_streams", extra).orEmpty()).orEmpty()
+
+    /**
+     * Every row (category name to its channels). One small call per category, eight at a time,
+     * rather than one 30k-channel answer that is slow and can fail to parse; if the server lists no
+     * categories the whole list is fetched and grouped by the id on each channel.
+     */
+    private suspend fun catalogue(): List<Pair<String, List<LiveStream>>> {
+        if (rows.isNotEmpty() && System.currentTimeMillis() - loadedAt < CACHE_TTL_MS) return rows
+        val cats = loadCategories()
+        val built: List<Pair<String, List<LiveStream>>> = if (cats.isNotEmpty()) {
+            val gate = Semaphore(8)
+            coroutineScope {
+                cats.map { c -> async { gate.withPermit { c.name!!.trim() to fetchStreams("&category_id=${c.id}") } } }.awaitAll()
+            }
+        } else {
+            fetchStreams("").groupBy { it.categoryId.orEmpty() }.map { (id, list) -> "Category $id" to list }
+        }.filter { it.second.isNotEmpty() }
+        if (built.isNotEmpty()) {
+            rows = built
+            loadedAt = System.currentTimeMillis()
+            accounts.report(null)
+        } else if (accounts.lastError == null) {
+            accounts.report("the server returned no channels")
+        }
+        return rows
     }
 
     // ---- cards
@@ -79,29 +125,22 @@ class FreeIptvProvider(private val accounts: FreeIptvAccounts) : MainAPI() {
         }
     }
 
-    // ---- home page: every category as a row, all channels, in one response. The whole list is
-    // fetched with a single call and grouped here, instead of one call per category and a few rows
-    // per page (the app only ever asked for the first page).
+    // ---- home page: every category as a row, all channels, in one response (the app only ever
+    // asked for the first page when rows were paged)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList<HomePageList>(), hasNext = false)
-        val cats = loadCategories()
-        val byCat = everything().groupBy { it.categoryId.orEmpty() }
-        val known = cats.mapNotNull { it.id }.toSet()
-        val rows = ArrayList<HomePageList>()
-        for (c in cats) {
-            val cards = byCat[c.id].orEmpty().mapNotNull { it.toCard() }
-            if (cards.isNotEmpty()) rows.add(HomePageList(c.name!!.trim(), cards, isHorizontalImages = true))
+        val lists = catalogue().mapNotNull { (name, streams) ->
+            val cards = streams.mapNotNull { it.toCard() }
+            if (cards.isEmpty()) null else HomePageList(name, cards, isHorizontalImages = true)
         }
-        // channels whose category the server did not list
-        val rest = byCat.filterKeys { it !in known }.values.flatten().mapNotNull { it.toCard() }
-        if (rest.isNotEmpty()) rows.add(HomePageList("Other", rest, isHorizontalImages = true))
-        return newHomePageResponse(rows, hasNext = false)
+        return newHomePageResponse(lists, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> =
-        everything().asSequence()
+        catalogue().asSequence().flatMap { it.second.asSequence() }
             .filter { it.name?.contains(query, ignoreCase = true) == true }
+            .distinctBy { it.streamId }
             .take(400)
             .mapNotNull { it.toCard() }
             .toList()

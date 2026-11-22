@@ -60,6 +60,11 @@ class FreeIptvAccounts(
             ?.putLong("expires", a.expiresAt)?.apply()
     }
 
+    fun report(msg: String?) {
+        lastError = msg
+        if (msg != null) Log.d(TAG, msg)
+    }
+
     fun forget() {
         cached = null
         prefs?.edit()?.clear()?.apply()

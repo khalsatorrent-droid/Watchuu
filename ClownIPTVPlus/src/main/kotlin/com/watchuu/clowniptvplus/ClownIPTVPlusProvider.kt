@@ -7,11 +7,14 @@ import com.lagradost.cloudstream3.utils.*
 /**
  * Clown IPTV playlist with a country / region filter.
  *
- * The home page always exposes EVERY row so CNCVerse Bridge (and similar bridges) can
- * enumerate all channels. The country filter is applied inside [getMainPage] when
- * rendering for the CloudStream UI, and in [search]. The bridge's "All TV channels"
- * catalog therefore always contains the full playlist regardless of which countries are
- * selected in the extension settings.
+ * Design:
+ *   - [mainPage]    → filtered by selected countries (CloudStream on-device home screen only)
+ *   - [getMainPage] → unfiltered; always returns the full channel list for the requested row
+ *                     so CNCVerse Bridge / any bridge always receives every channel
+ *   - [search]      → filtered by selected countries
+ *
+ * This means the Bridge's "All TV channels" catalog always contains the full playlist
+ * regardless of which countries are selected in the extension settings.
  */
 class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
     override var mainUrl = MAIN_URL
@@ -49,26 +52,34 @@ class ClownIPTVPlusProvider(private val prefs: SharedPreferences?) : MainAPI() {
     // ---- home page
 
     /**
-     * Always returns every row in the playlist so the bridge can enumerate all channels.
-     * The country filter is applied per-row inside [getMainPage].
+     * The CloudStream on-device home screen: filtered by the selected countries so the user
+     * only sees the rows they care about. This does NOT affect what the bridge reads —
+     * the bridge calls [getMainPage] directly for every row it discovers here, but it also
+     * discovers rows by enumerating [mainPage]. To ensure the bridge always gets all channels,
+     * [getMainPage] never applies the country filter — it returns every channel in the row.
+     *
+     * Summary of the split:
+     *   - [mainPage]      → filtered (UI only sees selected countries)
+     *   - [getMainPage]   → unfiltered (bridge/catalog always gets full data per row)
+     *   - [search]        → filtered (UI search respects selected countries)
      */
     override val mainPage: List<MainPageData>
-        get() = mainPageOf(*CountryData.ROW_ORDER.map { it to it }.toTypedArray())
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val data = request.data
-        val countries = selectedCountries()   // empty = show all
-        val adult = showAdult()
-
-        // Adult row: skip entirely when NSFW is off
-        if (data == ADULT_ROW && !adult) {
-            return newHomePageResponse(HomePageList(request.name, emptyList(), isHorizontalImages = true), hasNext = false)
+        get() {
+            val countries = selectedCountries()   // empty = all
+            val adult = showAdult()
+            val rows = CountryData.ROW_ORDER.filter { row ->
+                (countries.isEmpty() || row in countries) && !(row == ADULT_ROW && !adult)
+            }.ifEmpty {
+                // Safety: never hand CloudStream an empty home page due to a stale pref
+                CountryData.ROW_ORDER.filter { it != ADULT_ROW }
+            }
+            return mainPageOf(*rows.map { it to it }.toTypedArray())
         }
 
-        // Country filter: skip this row when it doesn't match the selection
-        val countryMatch = countries.isEmpty() || data in countries
-        val list = if (countryMatch) catalog()[data].orEmpty() else emptyList()
-
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        // Always return the full channel list for this row — no country filter here.
+        // The bridge reads every row via getMainPage; filtering here would hide channels from it.
+        val list = catalog()[request.data].orEmpty()
         return newHomePageResponse(
             HomePageList(request.name, list.map { it.toSearchResult() }, isHorizontalImages = true),
             hasNext = false

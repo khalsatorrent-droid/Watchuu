@@ -7,7 +7,9 @@ import android.content.SharedPreferences
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CommonActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -92,6 +94,13 @@ class FreeIptvAccounts(
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
             wv.settings.userAgentString = UA
+            // without a client Android hands every redirect (the form post goes to ?action=view) to the
+            // default browser; this keeps all navigation inside this WebView
+            wv.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+                @Suppress("DEPRECATION")
+                override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean = false
+            }
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
             wv.loadUrl("$SITE/")

@@ -7,8 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 
 /**
  * Free IPTV: live channels from an Xtream-codes server. The login is a 24 hour account that
@@ -62,9 +60,6 @@ class FreeIptvProvider(private val accounts: FreeIptvAccounts) : MainAPI() {
         return list
     }
 
-    private suspend fun streamsOf(categoryId: String): List<LiveStream> =
-        tryParseJson<List<LiveStream>>(xtreamList("get_live_streams", "&category_id=$categoryId").orEmpty()).orEmpty()
-
     private suspend fun everything(): List<LiveStream> {
         if (allStreams.isNotEmpty() && System.currentTimeMillis() - allLoadedAt < CACHE_TTL_MS) return allStreams
         val list = tryParseJson<List<LiveStream>>(xtreamList("get_live_streams").orEmpty()).orEmpty()
@@ -84,19 +79,24 @@ class FreeIptvProvider(private val accounts: FreeIptvAccounts) : MainAPI() {
         }
     }
 
-    // ---- home page: categories, a few rows per page, every channel of a row at once
+    // ---- home page: every category as a row, all channels, in one response. The whole list is
+    // fetched with a single call and grouped here, instead of one call per category and a few rows
+    // per page (the app only ever asked for the first page).
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (page > 1) return newHomePageResponse(emptyList<HomePageList>(), hasNext = false)
         val cats = loadCategories()
-        val from = (page - 1) * ROWS_PER_PAGE
-        val chunk = cats.drop(from).take(ROWS_PER_PAGE)
-        val lists = coroutineScope {
-            chunk.map { c -> async { c to streamsOf(c.id!!) } }.map { it.await() }
-        }.mapNotNull { (c, streams) ->
-            val cards = streams.mapNotNull { it.toCard() }
-            if (cards.isEmpty()) null else HomePageList(c.name!!.trim(), cards, isHorizontalImages = true)
+        val byCat = everything().groupBy { it.categoryId.orEmpty() }
+        val known = cats.mapNotNull { it.id }.toSet()
+        val rows = ArrayList<HomePageList>()
+        for (c in cats) {
+            val cards = byCat[c.id].orEmpty().mapNotNull { it.toCard() }
+            if (cards.isNotEmpty()) rows.add(HomePageList(c.name!!.trim(), cards, isHorizontalImages = true))
         }
-        return newHomePageResponse(lists, hasNext = from + ROWS_PER_PAGE < cats.size)
+        // channels whose category the server did not list
+        val rest = byCat.filterKeys { it !in known }.values.flatten().mapNotNull { it.toCard() }
+        if (rest.isNotEmpty()) rows.add(HomePageList("Other", rest, isHorizontalImages = true))
+        return newHomePageResponse(rows, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> =

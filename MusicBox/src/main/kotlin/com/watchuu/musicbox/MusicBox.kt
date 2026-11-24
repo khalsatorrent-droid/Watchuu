@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 70")
+        Diag.log("plugin", "load, version 71")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -61,16 +61,16 @@ class MusicBoxProvider : MainAPI() {
      * app showed "Error loading" for a song it had just listed. The search result already carries the
      * track or album, so it is the fallback.
      */
-    private val hitCache = java.util.concurrent.ConcurrentHashMap<String, Hit>()
+    private val hitCache get() = HitCodec.cache
 
     private fun searchResponseFor(hit: Hit): SearchResponse {
-        hitCache[hit.url] = hit
+        hitCache[Links.base(hit.url)] = hit
         return buildSearchResponse(hit)
     }
 
     private fun buildSearchResponse(hit: Hit): SearchResponse = newMovieSearchResponse(
         hit.title,
-        hit.url,
+        HitCodec.cardUrl(hit),
         TvType.Music,
         false
     ) {
@@ -144,13 +144,17 @@ class MusicBoxProvider : MainAPI() {
             return null
         }
         Diag.log("load", "${parsed.provider}/${parsed.kind}/${parsed.id}")
+        // What the card was built from: carried in the link, else the in-memory cache.
+        val cached = HitCodec.decode(url) ?: hitCache[Links.base(url)]
         return when (parsed.kind) {
             "track" -> {
-                val fetched = runCatching { provider.track(parsed.id) }
-                if (fetched.isFailure) Diag.log("load", "track fetch failed: ${fetched.exceptionOrNull()?.message}")
-                val cached = hitCache[url]
-                val track = fetched.getOrNull()
-                    ?: cached?.track
+                // The card already holds everything a one-song page needs, so a provider lookup is
+                // only made when the card carries nothing (an old bookmark). That lookup is what
+                // failed on Amazon and what spends a rate limited session elsewhere.
+                val track = cached?.track
+                    ?: runCatching { provider.track(parsed.id) }
+                        .onFailure { Diag.log("load", "track fetch failed: ${it.message}") }
+                        .getOrNull()
                     ?: run {
                         Diag.log("load", "track not found, hitCache ${if (cached == null) "miss" else "hit(kind=${cached.kind})"}")
                         return null
@@ -174,8 +178,7 @@ class MusicBoxProvider : MainAPI() {
             "album" -> {
                 val fetched = runCatching { provider.album(parsed.id) }
                 if (fetched.isFailure) Diag.log("load", "album fetch failed: ${fetched.exceptionOrNull()?.message}")
-                val cached = hitCache[url]
-                val album = fetched.getOrNull()
+                val album = fetched.getOrNull()?.takeIf { it.tracks.isNotEmpty() || cached?.album == null }
                     ?: cached?.album
                     ?: run {
                         Diag.log("load", "album not found, hitCache ${if (cached == null) "miss" else "hit(kind=${cached.kind})"}")
@@ -220,7 +223,6 @@ class MusicBoxProvider : MainAPI() {
             "artist" -> {
                 val fetched = runCatching { provider.artist(parsed.id) }
                 if (fetched.isFailure) Diag.log("load", "artist fetch failed: ${fetched.exceptionOrNull()?.message}")
-                val cached = hitCache[url]
                 val artist = fetched.getOrNull()
                     ?: cached?.artist
                     ?: run {
@@ -336,5 +338,102 @@ class MusicBoxProvider : MainAPI() {
         val digits = quality.filter { it.isDigit() }
         val value = digits.toIntOrNull() ?: return Qualities.Unknown.value
         return value
+    }
+}
+
+/**
+ * Packs what a card was built from into its link (see [Links.withMeta]) and reads it back in load().
+ * Only the fields a details page and playback need are kept, so links stay short.
+ */
+internal object HitCodec {
+    val cache = java.util.concurrent.ConcurrentHashMap<String, Hit>()
+
+    fun cardUrl(hit: Hit): String =
+        runCatching { Links.withMeta(hit.url, encode(hit).toString()) }.getOrDefault(hit.url)
+
+    private fun strings(list: List<String>) = org.json.JSONArray().apply { list.forEach { put(it) } }
+
+    private fun stringList(arr: org.json.JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optString(it, "").takeIf { s -> s.isNotBlank() } }
+    }
+
+    private fun org.json.JSONObject.str(key: String): String? =
+        if (has(key) && !isNull(key)) optString(key, "").takeIf { it.isNotBlank() } else null
+
+    private fun encode(hit: Hit): org.json.JSONObject {
+        val o = org.json.JSONObject()
+            .put("k", hit.kind.name)
+            .put("t", hit.title)
+            .put("s", hit.subtitle)
+            .put("c", hit.cover)
+        hit.track?.let { t ->
+            o.put("tr", org.json.JSONObject()
+                .put("p", t.provider).put("i", t.id).put("t", t.title)
+                .put("a", strings(t.artists))
+                .put("al", t.albumName).put("ai", t.albumId)
+                .put("c", t.cover).put("d", t.durationMs)
+                .put("y", t.year).put("isrc", t.isrc))
+        }
+        hit.album?.let { a ->
+            o.put("ab", org.json.JSONObject()
+                .put("p", a.provider).put("i", a.id).put("t", a.title)
+                .put("a", strings(a.artists))
+                .put("c", a.cover).put("y", a.year))
+        }
+        hit.artist?.let { a ->
+            o.put("ar", org.json.JSONObject()
+                .put("p", a.provider).put("i", a.id).put("n", a.name).put("c", a.image))
+        }
+        return o
+    }
+
+    fun decode(url: String): Hit? {
+        val text = Links.meta(url) ?: return null
+        val o = com.watchuu.musicbox.core.jsonOrNull(text) ?: return null
+        return runCatching {
+            val track = o.optJSONObject("tr")?.let { t ->
+                Track(
+                    provider = t.optString("p"),
+                    id = t.optString("i"),
+                    title = t.optString("t"),
+                    artists = stringList(t.optJSONArray("a")),
+                    albumName = t.str("al"),
+                    albumId = t.str("ai"),
+                    cover = t.str("c"),
+                    durationMs = t.str("d")?.toLongOrNull(),
+                    year = t.str("y")?.toIntOrNull(),
+                    isrc = t.str("isrc"),
+                )
+            }?.takeIf { it.provider.isNotBlank() && it.id.isNotBlank() }
+            val album = o.optJSONObject("ab")?.let { a ->
+                com.watchuu.musicbox.core.Album(
+                    provider = a.optString("p"),
+                    id = a.optString("i"),
+                    title = a.optString("t"),
+                    artists = stringList(a.optJSONArray("a")),
+                    cover = a.str("c"),
+                    year = a.str("y")?.toIntOrNull(),
+                )
+            }
+            val artist = o.optJSONObject("ar")?.let { a ->
+                com.watchuu.musicbox.core.Artist(
+                    provider = a.optString("p"),
+                    id = a.optString("i"),
+                    name = a.optString("n"),
+                    image = a.str("c"),
+                )
+            }
+            Hit(
+                kind = Hit.Kind.valueOf(o.optString("k", "TRACK")),
+                title = o.optString("t"),
+                subtitle = o.str("s"),
+                cover = o.str("c"),
+                url = Links.base(url),
+                track = track,
+                album = album,
+                artist = artist,
+            )
+        }.onFailure { Diag.log("load", "card data unreadable: ${it.message}") }.getOrNull()
     }
 }

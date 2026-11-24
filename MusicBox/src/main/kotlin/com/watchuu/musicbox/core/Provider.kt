@@ -34,10 +34,38 @@ object Links {
 
     class Parsed(val provider: String, val kind: String, val id: String)
 
+    /**
+     * A card link can carry the item it was built from after this marker, so opening the card
+     * never depends on a second provider lookup or on an in-memory cache that the app may have
+     * dropped (plugin reload, home row restored from an earlier run).
+     */
+    private const val META = "#mb="
+
+    fun base(url: String): String = url.substringBefore(META)
+
+    fun withMeta(url: String, meta: String): String {
+        val encoded = android.util.Base64.encodeToString(
+            meta.toByteArray(Charsets.UTF_8),
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING
+        )
+        return base(url) + META + encoded
+    }
+
+    fun meta(url: String): String? {
+        val idx = url.indexOf(META)
+        if (idx < 0) return null
+        return runCatching {
+            String(
+                android.util.Base64.decode(url.substring(idx + META.length), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING),
+                Charsets.UTF_8
+            )
+        }.getOrNull()
+    }
+
     fun parse(url: String): Parsed? {
         val prefix = "musicbox://"
         if (!url.startsWith(prefix)) return null
-        val rest = url.removePrefix(prefix).trimEnd('/')
+        val rest = base(url).removePrefix(prefix).trimEnd('/')
         val parts = rest.split("/")
         if (parts.size < 3) return null
         val id = parts.drop(2).joinToString("/")

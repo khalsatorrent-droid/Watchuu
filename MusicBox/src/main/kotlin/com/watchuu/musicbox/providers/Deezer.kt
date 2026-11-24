@@ -202,15 +202,15 @@ object Deezer : MusicProvider {
         val payload = jsonOrNull(res.body) ?: return emptyList()
         val descriptor = payload.optJSONObject("data") ?: payload
         val direct = descriptor.optStringOrNull("direct_download_url")
-        // descriptorRequiresClientDecryption(): Mornye decrypts these after download; a streaming
-        // player gets Blowfish-scrambled audio, so only an unencrypted file is offered.
+        // descriptorRequiresClientDecryption(): Mornye decrypts these after download; here the player
+        // reads them through the local server, which undoes the Blowfish scrambling on the way.
         val encrypted = when {
             descriptor.has("requires_client_decryption") -> descriptor.optBoolean("requires_client_decryption", false)
             descriptor.has("direct_downloadable") -> !descriptor.optBoolean("direct_downloadable", true)
             else -> descriptor.optBoolean("deezer_encrypted", false)
         }
-        if (encrypted) {
-            Diag.log("deezer", "gateway gave an encrypted file (needs client decryption); CloudStream cannot play it")
+        if (payload.has("success") && !payload.optBoolean("success", true) && descriptor === payload) {
+            Diag.log("deezer", "resolver refused: ${payload.optStringOrNull("message") ?: res.body.take(160)}")
             return emptyList()
         }
         val url = when {
@@ -222,13 +222,22 @@ object Deezer : MusicProvider {
             Diag.log("deezer", "descriptor had no download url")
             return emptyList()
         }
-        val mime = if (url.contains(".flac", true)) "audio/flac" else "audio/mpeg"
-        return listOf(Stream(url, qualityLabel(url, quality), mime, provider = id))
-    }
-
-    private fun qualityLabel(url: String, requested: String): String = when {
-        url.contains(".flac", true) -> "FLAC"
-        requested.equals("flac", true) -> "FLAC"
-        else -> "MP3 320"
+        val format = (descriptor.optStringOrNull("deezer_source_format") ?: descriptor.optStringOrNull("deezer_format") ?: "")
+            .uppercase()
+        val isMp3 = format.startsWith("MP3") || (format.isEmpty() && !url.contains(".flac", true) && url.contains(".mp3", true))
+        val label = if (isMp3) "MP3 320kbps" else "FLAC 16-bit · 44.1kHz"
+        if (encrypted) {
+            // The file is keyed with the song entry named in the media path when that differs.
+            val songId = descriptor.optStringOrNull("deezer_track_id")?.filter { it.isDigit() }?.takeIf { it.isNotEmpty() }
+                ?: com.watchuu.musicbox.core.DeezerCrypt.mediaSongId(url)
+                ?: track.id
+            val local = com.watchuu.musicbox.core.LocalStream.registerDeezer(
+                url, mapOf("User-Agent" to com.watchuu.musicbox.core.Http.userAgent),
+                com.watchuu.musicbox.core.DeezerCrypt.keyFor(songId), if (isMp3) "mp3" else "flac",
+            )
+            Diag.log("deezer", "scrambled file, descrambling on device (song $songId)")
+            return listOf(Stream(local, label, if (isMp3) "audio/mpeg" else "audio/flac", provider = id))
+        }
+        return listOf(Stream(url, label, if (isMp3) "audio/mpeg" else "audio/flac", provider = id))
     }
 }

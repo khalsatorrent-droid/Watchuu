@@ -213,6 +213,8 @@ object Beatport : MusicProvider {
             if (depth > 0) append(" · ${depth}bit")
             if (rate > 0) append(" · ${rate / 1000}kHz")
         }
-        return listOf(Stream(url, label, mime, provider = id))
+        // The media address is on the gateway (api.zarz.moe/v2/media/btp/...); Mornye fetches it with
+        // its own user agent rather than a browser's.
+        return listOf(Stream(url, label, mime, headers = mapOf("User-Agent" to "Mornye/5.3.0"), provider = id))
     }
 }

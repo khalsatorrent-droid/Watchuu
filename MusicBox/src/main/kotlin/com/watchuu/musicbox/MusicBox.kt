@@ -34,7 +34,9 @@ import kotlinx.coroutines.sync.withLock
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 77")
+        com.watchuu.musicbox.core.LocalStream.spoolDir = context.cacheDir
+        com.watchuu.musicbox.core.LocalStream.log = { Diag.log("stream", it) }
+        Diag.log("plugin", "load, version 78")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -312,7 +314,11 @@ class MusicBoxProvider : MainAPI() {
                         "MusicBox · ${provider.label}",
                         "${provider.label} · ${stream.quality}",
                         stream.url,
-                        if (stream.hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        when {
+                            stream.hls -> ExtractorLinkType.M3U8
+                            stream.dash -> ExtractorLinkType.DASH
+                            else -> ExtractorLinkType.VIDEO
+                        }
                     ) {
                         this.quality = qualityToInt(stream.quality)
                         this.headers = stream.headers

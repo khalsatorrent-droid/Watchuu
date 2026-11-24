@@ -303,22 +303,39 @@ object Tidal : MusicProvider {
         val decoded = runCatching {
             String(android.util.Base64.decode(manifest, android.util.Base64.DEFAULT), Charsets.UTF_8)
         }.getOrNull() ?: return emptyList()
-        // parseManifestText(): a JSON manifest carries the direct URL; an MPD does not,
-        // and a DASH MPD cannot be handed to the player as inline text.
-        if (!decoded.trimStart().startsWith("{")) {
-            Diag.log("tidal", "manifest is DASH MPD (segment based); not playable without a segment downloader")
-            return emptyList()
-        }
-        val manifestJson = jsonOrNull(decoded) ?: return emptyList()
-        val url = manifestJson.optJSONArray("urls")?.optString(0)?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val mime = manifestJson.optStringOrNull("mimeType") ?: "audio/flac"
         val label = buildString {
-            append(data.optStringOrNull("audioQuality") ?: requested)
             val depth = data.optIntOrNull("bitDepth") ?: 0
             val rate = data.optIntOrNull("sampleRate") ?: 0
-            if (depth > 0) append(" · ${depth}bit")
-            if (rate > 0) append(" · ${rate / 1000}kHz")
+            append(when ((data.optStringOrNull("audioQuality") ?: requested).uppercase()) {
+                "HI_RES_LOSSLESS", "HI_RES" -> "FLAC Hi-Res"
+                "LOSSLESS" -> "FLAC"
+                "HIGH" -> "AAC 320kbps"
+                "LOW" -> "AAC 96kbps"
+                else -> data.optStringOrNull("audioQuality") ?: requested
+            })
+            if (depth > 0) append(" ${depth}-bit")
+            if (rate > 0) append(" · ${if (rate % 1000 == 0) "${rate / 1000}" else "%.1f".format(rate / 1000.0)}kHz")
         }
+        // parseManifestText(): a JSON (BTS) manifest carries a direct URL. Anything else is a DASH MPD
+        // listing an init segment and numbered media segments, which Mornye downloads and joins.
+        // The player plays DASH itself, so the MPD is served from the local server as a manifest.
+        if (!decoded.trimStart().startsWith("{")) {
+            if (!decoded.contains("<MPD", true)) {
+                Diag.log("tidal", "manifest is neither BTS JSON nor an MPD: ${decoded.take(80)}")
+                return emptyList()
+            }
+            val local = com.watchuu.musicbox.core.LocalStream.registerText(decoded, "application/dash+xml", "mpd")
+            Diag.log("tidal", "DASH manifest, playing segments directly")
+            return listOf(Stream(local, label, "application/dash+xml", provider = id, dash = true))
+        }
+        val manifestJson = jsonOrNull(decoded) ?: return emptyList()
+        val encryption = manifestJson.optStringOrNull("encryptionType")
+        if (encryption != null && !encryption.equals("NONE", true)) {
+            Diag.log("tidal", "manifest is encrypted ($encryption); not supported")
+            return emptyList()
+        }
+        val url = manifestJson.optJSONArray("urls")?.optString(0)?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val mime = manifestJson.optStringOrNull("mimeType") ?: "audio/flac"
         return listOf(Stream(url, label, mime, provider = id))
     }
 }

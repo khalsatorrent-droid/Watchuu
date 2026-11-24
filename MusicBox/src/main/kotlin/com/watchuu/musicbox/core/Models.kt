@@ -13,6 +13,8 @@ data class Stream(
     val sizeBytes: Long? = null,
     /** True when the URL is an HLS playlist (SoundCloud AAC, TIDAL segments). */
     val hls: Boolean = false,
+    /** True when the URL is a DASH manifest (TIDAL's segmented lossless). */
+    val dash: Boolean = false,
 )
 
 /** Canonical track record shared by every provider port. */

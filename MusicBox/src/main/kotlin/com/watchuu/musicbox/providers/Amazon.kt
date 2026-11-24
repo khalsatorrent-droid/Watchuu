@@ -13,6 +13,7 @@ import com.watchuu.musicbox.core.Track
 import com.watchuu.musicbox.core.Zarz
 import com.watchuu.musicbox.core.array
 import com.watchuu.musicbox.core.jsonOrNull
+import com.watchuu.musicbox.core.optIntOrNull
 import com.watchuu.musicbox.core.optStringOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -614,21 +615,24 @@ object Amazon : MusicProvider {
             Diag.log("amazon", "download answer had no audio URL: ${text.take(200)}")
             return emptyList()
         }
+        val actualCodec = (audio.optStringOrNull("codec") ?: codec).lowercase()
+        val label = buildString {
+            append(if (actualCodec == "eac3") "Dolby Atmos (E-AC-3)" else actualCodec.uppercase())
+            val depth = audio.optIntOrNull("bitDepth") ?: audio.optIntOrNull("bitsPerSample") ?: 0
+            val rate = audio.optIntOrNull("sampleRate") ?: 0
+            if (depth > 0) append(" ${depth}-bit")
+            if (rate > 0) append(" · ${if (rate % 1000 == 0) "${rate / 1000}" else "%.1f".format(rate / 1000.0)}kHz")
+        }
         val key = audio.optStringOrNull("key")
-        if (!key.isNullOrBlank()) {
-            // Amazon returns the key when the asset must be decrypted client-side; a
-            // player cannot use that file, so say so instead of serving noise.
-            Diag.log("amazon", "Amazon gave an encrypted file; CloudStream can only decrypt DASH streams, so it cannot play this. Pick TIDAL, Qobuz or Deezer as the download source.")
+        if (key.isNullOrBlank()) return listOf(Stream(url, label, "audio/mp4", provider = id))
+        // The file is CENC-encrypted MP4; Mornye runs `ffmpeg -decryption_key` after downloading.
+        // The player gets it through the local decrypting server instead.
+        val keyBytes = com.watchuu.musicbox.core.Cenc.parseKey(key) ?: run {
+            Diag.log("amazon", "decryption key in an unknown format (${key.length} chars)")
             return emptyList()
         }
-        val actualCodec = audio.optStringOrNull("codec") ?: codec
-        val mime = when (actualCodec.lowercase()) {
-            "flac" -> "audio/flac"
-            "opus" -> "audio/opus"
-            "eac3" -> "audio/eac3"
-            "ac4" -> "audio/mp4"
-            else -> "audio/mp4"
-        }
-        return listOf(Stream(url, actualCodec.uppercase(), mime, provider = id))
+        val local = com.watchuu.musicbox.core.LocalStream.register(url, mapOf("User-Agent" to randomUa()), keyBytes)
+        Diag.log("amazon", "encrypted $actualCodec stream, decrypting on device")
+        return listOf(Stream(local, label, "audio/mp4", provider = id))
     }
 }

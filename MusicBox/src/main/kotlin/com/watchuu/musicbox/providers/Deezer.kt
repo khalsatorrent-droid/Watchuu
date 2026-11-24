@@ -202,6 +202,17 @@ object Deezer : MusicProvider {
         val payload = jsonOrNull(res.body) ?: return emptyList()
         val descriptor = payload.optJSONObject("data") ?: payload
         val direct = descriptor.optStringOrNull("direct_download_url")
+        // descriptorRequiresClientDecryption(): Mornye decrypts these after download; a streaming
+        // player gets Blowfish-scrambled audio, so only an unencrypted file is offered.
+        val encrypted = when {
+            descriptor.has("requires_client_decryption") -> descriptor.optBoolean("requires_client_decryption", false)
+            descriptor.has("direct_downloadable") -> !descriptor.optBoolean("direct_downloadable", true)
+            else -> descriptor.optBoolean("deezer_encrypted", false)
+        }
+        if (encrypted) {
+            Diag.log("deezer", "gateway gave an encrypted file (needs client decryption); CloudStream cannot play it")
+            return emptyList()
+        }
         val url = when {
             descriptor.optBoolean("direct_downloadable", false) && direct != null -> direct
             descriptor.optStringOrNull("download_url") != null -> descriptor.optStringOrNull("download_url")!!

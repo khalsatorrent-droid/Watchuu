@@ -269,7 +269,8 @@ object Tidal : MusicProvider {
         "HI_RES", "HIRES", "HI_RES_LOSSLESS", "MASTER" -> "HI_RES_LOSSLESS"
         "DOLBY", "ATMOS", "DOLBY ATMOS", "EAC3", "EC3", "EAC3_JOC", "DOLBY_ATMOS" -> "DOLBY_ATMOS"
         "HIGH", "LOW" -> quality.uppercase()
-        else -> quality.uppercase()
+        // The shared quality setting defaults to JioSaavn's "AAC_320", which TIDAL rejects.
+        else -> "LOSSLESS"
     }
 
     override suspend fun streams(track: Track, quality: String): List<Stream> {

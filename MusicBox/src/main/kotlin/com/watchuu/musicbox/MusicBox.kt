@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 72")
+        Diag.log("plugin", "load, version 73")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -266,6 +266,8 @@ class MusicBoxProvider : MainAPI() {
         .put("i", track.id)
         .put("t", track.title)
         .put("a", track.artistLine)
+        .put("isrc", track.isrc)
+        .put("d", track.durationMs)
         .toString()
 
     override suspend fun loadLinks(
@@ -276,18 +278,23 @@ class MusicBoxProvider : MainAPI() {
     ): Boolean {
         val track = parseEpisodeData(data) ?: return false
         var emitted = 0
+        val order = Providers.streamOrder(track.provider)
+        Diag.log("links", "\"${track.title}\" from ${track.provider}; trying ${order.joinToString(", ") { it.id }.ifEmpty { "nothing (no source enabled)" }}")
 
-        for (provider in Providers.streamOrder(track.provider)) {
+        for (provider in order) {
             val streams: List<Stream> = try {
                 if (provider.id == track.provider) {
                     provider.streams(track, quality())
                 } else {
                     // Cross-source match: the free providers are searched by name, and a
                     // signed source is only asked when the user selected it.
-                    val match = provider.search("${track.title} ${track.artistLine}", 5)
-                        .firstOrNull { it.kind == Hit.Kind.TRACK && it.track != null }
-                        ?.track
-                    if (match == null) emptyList() else provider.streams(match, quality())
+                    val match = TrackMatcher.find(provider, track)
+                    if (match == null) {
+                        Diag.log("links", "${provider.id}: no matching song found")
+                        emptyList()
+                    } else {
+                        provider.streams(match, quality())
+                    }
                 }
             } catch (e: com.watchuu.musicbox.core.Zarz.VerificationRequired) {
                 Diag.log("links", "${provider.label} needs authorization - open MusicBox settings and authorize it")
@@ -296,6 +303,7 @@ class MusicBoxProvider : MainAPI() {
                 Diag.log("links", "${provider.id} streams failed: ${e.message}")
                 emptyList()
             }
+            if (streams.isEmpty()) Diag.log("links", "${provider.id}: no playable stream")
             for (stream in streams) {
                 callback(
                     newExtractorLink(
@@ -328,7 +336,9 @@ class MusicBoxProvider : MainAPI() {
                 provider = providerId,
                 id = trackId,
                 title = obj.optString("t", trackId),
-                artists = if (artists.isBlank()) emptyList() else artists.split(",").map { it.trim() },
+                artists = if (artists.isBlank() || artists == "Unknown artist") emptyList() else artists.split(",").map { it.trim() },
+                isrc = obj.optString("isrc", "").takeIf { it.isNotBlank() && it != "null" },
+                durationMs = obj.optLong("d", 0L).takeIf { it > 0 },
             )
         }
         val parts = data.split("|")
@@ -437,5 +447,74 @@ internal object HitCodec {
                 artist = artist,
             )
         }.onFailure { Diag.log("load", "card data unreadable: ${it.message}") }.getOrNull()
+    }
+}
+
+/**
+ * Finds the same recording on another provider. The old code took the first search result for
+ * "<full title> <every artist>", which for a catalogue title such as
+ * `Gehra Hua (From "Dhurandhar")` with three artists often found nothing or a different song.
+ */
+internal object TrackMatcher {
+    private val bracketed = Regex("""\s*[(\[][^)\]]*[)\]]""")
+    private val featTail = Regex("""\s+(feat\.?|ft\.?|featuring)\s+.*$""", RegexOption.IGNORE_CASE)
+    private val dashTail = Regex("""\s+-\s+.*$""")
+    private val nonWord = Regex("""[^\p{L}\p{N}]+""")
+
+    fun cleanTitle(title: String): String =
+        title.replace(bracketed, "").replace(featTail, "").replace(dashTail, "").trim().ifBlank { title.trim() }
+
+    private fun key(text: String): String = text.lowercase().replace(nonWord, "")
+
+    private fun leadArtists(artists: List<String>): List<String> =
+        artists.flatMap { it.split(Regex("""\s*(,|&| and | x | feat\.? | ft\.? )\s*""", RegexOption.IGNORE_CASE)) }
+            .map { it.trim() }.filter { it.isNotBlank() }
+
+    private fun score(wanted: Track, wantedTitle: String, wantedArtists: Set<String>, cand: Track): Int {
+        if (!wanted.isrc.isNullOrBlank() && wanted.isrc.equals(cand.isrc, true)) return 1000
+        val title = key(cleanTitle(cand.title))
+        var s = when {
+            title.isEmpty() || wantedTitle.isEmpty() -> 0
+            title == wantedTitle -> 100
+            title.contains(wantedTitle) || wantedTitle.contains(title) -> 60
+            else -> return 0
+        }
+        val candArtists = leadArtists(cand.artists).map { key(it) }.toSet()
+        if (wantedArtists.isNotEmpty() && candArtists.isNotEmpty()) {
+            s += if (wantedArtists.any { it in candArtists }) 50 else -40
+        }
+        val a = wanted.durationMs ?: 0L
+        val b = cand.durationMs ?: 0L
+        if (a > 0 && b > 0) s += if (kotlin.math.abs(a - b) <= 5000) 20 else if (kotlin.math.abs(a - b) > 30000) -30 else 0
+        return s
+    }
+
+    suspend fun find(provider: com.watchuu.musicbox.core.MusicProvider, wanted: Track): Track? {
+        val title = cleanTitle(wanted.title)
+        val wantedTitle = key(title)
+        val artists = leadArtists(wanted.artists)
+        val wantedArtists = artists.map { key(it) }.toSet()
+        val queries = LinkedHashSet<String>()
+        artists.firstOrNull()?.let { queries.add("$title $it") }
+        queries.add(title)
+        var best: Track? = null
+        var bestScore = 0
+        for (q in queries) {
+            val hits = runCatching { provider.search(q, 10) }
+                .onFailure { Diag.log("links", "${provider.id} search failed: ${it.message}") }
+                .getOrDefault(emptyList())
+            for (hit in hits) {
+                val cand = hit.track ?: continue
+                if (hit.kind != Hit.Kind.TRACK) continue
+                val sc = score(wanted, wantedTitle, wantedArtists, cand)
+                if (sc > bestScore) { best = cand; bestScore = sc }
+            }
+            if (bestScore >= 150) break
+        }
+        if (best != null && bestScore >= 60) {
+            Diag.log("links", "${provider.id}: matched \"${best.title}\" by ${best.artistLine} (score $bestScore)")
+            return best
+        }
+        return null
     }
 }

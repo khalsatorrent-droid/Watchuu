@@ -191,6 +191,10 @@ object Zarz {
 
     // ---------------------------------------------------------------- endpoints
 
+    /** coordinator.rs :: request() - the host sends this user agent on every gateway call. */
+    private fun agent(appVersion: String): Map<String, String> =
+        mapOf("User-Agent" to "Mornye/$appVersion", "Accept" to "application/json")
+
     private fun url(path: String): String =
         if (path.startsWith("http")) path else BASE + (if (path.startsWith("/")) path else "/$path")
 
@@ -267,8 +271,9 @@ object Zarz {
             listOf("app_version" to appVersion, "install_id" to installId())
         )
         Diag.log("zarz", "bootstrap $appVersion")
-        val res = Http.get(target, mapOf("Accept" to "application/json"))
+        val res = Http.get(target, agent(appVersion))
         if (!res.ok) {
+            Diag.log("zarz", "bootstrap HTTP ${res.code}: ${res.body.take(160)}")
             throw SignedError("bootstrap HTTP ${res.code}", res.code)
         }
         val body = res.json() ?: throw SignedError("bootstrap returned non-JSON")
@@ -307,14 +312,17 @@ object Zarz {
         Diag.log("zarz", "exchange $appVersion")
         var attempt = 0
         while (true) {
-            val res = Http.postJson(target, payload)
+            val res = Http.postJson(target, payload, agent(appVersion))
             if (res.code == 429 && attempt < 2) {
                 attempt++
                 val wait = (res.header("Retry-After")?.toLongOrNull() ?: 2L).coerceIn(1, 300)
                 Thread.sleep(wait * 1000L)
                 continue
             }
-            if (!res.ok) throw SignedError("exchange HTTP ${res.code}", res.code)
+            if (!res.ok) {
+                Diag.log("zarz", "exchange HTTP ${res.code}: ${res.body.take(160)}")
+                throw SignedError("exchange HTTP ${res.code}", res.code)
+            }
             val body = res.json() ?: throw SignedError("exchange returned non-JSON")
             val session = readSession(appVersion, body)
                 ?: throw SignedError("exchange response missing session fields")
@@ -329,8 +337,9 @@ object Zarz {
         val session = load(appVersion) ?: return null
         val target = url(REFRESH)
         val payload = JSONObject().put("install_id", installId()).toString().toByteArray(Charsets.UTF_8)
-        val headers = signedHeaders(appVersion, session, "POST", target, payload, randomHex(16), System.currentTimeMillis())
+        val headers = signedHeaders(appVersion, session, "POST", target, payload, randomHex(12), System.currentTimeMillis())
             .toMutableMap()
+        headers.putAll(agent(appVersion))
         headers["Content-Type"] = "application/json"
         val res = Http.request("POST", target, headers, payload, "application/json")
         if (!res.ok) {
@@ -369,8 +378,9 @@ object Zarz {
         var session = ensure(appVersion)
         val target = url(path)
         val payload = (body ?: "").toByteArray(Charsets.UTF_8)
-        val headers = signedHeaders(appVersion, session, method, target, payload, randomHex(16), System.currentTimeMillis())
+        val headers = signedHeaders(appVersion, session, method, target, payload, randomHex(12), System.currentTimeMillis())
             .toMutableMap()
+        headers.putAll(agent(appVersion))
         if (body != null) headers["Content-Type"] = "application/json"
         headers.putAll(extraHeaders)
         headers["Accept"] = "application/json"
@@ -410,6 +420,7 @@ object Zarz {
         if (res.code == 503 && retryable && action.isEmpty()) {
             throw SignedError("provider unavailable", res.code, retryable = true, retryAfterMs = retryAfter * 1000L)
         }
+        Diag.log("zarz", "HTTP ${res.code} for $path: ${res.body.take(200)}")
         throw SignedError("HTTP ${res.code} for $path: ${res.body.take(160)}", res.code)
     }
 

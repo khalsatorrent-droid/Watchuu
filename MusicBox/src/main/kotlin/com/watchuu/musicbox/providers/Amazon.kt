@@ -513,7 +513,7 @@ object Amazon : MusicProvider {
         if (!key.isNullOrBlank()) {
             // Amazon returns the key when the asset must be decrypted client-side; a
             // player cannot use that file, so say so instead of serving noise.
-            Diag.log("amazon", "asset is encrypted (key present); not playable without host decryption")
+            Diag.log("amazon", "Amazon gave an encrypted file; CloudStream can only decrypt DASH streams, so it cannot play this. Pick TIDAL, Qobuz or Deezer as the download source.")
             return emptyList()
         }
         val actualCodec = audio.optStringOrNull("codec") ?: codec

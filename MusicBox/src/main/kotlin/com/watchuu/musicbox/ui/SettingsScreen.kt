@@ -103,7 +103,12 @@ object SettingsScreen {
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            for (v in views) addView(v)
+            // a text view in front of buttons takes the free width and wraps, so the buttons never fall off the edge
+            views.forEachIndexed { index, v ->
+                if (index == 0 && v is TextView && v !is Button && views.size > 1) {
+                    addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                } else addView(v)
+            }
         }
 
     private fun divider(context: Context): View = View(context).apply {
@@ -292,23 +297,20 @@ object SettingsScreen {
                         "after the owning source and the selected download source."
                 )
             )
+            // one switch per source: a check box keeps its label wrapping on its own line, where the old
+            // label-plus-button row pushed the button off screen when the status text was long
             for (provider in Providers.all.filter { !Providers.isZarz(it.id) && it.canStream }) {
-                val isEnabled = Providers.enabled(provider)
-                val label = TextView(context).apply {
+                val box = android.widget.CheckBox(context).apply {
                     text = "${provider.label}  —  ${provider.statusDetail()}"
                     textSize = 14f
-                    setTextColor(if (isEnabled) primary(context) else ((secondary(context) and 0x00FFFFFF) or 0x80000000.toInt()))
+                    setTextColor(primary(context))
+                    isChecked = Providers.enabled(provider)
+                    setOnCheckedChangeListener { _, on ->
+                        Providers.setEnabled(provider, on)
+                        Toast.makeText(context, "${provider.label}: ${if (on) "enabled" else "disabled"}", Toast.LENGTH_SHORT).show()
+                    }
                 }
-                root.addView(
-                    row(
-                        context,
-                        label,
-                        button(context, if (isEnabled) "Disable" else "Enable") {
-                            Providers.setEnabled(provider, !isEnabled)
-                            show(context)
-                        }
-                    )
-                )
+                root.addView(box)
             }
         }
 

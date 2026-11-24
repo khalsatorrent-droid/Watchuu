@@ -48,7 +48,6 @@ class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://musicbox.local"
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
     override val hasQuickSearch = true
-    override val hasSearch = true
     override val hasMainPage = true
     override val hasDownloadSupport = true
 

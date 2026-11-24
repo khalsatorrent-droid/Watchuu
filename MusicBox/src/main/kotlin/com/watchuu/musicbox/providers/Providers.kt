@@ -83,8 +83,9 @@ object Providers {
 
     /**
      * Stream chain for a track that came from [ownerId]:
-     *  1. the owning provider, when it is allowed to be used
-     *  2. the chosen download source
+     *  1. the chosen download source - the user picked it for its quality, and a free owner
+     *     (JioSaavn) answering first used to end the search before it was ever asked
+     *  2. the owning provider, when it is allowed to be used
      *  3. the session-free providers the user left enabled
      * A ZARZ-backed provider that is not the chosen one never appears here.
      */
@@ -94,10 +95,8 @@ object Providers {
             provider.canStream && enabled(provider) && (!isZarz(provider.id) || provider.id == chosen)
         }
         val ordered = ArrayList<MusicProvider>()
-        usable.firstOrNull { it.id == ownerId }?.let { ordered.add(it) }
-        chosen?.let { id ->
-            usable.firstOrNull { it.id == id && it.id != ownerId }?.let { ordered.add(it) }
-        }
+        chosen?.let { id -> usable.firstOrNull { it.id == id }?.let { ordered.add(it) } }
+        usable.firstOrNull { it.id == ownerId && ordered.none { o -> o.id == it.id } }?.let { ordered.add(it) }
         for (provider in usable) {
             if (ordered.none { it.id == provider.id }) ordered.add(provider)
         }

@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 73")
+        Diag.log("plugin", "load, version 74")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -281,6 +281,7 @@ class MusicBoxProvider : MainAPI() {
         val order = Providers.streamOrder(track.provider)
         Diag.log("links", "\"${track.title}\" from ${track.provider}; trying ${order.joinToString(", ") { it.id }.ifEmpty { "nothing (no source enabled)" }}")
 
+        val tried = HashSet<String>()
         for (provider in order) {
             val streams: List<Stream> = try {
                 if (provider.id == track.provider) {
@@ -319,7 +320,12 @@ class MusicBoxProvider : MainAPI() {
                 )
                 emitted++
             }
-            if (emitted > 0) break
+            // The chosen download source and the song's own source are both always asked, so the
+            // lossless link and a backup show up together; past those, stop at the first that works.
+            tried.add(provider.id)
+            val mustTry = listOfNotNull(Providers.downloadSourceId(), track.provider)
+                .filter { id -> order.any { it.id == id } }
+            if (emitted > 0 && mustTry.all { it in tried }) break
         }
         return emitted > 0
     }
@@ -346,10 +352,23 @@ class MusicBoxProvider : MainAPI() {
         return Track(provider = parts[1], id = parts.drop(2).joinToString("|"), title = parts.drop(2).joinToString("|"))
     }
 
+    /**
+     * CloudStream ranks links by this number. Taking every digit of the label made
+     * "LOSSLESS · 16bit · 44kHz" into 1644, so the scale is mapped by kind of audio instead.
+     */
     private fun qualityToInt(quality: String): Int {
-        val digits = quality.filter { it.isDigit() }
-        val value = digits.toIntOrNull() ?: return Qualities.Unknown.value
-        return value
+        val q = quality.uppercase()
+        val bitrate = Regex("""(\d{2,3})\s*(K|KBPS)?\b""").findAll(q)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }.firstOrNull { it in 32..512 }
+        return when {
+            q.contains("HI_RES") || q.contains("24BIT") || q.contains("ATMOS") || q.contains("EAC3") -> Qualities.P2160.value
+            q.contains("LOSSLESS") || q.contains("FLAC") || q.contains("16BIT") || q.contains("ALAC") -> Qualities.P1440.value
+            bitrate != null && bitrate >= 300 -> Qualities.P1080.value
+            bitrate != null && bitrate >= 200 -> Qualities.P720.value
+            bitrate != null && bitrate >= 128 -> Qualities.P480.value
+            bitrate != null -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
     }
 }
 

@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 69")
+        Diag.log("plugin", "load, version 70")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -48,6 +48,7 @@ class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://musicbox.local"
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
     override val hasQuickSearch = true
+    override val hasSearch = true
     override val hasMainPage = true
     override val hasDownloadSupport = true
 
@@ -128,16 +129,33 @@ class MusicBoxProvider : MainAPI() {
                 if (seen.add(key)) results.add(searchResponseFor(hit))
             }
         }
-        return results.ifEmpty { null }
+        return results
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val parsed = Links.parse(url) ?: return null
-        val provider = Providers.byId(parsed.provider) ?: return null
+        Diag.log("load", "url=$url")
+        val parsed = Links.parse(url)
+        if (parsed == null) {
+            Diag.log("load", "parse failed for: $url")
+            return null
+        }
+        val provider = Providers.byId(parsed.provider)
+        if (provider == null) {
+            Diag.log("load", "unknown provider: ${parsed.provider}")
+            return null
+        }
+        Diag.log("load", "${parsed.provider}/${parsed.kind}/${parsed.id}")
         return when (parsed.kind) {
             "track" -> {
-                val track = runCatching { provider.track(parsed.id) }.getOrNull()
-                    ?: hitCache[url]?.track ?: return null
+                val fetched = runCatching { provider.track(parsed.id) }
+                if (fetched.isFailure) Diag.log("load", "track fetch failed: ${fetched.exceptionOrNull()?.message}")
+                val cached = hitCache[url]
+                val track = fetched.getOrNull()
+                    ?: cached?.track
+                    ?: run {
+                        Diag.log("load", "track not found, hitCache ${if (cached == null) "miss" else "hit(kind=${cached.kind})"}")
+                        return null
+                    }
                 val episode = newEpisode(episodeData(track), {
                     this.name = track.title
                     this.posterUrl = track.cover
@@ -155,8 +173,15 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
             "album" -> {
-                val album = runCatching { provider.album(parsed.id) }.getOrNull()
-                    ?: hitCache[url]?.album ?: return null
+                val fetched = runCatching { provider.album(parsed.id) }
+                if (fetched.isFailure) Diag.log("load", "album fetch failed: ${fetched.exceptionOrNull()?.message}")
+                val cached = hitCache[url]
+                val album = fetched.getOrNull()
+                    ?: cached?.album
+                    ?: run {
+                        Diag.log("load", "album not found, hitCache ${if (cached == null) "miss" else "hit(kind=${cached.kind})"}")
+                        return null
+                    }
                 val episodes = album.tracks.mapIndexed { index, track ->
                     newEpisode(episodeData(track), {
                         this.name = "${index + 1}. ${track.title}"
@@ -165,16 +190,44 @@ class MusicBoxProvider : MainAPI() {
                         this.runTime = ((track.durationMs ?: 0L) / 1000L).toInt()
                     }, false)
                 }
-                newTvSeriesLoadResponse(album.title, url, TvType.Music, episodes) {
-                    this.posterUrl = album.cover
-                    this.plot = album.artists.joinToString(", ")
-                    this.year = album.year
-                    this.tags = listOfNotNull(album.albumType, album.label)
+                if (episodes.isEmpty()) {
+                    Diag.log("load", "album has no tracks, trying single-track fallback")
+                    // Some providers return album metadata without tracks list; build a minimal
+                    // episode list from the cached hit's track when available.
+                    val fallbackTrack = cached?.track
+                    val fallbackEpisodes = if (fallbackTrack != null) {
+                        listOf(newEpisode(episodeData(fallbackTrack), {
+                            this.name = fallbackTrack.title
+                            this.posterUrl = fallbackTrack.cover ?: album.cover
+                            this.episode = 1
+                            this.runTime = ((fallbackTrack.durationMs ?: 0L) / 1000L).toInt()
+                        }, false))
+                    } else emptyList()
+                    newTvSeriesLoadResponse(album.title, url, TvType.Music, fallbackEpisodes) {
+                        this.posterUrl = album.cover
+                        this.plot = album.artists.joinToString(", ")
+                        this.year = album.year
+                        this.tags = listOfNotNull(album.albumType, album.label)
+                    }
+                } else {
+                    newTvSeriesLoadResponse(album.title, url, TvType.Music, episodes) {
+                        this.posterUrl = album.cover
+                        this.plot = album.artists.joinToString(", ")
+                        this.year = album.year
+                        this.tags = listOfNotNull(album.albumType, album.label)
+                    }
                 }
             }
             "artist" -> {
-                val artist = runCatching { provider.artist(parsed.id) }.getOrNull()
-                    ?: hitCache[url]?.artist ?: return null
+                val fetched = runCatching { provider.artist(parsed.id) }
+                if (fetched.isFailure) Diag.log("load", "artist fetch failed: ${fetched.exceptionOrNull()?.message}")
+                val cached = hitCache[url]
+                val artist = fetched.getOrNull()
+                    ?: cached?.artist
+                    ?: run {
+                        Diag.log("load", "artist not found, hitCache ${if (cached == null) "miss" else "hit(kind=${cached.kind})"}")
+                        return null
+                    }
                 val episodes = artist.topTracks.mapIndexed { index, track ->
                     newEpisode(episodeData(track), {
                         this.name = track.title
@@ -193,7 +246,10 @@ class MusicBoxProvider : MainAPI() {
                     }
                 }
             }
-            else -> null
+            else -> {
+                Diag.log("load", "unknown kind: ${parsed.kind}")
+                null
+            }
         }
     }
 

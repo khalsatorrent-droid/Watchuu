@@ -97,7 +97,11 @@ object Tidal : MusicProvider {
 
     // ------------------------------------------------------------------ auth
 
-    private fun webToken(renew: Boolean): String? {
+    private val tokenLock = Any()
+
+    private fun webToken(renew: Boolean): String? = synchronized(tokenLock) { webTokenLocked(renew) }
+
+    private fun webTokenLocked(renew: Boolean): String? {
         if (!renew) {
             val cached = Creds.get("tidal.webToken")
             val expiry = Creds.get("tidal.webTokenExpiry")?.toLongOrNull() ?: 0L
@@ -233,9 +237,20 @@ object Tidal : MusicProvider {
     override suspend fun album(id: String): Album? {
         val body = getJson(metadataUrl("albums/${enc(id)}", emptyList()), false) ?: return null
         val album = albumOf(body) ?: return null
-        val items = getJson(metadataUrl("albums/${enc(id)}/items", listOf("limit" to "300", "offset" to "0")), false)
+        // The API answers HTTP 400 above 100 items per page, so long albums are paged.
+        val wrappers = ArrayList<JSONObject>()
+        var offset = 0
+        while (offset < 500) {
+            val page = getJson(metadataUrl("albums/${enc(id)}/items", listOf("limit" to "100", "offset" to offset.toString())), false)
+                ?: break
+            val got = page.array("items")?.objects() ?: emptyList()
+            wrappers.addAll(got)
+            val total = page.optIntOrNull("totalNumberOfItems") ?: 0
+            offset += got.size
+            if (got.isEmpty() || offset >= total) break
+        }
         val tracks = ArrayList<Track>()
-        items?.array("items")?.objects()?.forEach { wrapper ->
+        wrappers.forEach { wrapper ->
             val item = wrapper.optJSONObject("item") ?: wrapper
             // Album items carry no album object; attach the one we already have.
             val withAlbum = JSONObject(item.toString())

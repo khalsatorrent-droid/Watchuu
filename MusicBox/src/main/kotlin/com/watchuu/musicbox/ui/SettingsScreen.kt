@@ -152,6 +152,11 @@ object SettingsScreen {
                                 // Its metadata is signed, so it has to be the authorized source.
                                 Providers.setDownloadSourceId(picked.id)
                                 toast(context, "${picked.label} also serves metadata through the session, so it is now your download source too")
+                            } else if (Providers.isZarz(picked.id) && Providers.downloadSourceId() != picked.id) {
+                                // Picking TIDAL as the catalogue and leaving another download source meant
+                                // TIDAL songs were never played from TIDAL.
+                                Providers.setDownloadSourceId(picked.id)
+                                toast(context, "Catalogue and download source: ${picked.label}")
                             } else {
                                 toast(context, "Catalogue: ${picked.label}")
                             }
@@ -409,7 +414,7 @@ object SettingsScreen {
 
         val scroll = ScrollView(context).apply { addView(root) }
         AlertDialog.Builder(context)
-            .setTitle("MusicBox 74")
+            .setTitle("MusicBox 75")
             .setView(scroll)
             .setPositiveButton("Close", null)
             .show()

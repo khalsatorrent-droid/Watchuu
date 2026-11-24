@@ -502,13 +502,23 @@ object Amazon : MusicProvider {
         val ticket = Zarz.ticket(APP_VERSION, "amazeamazeamaze", "track", asin)
         val body = JSONObject().put("asin", asin).put("codec", codec)
         val res = Zarz.signedFetch(APP_VERSION, "POST", DOWNLOAD_PATH, body.toString(), mapOf("X-Zarz-Ticket" to ticket))
-        val payload = jsonOrNull(res.body) ?: return emptyList()
+        // callZarzMedia(): the answer is usually an array whose first element carries `audio`.
+        val text = res.body.trim()
         val entry = when {
-            payload.has("audio") -> payload
-            else -> payload.optJSONArray("data")?.optJSONObject(0) ?: payload.optJSONObject("data")
-        } ?: return emptyList()
-        val audio = entry.optJSONObject("audio") ?: return emptyList()
-        val url = audio.optStringOrNull("url") ?: return emptyList()
+            text.startsWith("[") -> runCatching { JSONArray(text).optJSONObject(0) }.getOrNull()
+            else -> jsonOrNull(text)?.let { p ->
+                when {
+                    p.has("audio") -> p
+                    else -> p.optJSONArray("data")?.optJSONObject(0) ?: p.optJSONObject("data")
+                }
+            }
+        }
+        val audio = entry?.optJSONObject("audio")
+        val url = audio?.optStringOrNull("url")
+        if (audio == null || url == null) {
+            Diag.log("amazon", "download answer had no audio URL: ${text.take(200)}")
+            return emptyList()
+        }
         val key = audio.optStringOrNull("key")
         if (!key.isNullOrBlank()) {
             // Amazon returns the key when the asset must be decrypted client-side; a

@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 74")
+        Diag.log("plugin", "load, version 75")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }

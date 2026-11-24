@@ -55,7 +55,20 @@ class MusicBoxProvider : MainAPI() {
 
     private fun quality(): String = Creds.get("musicbox.quality") ?: "AAC_320"
 
-    private fun searchResponseFor(hit: Hit): SearchResponse = newMovieSearchResponse(
+    /**
+     * What each search card was built from. Opening a card used to ask the provider for the item
+     * again, and when that second lookup failed (Amazon's catalogue page, a rate limited session) the
+     * app showed "Error loading" for a song it had just listed. The search result already carries the
+     * track or album, so it is the fallback.
+     */
+    private val hitCache = java.util.concurrent.ConcurrentHashMap<String, Hit>()
+
+    private fun searchResponseFor(hit: Hit): SearchResponse {
+        hitCache[hit.url] = hit
+        return buildSearchResponse(hit)
+    }
+
+    private fun buildSearchResponse(hit: Hit): SearchResponse = newMovieSearchResponse(
         hit.title,
         hit.url,
         TvType.Music,
@@ -123,7 +136,8 @@ class MusicBoxProvider : MainAPI() {
         val provider = Providers.byId(parsed.provider) ?: return null
         return when (parsed.kind) {
             "track" -> {
-                val track = provider.track(parsed.id) ?: return null
+                val track = runCatching { provider.track(parsed.id) }.getOrNull()
+                    ?: hitCache[url]?.track ?: return null
                 val episode = newEpisode(episodeData(track), {
                     this.name = track.title
                     this.posterUrl = track.cover
@@ -141,7 +155,8 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
             "album" -> {
-                val album = provider.album(parsed.id) ?: return null
+                val album = runCatching { provider.album(parsed.id) }.getOrNull()
+                    ?: hitCache[url]?.album ?: return null
                 val episodes = album.tracks.mapIndexed { index, track ->
                     newEpisode(episodeData(track), {
                         this.name = "${index + 1}. ${track.title}"
@@ -158,7 +173,8 @@ class MusicBoxProvider : MainAPI() {
                 }
             }
             "artist" -> {
-                val artist = provider.artist(parsed.id) ?: return null
+                val artist = runCatching { provider.artist(parsed.id) }.getOrNull()
+                    ?: hitCache[url]?.artist ?: return null
                 val episodes = artist.topTracks.mapIndexed { index, track ->
                     newEpisode(episodeData(track), {
                         this.name = track.title

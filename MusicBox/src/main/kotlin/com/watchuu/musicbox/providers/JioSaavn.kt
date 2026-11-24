@@ -233,7 +233,9 @@ object JioSaavn : MusicProvider {
     override suspend fun track(id: String): Track? = songDetails(id)?.let { formatSong(it) }
 
     override suspend fun album(id: String): Album? {
-        val result = call("content.getAlbumDetails", listOf("albumid" to id)) ?: return null
+        // getCollection(): a numeric id goes to content.getAlbumDetails, a permalink token to webapi.get.
+        val result = (if (id.all { it.isDigit() }) call("content.getAlbumDetails", listOf("albumid" to id))
+            else call("webapi.get", listOf("token" to id, "type" to "album", "includeMetaTags" to "0"))) ?: return null
         val title = decodeEntities(result.optStringOrNull("title") ?: result.optStringOrNull("name"))
         val cover = highRes(result.optStringOrNull("image"))
         val year = (result.optStringOrNull("year") ?: "").take(4).toIntOrNull()
@@ -248,7 +250,8 @@ object JioSaavn : MusicProvider {
             albumType = "album",
         )
         val tracks = ArrayList<Track>()
-        result.array("songs")?.objects()?.forEachIndexed { index, song ->
+        // api_version 4 returns an album's songs under "list"; older answers use "songs".
+        (result.array("list") ?: result.array("songs"))?.objects()?.forEachIndexed { index, song ->
             formatSong(song, album, index)?.let { tracks.add(it) }
         }
         return album.copy(tracks = tracks)

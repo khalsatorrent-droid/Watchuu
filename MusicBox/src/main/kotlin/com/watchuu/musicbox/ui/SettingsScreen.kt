@@ -414,7 +414,7 @@ object SettingsScreen {
 
         val scroll = ScrollView(context).apply { addView(root) }
         AlertDialog.Builder(context)
-            .setTitle("MusicBox 75")
+            .setTitle("MusicBox 76")
             .setView(scroll)
             .setPositiveButton("Close", null)
             .show()

@@ -18,6 +18,9 @@ interface MusicProvider {
 
     suspend fun search(query: String, limit: Int = 25): List<Hit>
 
+    /** Songs for a home row. Providers whose search costs several calls answer with one. */
+    suspend fun homeTracks(query: String, limit: Int = 20): List<Hit> = search(query, limit)
+
     suspend fun track(id: String): Track? = null
     suspend fun album(id: String): Album? = null
     suspend fun artist(id: String): Artist? = null

@@ -196,6 +196,12 @@ object Qobuz : MusicProvider {
         return out
     }
 
+    override suspend fun homeTracks(query: String, limit: Int): List<Hit> =
+        itemsOf(get("track/search", listOf("query" to query, "limit" to limit.toString(), "offset" to "0")), "tracks")
+            .mapNotNull { item ->
+                trackOf(item)?.let { t -> Hit(Hit.Kind.TRACK, t.title, t.artistLine, t.cover, Links.track(id, t.id), track = t) }
+            }
+
     override suspend fun track(id: String): Track? =
         get("track/get", listOf("track_id" to id))?.let { trackOf(it) }
 
@@ -239,12 +245,26 @@ object Qobuz : MusicProvider {
         val url = descriptor.optStringOrNull("direct_download_url")
             ?: descriptor.optStringOrNull("download_url")
             ?: return emptyList()
-        val mime = if (url.contains(".flac", true)) "audio/flac" else "audio/mpeg"
-        return listOf(Stream(url, qualityLabel(url, quality), mime, provider = id))
+        val label = qualityLabel(url, quality)
+        val mime = if (label.startsWith("MP3")) "audio/mpeg" else "audio/flac"
+        return listOf(Stream(url, label, mime, provider = id))
     }
 
-    private fun qualityLabel(url: String, requested: String): String = when {
-        url.contains(".flac", true) -> "FLAC"
-        else -> requested.uppercase()
+    /**
+     * The stream URL names the format Qobuz actually served (fmt=5|6|7|27); the requested quality
+     * is only what was asked for, and the old label echoed the shared "AAC_320" setting.
+     */
+    private fun qualityLabel(url: String, requested: String): String {
+        val fmt = Regex("""[?&]fmt=(\d+)""").find(url)?.groupValues?.get(1)?.toIntOrNull()
+        return when (fmt) {
+            5 -> "MP3 320kbps"
+            6 -> "FLAC 16-bit · 44.1kHz"
+            7 -> "FLAC 24-bit · 96kHz"
+            27 -> "FLAC 24-bit · 192kHz"
+            else -> if (url.contains(".flac", true)) "FLAC" else when (downloadQuality(requested)) {
+                "hi-res-max", "hi-res" -> "FLAC 24-bit"
+                else -> "FLAC 16-bit"
+            }
+        }
     }
 }

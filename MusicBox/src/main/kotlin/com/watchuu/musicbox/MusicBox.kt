@@ -28,12 +28,13 @@ import com.watchuu.musicbox.core.Stream
 import com.watchuu.musicbox.core.Track
 import com.watchuu.musicbox.providers.Providers
 import com.watchuu.musicbox.ui.SettingsScreen
+import kotlinx.coroutines.sync.withLock
 
 @CloudstreamPlugin
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 75")
+        Diag.log("plugin", "load, version 76")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -94,7 +95,7 @@ class MusicBoxProvider : MainAPI() {
             for (provider in Providers.catalogue(catalogueId())) {
                 if (!provider.canCatalogue) continue
                 val found = try {
-                    provider.search(request.data, 20)
+                    HomeRows.get(provider, request.data)
                 } catch (e: Throwable) {
                     Diag.log("home", "${provider.id} failed: ${e.message}")
                     continue
@@ -165,7 +166,7 @@ class MusicBoxProvider : MainAPI() {
                     this.name = track.title
                     this.posterUrl = track.cover
                     this.episode = 1
-                    this.runTime = ((track.durationMs ?: 0L) / 1000L).toInt()
+                    this.runTime = minutes(track.durationMs)
                 }, false)
                 newTvSeriesLoadResponse(track.title, url, TvType.Music, listOf(episode)) {
                     this.posterUrl = track.cover
@@ -191,7 +192,7 @@ class MusicBoxProvider : MainAPI() {
                         this.name = "${index + 1}. ${track.title}"
                         this.posterUrl = track.cover ?: album.cover
                         this.episode = index + 1
-                        this.runTime = ((track.durationMs ?: 0L) / 1000L).toInt()
+                        this.runTime = minutes(track.durationMs)
                     }, false)
                 }
                 if (episodes.isEmpty()) {
@@ -204,7 +205,7 @@ class MusicBoxProvider : MainAPI() {
                             this.name = fallbackTrack.title
                             this.posterUrl = fallbackTrack.cover ?: album.cover
                             this.episode = 1
-                            this.runTime = ((fallbackTrack.durationMs ?: 0L) / 1000L).toInt()
+                            this.runTime = minutes(fallbackTrack.durationMs)
                         }, false))
                     } else emptyList()
                     newTvSeriesLoadResponse(album.title, url, TvType.Music, fallbackEpisodes) {
@@ -236,7 +237,7 @@ class MusicBoxProvider : MainAPI() {
                         this.name = track.title
                         this.posterUrl = track.cover ?: artist.image
                         this.episode = index + 1
-                        this.runTime = ((track.durationMs ?: 0L) / 1000L).toInt()
+                        this.runTime = minutes(track.durationMs)
                     }, false)
                 }
                 newTvSeriesLoadResponse(artist.name, url, TvType.Music, episodes) {
@@ -356,12 +357,16 @@ class MusicBoxProvider : MainAPI() {
      * CloudStream ranks links by this number. Taking every digit of the label made
      * "LOSSLESS · 16bit · 44kHz" into 1644, so the scale is mapped by kind of audio instead.
      */
+    /** CloudStream's Episode.runTime is in minutes; seconds made a 6 minute song read "6h 2m". */
+    private fun minutes(durationMs: Long?): Int? =
+        durationMs?.takeIf { it > 0 }?.let { ((it + 30_000L) / 60_000L).toInt().coerceAtLeast(1) }
+
     private fun qualityToInt(quality: String): Int {
-        val q = quality.uppercase()
+        val q = quality.uppercase().replace("-", "").replace(" ", "")
         val bitrate = Regex("""(\d{2,3})\s*(K|KBPS)?\b""").findAll(q)
             .mapNotNull { it.groupValues[1].toIntOrNull() }.firstOrNull { it in 32..512 }
         return when {
-            q.contains("HI_RES") || q.contains("24BIT") || q.contains("ATMOS") || q.contains("EAC3") -> Qualities.P2160.value
+            q.contains("HI_RES") || q.contains("HIRES") || q.contains("24BIT") || q.contains("ATMOS") || q.contains("EAC3") -> Qualities.P2160.value
             q.contains("LOSSLESS") || q.contains("FLAC") || q.contains("16BIT") || q.contains("ALAC") -> Qualities.P1440.value
             bitrate != null && bitrate >= 300 -> Qualities.P1080.value
             bitrate != null && bitrate >= 200 -> Qualities.P720.value
@@ -535,5 +540,25 @@ internal object TrackMatcher {
             return best
         }
         return null
+    }
+}
+
+/**
+ * Home rows are searches on the catalogue. The app asks for all of them at once, and with a
+ * session catalogue (Qobuz) that was a dozen signed calls in one second: the gateway answered
+ * "Rate limit exceeded" and the allowance needed for playback was gone. Rows now go one at a
+ * time, ask for songs only, and are reused for half an hour.
+ */
+internal object HomeRows {
+    private const val TTL_MS = 30 * 60 * 1000L
+    private val lock = kotlinx.coroutines.sync.Mutex()
+    private val cache = HashMap<String, Pair<Long, List<Hit>>>()
+
+    suspend fun get(provider: com.watchuu.musicbox.core.MusicProvider, query: String): List<Hit> = lock.withLock {
+        val key = "${provider.id}|$query"
+        cache[key]?.let { (at, hits) -> if (System.currentTimeMillis() - at < TTL_MS) return@withLock hits }
+        val hits = provider.homeTracks(query, 20)
+        if (hits.isNotEmpty()) cache[key] = System.currentTimeMillis() to hits
+        hits
     }
 }

@@ -34,7 +34,7 @@ import kotlinx.coroutines.sync.withLock
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 76")
+        Diag.log("plugin", "load, version 77")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }

@@ -222,6 +222,17 @@ object Amazon : MusicProvider {
         return page
     }
 
+    /** A page answer that carries only a dialog template (the expired-session "Service error"). */
+    private fun isDialogOnly(data: JSONObject): Boolean {
+        val methods = data.optJSONArray("methods") ?: return false
+        var dialog = false
+        for (i in 0 until methods.length()) {
+            val name = methods.optJSONObject(i)?.optJSONObject("template")?.optString("interface", "") ?: continue
+            if (name.endsWith("DialogTemplate")) dialog = true else if (name.isNotEmpty()) return false
+        }
+        return dialog
+    }
+
     private fun isServiceErrorDialog(data: JSONObject): Boolean {
         val methods = data.optJSONArray("methods") ?: return false
         var dialog = false
@@ -248,7 +259,8 @@ object Amazon : MusicProvider {
             .put("headers", JSONObject(buildHeaders(pageUrl)).toString())
             .toString()
         val page = post("$SKILL/showHome", body, pageUrl, emptyMap())
-        if (page == null && !retried) {
+        if ((page == null || isDialogOnly(page.data)) && !retried) {
+            if (page != null) Diag.log("amazon", "page $deeplink returned a service error, renewing session")
             initSession(true)
             return showHome(deeplink, true)
         }
@@ -360,8 +372,11 @@ object Amazon : MusicProvider {
     /** extractAmazonDeeplinkInfo(): /albums/<id>?trackAsin=<asin> means a track. */
     private fun deeplinkInfo(deeplink: String?): Deeplink? {
         if (deeplink.isNullOrBlank()) return null
-        val uri = runCatching { java.net.URI(deeplink) }.getOrNull() ?: return null
-        val path = (uri.path ?: "").trim('/')
+        // Split by hand: java.net.URI throws on spaces, "|" or quotes that `new URL()` accepts,
+        // and every row whose link threw was silently dropped from the album.
+        var rest = deeplink.trim()
+        Regex("""^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]*""").find(rest)?.let { rest = rest.substring(it.range.last + 1) }
+        val path = rest.substringBefore('?').substringBefore('#').trim('/')
         if (path.isEmpty()) return null
         val segments = path.split("/")
         val kind = segments[0].lowercase(Locale.US)
@@ -376,11 +391,11 @@ object Amazon : MusicProvider {
     }
 
     private fun queryParam(url: String, name: String): String? =
-        runCatching { java.net.URI(url).rawQuery }.getOrNull()
+        url.substringAfter('?', "").substringBefore('#').takeIf { it.isNotEmpty() }
             ?.split("&")
             ?.map { it.split("=", limit = 2) }
             ?.firstOrNull { it.size == 2 && it[0] == name }
-            ?.let { java.net.URLDecoder.decode(it[1], "UTF-8") }
+            ?.let { runCatching { java.net.URLDecoder.decode(it[1], "UTF-8") }.getOrDefault(it[1]) }
 
     // ------------------------------------------------------------------ parsing
 
@@ -397,7 +412,8 @@ object Amazon : MusicProvider {
             var link = row.optJSONObject("primaryTextLink")?.optStringOrNull("deeplink")
             if (link.isNullOrBlank()) link = row.optJSONObject("primaryLink")?.optStringOrNull("deeplink")
             val info = deeplinkInfo(link)
-            if (name.isBlank() || info == null || info.type != "track" || info.id.isBlank()) continue
+            // Album rows link "/albums/<a>?trackAsin=<t>"; others link "/tracks/<t>" directly.
+            if (name.isBlank() || info == null || (info.type != "track" && info.type != "tracks") || info.id.isBlank()) continue
             val artist = textValue(row.opt("secondaryText1")).ifBlank { textValue(row.opt("secondaryText2")) }
                 .ifBlank { textValue(row.opt("secondaryText")) }
             val duration = parseDuration(row.optStringOrNull("secondaryText3") ?: row.optStringOrNull("duration"))
@@ -455,12 +471,91 @@ object Amazon : MusicProvider {
         return tracks.firstOrNull { it.id == id } ?: tracks.firstOrNull()
     }
 
+    /** extractSchemaOrg(page, "MusicAlbum"): the album-level schema, preferring one with tracks. */
+    private fun schemaAlbum(page: Page): JSONObject? {
+        val blobs = ArrayList<String>()
+        fun walk(obj: Any?, depth: Int) {
+            if (obj == null || depth > 25) return
+            when (obj) {
+                is JSONObject -> for (k in obj.keys()) {
+                    val v = obj.opt(k)
+                    if (k == "innerHTML" && v is String && v.contains("MusicAlbum")) blobs.add(v) else walk(v, depth + 1)
+                }
+                is JSONArray -> for (i in 0 until obj.length()) walk(obj.opt(i), depth + 1)
+            }
+        }
+        walk(page.data, 0)
+        var first: JSONObject? = null
+        for (blob in blobs) {
+            val candidates = ArrayList<JSONObject>()
+            val text = blob.trim()
+            runCatching {
+                if (text.startsWith("[")) JSONArray(text).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let(candidates::add) }
+                else JSONObject(text).let { o ->
+                    candidates.add(o)
+                    o.optJSONArray("@graph")?.let { g -> for (i in 0 until g.length()) g.optJSONObject(i)?.let(candidates::add) }
+                }
+            }
+            for (c in candidates) {
+                if (c.optString("@type") != "MusicAlbum") continue
+                if (c.has("track") || c.has("numTracks")) return c
+                if (first == null) first = c
+            }
+        }
+        return first
+    }
+
+    private fun schemaTrackId(item: JSONObject): String? {
+        val ref = item.optStringOrNull("@id") ?: item.optStringOrNull("url") ?: return null
+        queryParam(ref, "trackAsin")?.let { normalizeAsin(it)?.let { a -> return a } }
+        val m = Regex("""/tracks/([^/?#]+)""").find(ref) ?: return null
+        return normalizeAsin(m.groupValues[1])
+    }
+
+    private fun isoSeconds(iso: String?): Int {
+        val m = Regex("""PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?""").find(iso ?: "") ?: return 0
+        return (m.groupValues[1].toIntOrNull() ?: 0) * 3600 + (m.groupValues[2].toIntOrNull() ?: 0) * 60 + (m.groupValues[3].toIntOrNull() ?: 0)
+    }
+
     override suspend fun album(id: String): Album? {
         val page = showHome("/albums/$id") ?: return null
-        val tracks = tracksFrom(page, 300).map { it.copy(albumId = id, albumName = null) }
+        val schema = schemaAlbum(page)
+        val schemaTracks = ArrayList<JSONObject>()
+        when (val t = schema?.opt("track")) {
+            is JSONArray -> for (i in 0 until t.length()) t.optJSONObject(i)?.let(schemaTracks::add)
+            is JSONObject -> schemaTracks.add(t)
+        }
+        val schemaArtist = schema?.optJSONObject("byArtist")?.optStringOrNull("name") ?: ""
+        var tracks = tracksFrom(page, 300).map { it.copy(albumId = id, albumName = null) }
+        if (tracks.isEmpty() && schemaTracks.isNotEmpty()) {
+            // No track rows on the page: build the list from the schema.org copy.
+            tracks = schemaTracks.mapNotNull { st ->
+                val asin = schemaTrackId(st) ?: return@mapNotNull null
+                val secs = isoSeconds(st.optStringOrNull("duration"))
+                Track(
+                    provider = this.id, id = asin,
+                    title = st.optStringOrNull("name") ?: return@mapNotNull null,
+                    artists = listOfNotNull(st.optJSONObject("byArtist")?.optStringOrNull("name") ?: schemaArtist.ifBlank { null }),
+                    albumId = id,
+                    durationMs = if (secs > 0) secs * 1000L else null,
+                    isrc = st.optStringOrNull("isrcCode"),
+                    webUrl = trackUrl(asin),
+                )
+            }
+        } else if (schemaTracks.isNotEmpty()) {
+            // Rows carry no ISRC; the schema does, and it is what lets another source find the song.
+            val byId = schemaTracks.mapNotNull { st -> schemaTrackId(st)?.let { it to st } }.toMap()
+            tracks = tracks.map { t ->
+                val st = byId[t.id] ?: return@map t
+                t.copy(isrc = t.isrc ?: st.optStringOrNull("isrcCode"))
+            }
+        }
+        Diag.log("amazon", "album $id: ${tracks.size} tracks (${schemaTracks.size} in schema)")
         val title = sanitize(findFirst(page.data, "headerText"))
+            .ifBlank { schema?.optStringOrNull("name") ?: "" }
             .ifBlank { sanitize(findFirst(page.data, "primaryText")) }
         val artist = sanitize(findFirst(page.data, "headerPrimaryText"))
+            .ifBlank { schemaArtist }
             .ifBlank { sanitize(findFirst(page.data, "secondaryText")) }
         var cover = fixImage(findFirst(page.data, "headerImage") as? String)
         if (cover == null) cover = fixImage(findFirst(page.data, "backgroundImage") as? String)

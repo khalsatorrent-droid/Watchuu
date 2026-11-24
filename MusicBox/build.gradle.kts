@@ -1,17 +1,16 @@
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.fragment:fragment-ktx:1.8.5")
 }
 
 // use an integer for version numbers
-version = 63
+version = 64
 
 cloudstream {
     language = "en"
-    description = "Music - Multi-catalogue (JioSaavn, Spotify, Apple Music, Deezer, Tidal/Monochrome, Qobuz, SoundCloud, YouTube Music, Jamendo, GDStudio) with CharlesPikachu/musicdl & ZARZ multi-provider playback"
+    description = "Music – multi-provider (JioSaavn, Deezer, TIDAL, Qobuz, Amazon, SoundCloud, YouTube Music, Beatport, Jellyfin) with ZARZ signed-session playback and in-app authorization"
     authors = listOf("khalsatorrent-droid")
 
     status = 1
     tvTypes = listOf("Music", "Others")
-    iconUrl = "https://www.google.com/s2/favicons?domain=spotify.com&sz=%size%"
+    iconUrl = "https://www.google.com/s2/favicons?domain=jiosaavn.com&sz=128"
 }

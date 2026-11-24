@@ -40,8 +40,19 @@ object Links {
      * dropped (plugin reload, home row restored from an earlier run).
      */
     private const val META = "#mb="
+    private const val SCHEME = "musicbox://"
 
-    fun base(url: String): String = url.substringBefore(META)
+    /**
+     * CloudStream passes every card link through MainAPI.fixUrl() before load(), and a link that
+     * does not start with "http" comes back as "<mainUrl>/musicbox://…". Everything before the
+     * scheme is dropped here so that rewritten link still resolves.
+     */
+    fun canonical(url: String): String {
+        val idx = url.indexOf(SCHEME)
+        return if (idx > 0) url.substring(idx) else url
+    }
+
+    fun base(url: String): String = canonical(url).substringBefore(META)
 
     fun withMeta(url: String, meta: String): String {
         val encoded = android.util.Base64.encodeToString(
@@ -63,9 +74,9 @@ object Links {
     }
 
     fun parse(url: String): Parsed? {
-        val prefix = "musicbox://"
-        if (!url.startsWith(prefix)) return null
-        val rest = base(url).removePrefix(prefix).trimEnd('/')
+        val clean = base(url)
+        if (!clean.startsWith(SCHEME)) return null
+        val rest = clean.removePrefix(SCHEME).trimEnd('/')
         val parts = rest.split("/")
         if (parts.size < 3) return null
         val id = parts.drop(2).joinToString("/")

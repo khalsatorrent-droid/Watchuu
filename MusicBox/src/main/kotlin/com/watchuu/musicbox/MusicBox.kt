@@ -33,7 +33,7 @@ import com.watchuu.musicbox.ui.SettingsScreen
 class MusicBoxPlugin : Plugin() {
     override fun load(context: Context) {
         Creds.init(context)
-        Diag.log("plugin", "load, version 71")
+        Diag.log("plugin", "load, version 72")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -131,8 +131,10 @@ class MusicBoxProvider : MainAPI() {
         return results
     }
 
-    override suspend fun load(url: String): LoadResponse? {
-        Diag.log("load", "url=$url")
+    override suspend fun load(rawUrl: String): LoadResponse? {
+        // CloudStream hands load() the link after fixUrl(), i.e. "https://musicbox.local/musicbox://…".
+        val url = Links.canonical(rawUrl)
+        Diag.log("load", "url=${Links.base(url)}")
         val parsed = Links.parse(url)
         if (parsed == null) {
             Diag.log("load", "parse failed for: $url")

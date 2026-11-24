@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -42,25 +43,51 @@ object SettingsScreen {
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
 
+    /**
+     * Text colours come from the theme the dialog is shown in. They used to be fixed dark greys that
+     * only read on a light dialog, so on a dark theme the labels were nearly invisible.
+     */
+    private fun themed(context: Context, attr: Int, fallback: Int): Int {
+        val tv = TypedValue()
+        if (!context.theme.resolveAttribute(attr, tv, true)) return fallback
+        if (tv.resourceId != 0) {
+            @Suppress("DEPRECATION")
+            return runCatching { context.resources.getColorStateList(tv.resourceId).defaultColor }.getOrDefault(fallback)
+        }
+        return tv.data
+    }
+
+    private fun primary(context: Context): Int = themed(context, android.R.attr.textColorPrimary, Color.parseColor("#1B1B1F"))
+    private fun secondary(context: Context): Int = themed(context, android.R.attr.textColorSecondary, Color.parseColor("#4A4A55"))
+
+    /** light text means the dialog is dark */
+    private fun isDark(context: Context): Boolean {
+        val c = primary(context)
+        return (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000 > 128
+    }
+
+    private fun accent(context: Context): Int = Color.parseColor(if (isDark(context)) "#5FD6A8" else "#0B6E4F")
+    private fun warn(context: Context): Int = Color.parseColor(if (isDark(context)) "#FFB74D" else "#8A5A00")
+
     private fun title(context: Context, text: String): TextView = TextView(context).apply {
         this.text = text
-        setTextColor(Color.parseColor("#1B1B1F"))
-        textSize = 16f
+        setTextColor(primary(context))
+        textSize = 17f
         setTypeface(typeface, Typeface.BOLD)
         setPadding(0, dp(context, 18), 0, dp(context, 6))
     }
 
     private fun body(context: Context, text: String): TextView = TextView(context).apply {
         this.text = text
-        setTextColor(Color.parseColor("#4A4A55"))
-        textSize = 12.5f
+        setTextColor(secondary(context))
+        textSize = 13.5f
         setPadding(0, 0, 0, dp(context, 6))
     }
 
     private fun note(context: Context, text: String): TextView = TextView(context).apply {
         this.text = text
-        setTextColor(Color.parseColor("#8A5A00"))
-        textSize = 12f
+        setTextColor(warn(context))
+        textSize = 13f
         setPadding(0, dp(context, 4), 0, dp(context, 6))
     }
 
@@ -80,7 +107,7 @@ object SettingsScreen {
         }
 
     private fun divider(context: Context): View = View(context).apply {
-        setBackgroundColor(Color.parseColor("#E2E2EA"))
+        setBackgroundColor((secondary(context) and 0x00FFFFFF) or 0x40000000)
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 1))
     }
 
@@ -163,8 +190,8 @@ object SettingsScreen {
                 val status = if (appVersion != null) Zarz.statusLine(appVersion) else "no session"
                 val label = TextView(context).apply {
                     text = "${if (selected) "●" else "○"}  ${provider.label}  —  $status"
-                    textSize = 13f
-                    setTextColor(if (selected) Color.parseColor("#0B6E4F") else Color.parseColor("#4A4A55"))
+                    textSize = 14f
+                    setTextColor(if (selected) accent(context) else primary(context))
                     setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
                 }
                 root.addView(
@@ -269,8 +296,8 @@ object SettingsScreen {
                 val isEnabled = Providers.enabled(provider)
                 val label = TextView(context).apply {
                     text = "${provider.label}  —  ${provider.statusDetail()}"
-                    textSize = 12.5f
-                    setTextColor(if (isEnabled) Color.parseColor("#1B1B1F") else Color.parseColor("#9A9AA5"))
+                    textSize = 14f
+                    setTextColor(if (isEnabled) primary(context) else ((secondary(context) and 0x00FFFFFF) or 0x80000000.toInt()))
                 }
                 root.addView(
                     row(

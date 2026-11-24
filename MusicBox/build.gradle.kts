@@ -3,7 +3,7 @@ dependencies {
 }
 
 // use an integer for version numbers
-version = 64
+version = 65
 
 cloudstream {
     language = "en"

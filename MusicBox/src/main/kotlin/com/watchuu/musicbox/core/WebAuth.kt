@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
 import android.net.Uri
+import android.util.TypedValue
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -25,6 +26,27 @@ import android.widget.TextView
  *    in the shared WebView jar that [Http] reads from.
  */
 object WebAuth {
+
+    /**
+     * The page has to be given a real height: inside an AlertDialog the custom view is only as tall as
+     * its content, so a WebView sized by weight (height 0) collapsed to nothing and the verification
+     * page never appeared.
+     */
+    private fun pageHeight(context: Context): Int {
+        val m = context.resources.displayMetrics
+        return minOf((460 * m.density).toInt(), (m.heightPixels * 0.62f).toInt())
+    }
+
+    /** the dialog theme's own text colour, so the hint reads on dark and light dialogs alike */
+    private fun textColor(context: Context): Int {
+        val tv = TypedValue()
+        if (!context.theme.resolveAttribute(android.R.attr.textColorPrimary, tv, true)) return Color.GRAY
+        if (tv.resourceId != 0) {
+            @Suppress("DEPRECATION")
+            return runCatching { context.resources.getColorStateList(tv.resourceId).defaultColor }.getOrDefault(Color.GRAY)
+        }
+        return tv.data
+    }
 
     private fun newWebView(context: Context): WebView {
         val web = WebView(context)
@@ -50,13 +72,13 @@ object WebAuth {
         val web = newWebView(context)
         val status = TextView(context).apply {
             text = "Complete the verification, then this closes by itself."
-            setTextColor(Color.DKGRAY)
+            setTextColor(textColor(context))
             setPadding(24, 16, 24, 16)
         }
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, pageHeight(context)))
         }
         var finished = false
         val dialog = AlertDialog.Builder(context)
@@ -112,13 +134,13 @@ object WebAuth {
         val web = newWebView(context)
         val status = TextView(context).apply {
             text = "Sign in, then tap Done. Cookies are read from this session only."
-            setTextColor(Color.DKGRAY)
+            setTextColor(textColor(context))
             setPadding(24, 16, 24, 16)
         }
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, pageHeight(context)))
         }
         var finished = false
         val dialog = AlertDialog.Builder(context)

@@ -1,7 +1,12 @@
 package com.watchuu.musicbox
 
 import android.content.Context
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
@@ -43,7 +48,7 @@ class MusicBoxProvider : MainAPI() {
     override var mainUrl = "https://musicbox.local"
     override val supportedTypes = setOf(TvType.Music, TvType.Others)
     override val hasQuickSearch = true
-    override val hasMainPage = false
+    override val hasMainPage = true
     override val hasDownloadSupport = true
 
     private fun catalogueId(): String = Providers.catalogueId()
@@ -58,6 +63,38 @@ class MusicBoxProvider : MainAPI() {
     ) {
         posterUrl = hit.cover
         this.year = null
+    }
+
+    // A provider without a main page is left out of the app's provider picker, so MusicBox has a small
+    // home: a few rows made by searching the chosen catalogue.
+    override val mainPage = mainPageOf(
+        "top hits" to "Top hits",
+        "new releases" to "New releases",
+        "love songs" to "Love songs",
+        "workout" to "Workout",
+    )
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val hits = ArrayList<SearchResponse>()
+        val seen = HashSet<String>()
+        if (page <= 1) {
+            for (provider in Providers.catalogue(catalogueId())) {
+                if (!provider.canCatalogue) continue
+                val found = try {
+                    provider.search(request.data, 20)
+                } catch (e: Throwable) {
+                    Diag.log("home", "${provider.id} failed: ${e.message}")
+                    continue
+                }
+                for (hit in found) {
+                    if (hit.kind == Hit.Kind.TRACK || hit.kind == Hit.Kind.ALBUM) {
+                        if (seen.add("${hit.kind}|${hit.title.lowercase()}|${hit.subtitle?.lowercase()}")) hits.add(searchResponseFor(hit))
+                    }
+                }
+                if (hits.size >= 20) break
+            }
+        }
+        return newHomePageResponse(HomePageList(request.name, hits, false), hasNext = false)
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)

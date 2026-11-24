@@ -288,6 +288,24 @@ object Tidal : MusicProvider {
         else -> "LOSSLESS"
     }
 
+    /**
+     * parseManifestText() for an MPD: the init URL followed by every media URL. The segment count
+     * comes from the SegmentTimeline (each <S> plus its repeat count r), numbered from startNumber.
+     */
+    private fun dashParts(mpd: String): List<String>? {
+        fun unescape(s: String) = s.replace("&amp;", "&")
+        val init = Regex("""initialization="([^"]+)"""", RegexOption.IGNORE_CASE).find(mpd)?.groupValues?.get(1) ?: return null
+        val media = Regex("""media="([^"]+)"""", RegexOption.IGNORE_CASE).find(mpd)?.groupValues?.get(1) ?: return null
+        val first = Regex("""startNumber="(\d+)"""", RegexOption.IGNORE_CASE).find(mpd)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        var count = 0
+        Regex("""<S\s+[^>]*d="(\d+)"(?:\s+r="(-?\d+)")?[^>]*/?>""", RegexOption.IGNORE_CASE).findAll(mpd).forEach { m ->
+            count += (m.groupValues[2].toIntOrNull()?.coerceAtLeast(0) ?: 0) + 1
+        }
+        if (count <= 0) return null
+        val template = unescape(media)
+        return listOf(unescape(init)) + (first until first + count).map { template.replace("\$Number\$", it.toString()) }
+    }
+
     override suspend fun streams(track: Track, quality: String): List<Stream> {
         val requested = quality(quality)
         val ticket = Zarz.ticket(APP_VERSION, "tid", "track", track.id)
@@ -324,9 +342,13 @@ object Tidal : MusicProvider {
                 Diag.log("tidal", "manifest is neither BTS JSON nor an MPD: ${decoded.take(80)}")
                 return emptyList()
             }
-            val local = com.watchuu.musicbox.core.LocalStream.registerText(decoded, "application/dash+xml", "mpd")
-            Diag.log("tidal", "DASH manifest, playing segments directly")
-            return listOf(Stream(local, label, "application/dash+xml", provider = id, dash = true))
+            val parts = dashParts(decoded) ?: run {
+                Diag.log("tidal", "DASH manifest without initialization/media templates")
+                return emptyList()
+            }
+            val local = com.watchuu.musicbox.core.LocalStream.registerJoined(parts, mapOf("User-Agent" to Http.userAgent), "audio/mp4")
+            Diag.log("tidal", "DASH manifest, joining ${parts.size - 1} segments on device")
+            return listOf(Stream(local, label, "audio/mp4", provider = id))
         }
         val manifestJson = jsonOrNull(decoded) ?: return emptyList()
         val encryption = manifestJson.optStringOrNull("encryptionType")

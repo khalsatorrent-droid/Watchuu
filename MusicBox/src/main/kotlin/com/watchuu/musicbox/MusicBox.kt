@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -36,7 +37,7 @@ class MusicBoxPlugin : Plugin() {
         Creds.init(context)
         com.watchuu.musicbox.core.LocalStream.spoolDir = context.cacheDir
         com.watchuu.musicbox.core.LocalStream.log = { Diag.log("stream", it) }
-        Diag.log("plugin", "load, version 78")
+        Diag.log("plugin", "load, version 79")
         registerMainAPI(MusicBoxProvider())
         openSettings = { ctx -> SettingsScreen.show(ctx) }
     }
@@ -71,8 +72,22 @@ class MusicBoxProvider : MainAPI() {
         return buildSearchResponse(hit)
     }
 
+    /**
+     * Card names are "Title - Artist", the shape music front ends split on: CNCVerse Bridge takes the
+     * text after the last " - " as the artist and, without one, used "MusicBox" as the artist, so
+     * its same-track check (exact title and a shared artist) rejected every MusicBox song.
+     */
+    private fun cardName(hit: Hit): String {
+        val artists = when (hit.kind) {
+            Hit.Kind.TRACK -> hit.track?.artists
+            Hit.Kind.ALBUM -> hit.album?.artists
+            Hit.Kind.ARTIST -> null
+        }.orEmpty().map { it.replace(" - ", " ").trim() }.filter { it.isNotBlank() }
+        return if (artists.isEmpty()) hit.title else "${hit.title} - ${artists.joinToString(", ")}"
+    }
+
     private fun buildSearchResponse(hit: Hit): SearchResponse = newMovieSearchResponse(
-        hit.title,
+        cardName(hit),
         HitCodec.cardUrl(hit),
         TvType.Music,
         false
@@ -178,6 +193,7 @@ class MusicBoxProvider : MainAPI() {
                     }
                     this.year = track.year
                     this.tags = listOfNotNull(track.albumName, track.isrc)
+                    addActors(track.artists)
                 }
             }
             "album" -> {
@@ -191,7 +207,7 @@ class MusicBoxProvider : MainAPI() {
                     }
                 val episodes = album.tracks.mapIndexed { index, track ->
                     newEpisode(episodeData(track), {
-                        this.name = "${index + 1}. ${track.title}"
+                        this.name = track.title
                         this.posterUrl = track.cover ?: album.cover
                         this.episode = index + 1
                         this.runTime = minutes(track.durationMs)
@@ -215,6 +231,7 @@ class MusicBoxProvider : MainAPI() {
                         this.plot = album.artists.joinToString(", ")
                         this.year = album.year
                         this.tags = listOfNotNull(album.albumType, album.label)
+                        addActors(album.artists)
                     }
                 } else {
                     newTvSeriesLoadResponse(album.title, url, TvType.Music, episodes) {
@@ -222,6 +239,7 @@ class MusicBoxProvider : MainAPI() {
                         this.plot = album.artists.joinToString(", ")
                         this.year = album.year
                         this.tags = listOfNotNull(album.albumType, album.label)
+                        addActors(album.artists)
                     }
                 }
             }
@@ -368,19 +386,22 @@ class MusicBoxProvider : MainAPI() {
         durationMs?.takeIf { it > 0 }?.let { ((it + 30_000L) / 60_000L).toInt().coerceAtLeast(1) }
 
     private fun qualityToInt(quality: String): Int {
-        val q = quality.uppercase().replace("-", "").replace(" ", "")
-        val bitrate = Regex("""(\d{2,3})\s*(K|KBPS)?\b""").findAll(q)
-            .mapNotNull { it.groupValues[1].toIntOrNull() }.firstOrNull { it in 32..512 }
+        // Quality numbers follow the scale CNCVerse Bridge reads: 2000+ hi-res, 1000-1999 lossless
+        // (1411 = CD), below that the bitrate in kbps. v74 gave a 320kbps MP3 1080, which counted as lossless.
+        val q = quality.uppercase()
+        val kHz = Regex("""(\d{2,3}(?:\.\d)?)\s*KHZ""").find(q)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+        val kbps = Regex("""(\d{2,4})\s*K(?:BPS|B/S)?\b""").findAll(q).mapNotNull { it.groupValues[1].toIntOrNull() }
+            .firstOrNull { it in 32..1999 }
+        val lossless = q.contains("FLAC") || q.contains("LOSSLESS") || q.contains("ALAC") || q.contains("16-BIT") || q.contains("16BIT")
         return when {
-            q.contains("HI_RES") || q.contains("HIRES") || q.contains("24BIT") || q.contains("ATMOS") || q.contains("EAC3") -> Qualities.P2160.value
-            q.contains("LOSSLESS") || q.contains("FLAC") || q.contains("16BIT") || q.contains("ALAC") -> Qualities.P1440.value
-            bitrate != null && bitrate >= 300 -> Qualities.P1080.value
-            bitrate != null && bitrate >= 200 -> Qualities.P720.value
-            bitrate != null && bitrate >= 128 -> Qualities.P480.value
-            bitrate != null -> Qualities.P360.value
+            q.contains("HI-RES") || q.contains("HI_RES") || q.contains("24-BIT") || q.contains("24BIT") || (lossless && kHz > 48) -> 2160
+            lossless -> 1411
+            q.contains("ATMOS") || q.contains("EAC3") || q.contains("E-AC-3") -> 768
+            kbps != null -> kbps
             else -> Qualities.Unknown.value
         }
     }
+
 }
 
 /**

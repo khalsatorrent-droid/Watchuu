@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object LocalStream {
 
-    private enum class Kind { CENC, DEEZER, TEXT }
+    private enum class Kind { CENC, DEEZER, TEXT, JOIN }
 
     private class Entry(
         val kind: Kind,
@@ -34,6 +34,7 @@ object LocalStream {
         val created: Long,
         val text: String = "",
         val mime: String = "audio/mp4",
+        val parts: List<String> = emptyList(),
     )
 
     private const val TTL_MS = 6 * 60 * 60 * 1000L
@@ -55,6 +56,13 @@ object LocalStream {
     /** Registers a Deezer CDN file scrambled with the per-track Blowfish key. */
     fun registerDeezer(url: String, headers: Map<String, String>, key: ByteArray, extension: String): String =
         add(Entry(Kind.DEEZER, url, headers, key, System.currentTimeMillis(), mime = if (extension == "mp3") "audio/mpeg" else "audio/flac"), extension)
+
+    /**
+     * Serves a DASH track (an init segment and numbered media segments) as one continuous MP4, the
+     * file Mornye builds with file.downloadSegments. Any player, and the bridge, can play that.
+     */
+    fun registerJoined(parts: List<String>, headers: Map<String, String>, mime: String): String =
+        add(Entry(Kind.JOIN, parts.firstOrNull() ?: "", headers, ByteArray(0), System.currentTimeMillis(), mime = mime, parts = parts), "mp4")
 
     /** Serves a document (a DASH manifest the gateway sent inline) at a local URL. */
     fun registerText(text: String, mime: String, extension: String): String =
@@ -115,6 +123,10 @@ object LocalStream {
                     return
                 }
 
+                if (entry.kind == Kind.JOIN) {
+                    serveJoined(entry, method, start, out)
+                    return
+                }
                 val conn = (URL(entry.url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 20_000
                     readTimeout = 60_000
@@ -153,7 +165,7 @@ object LocalStream {
                         when (entry.kind) {
                             Kind.CENC -> Cenc(entry.key).also { it.spoolDir = spoolDir }.transform(source, sink)
                             Kind.DEEZER -> DeezerCrypt.transform(source, sink, entry.key)
-                            Kind.TEXT -> Unit
+                            Kind.TEXT, Kind.JOIN -> Unit
                         }
                     }
                 } catch (e: java.net.SocketException) {
@@ -169,6 +181,42 @@ object LocalStream {
             } catch (e: Throwable) {
                 log("local stream error: ${e.message}")
             }
+        }
+    }
+
+    /** Init + media segments one after another; the length is unknown, so the reply ends with the connection. */
+    private fun serveJoined(entry: Entry, method: String, start: Long, out: OutputStream) {
+        out.write("HTTP/1.1 200 OK\r\nContent-Type: ${entry.mime}\r\nConnection: close\r\n\r\n".toByteArray())
+        if (method.equals("HEAD", true)) { out.flush(); return }
+        val sink = Skipping(out, start)
+        try {
+            for ((i, part) in entry.parts.withIndex()) {
+                var done = false
+                var attempt = 0
+                while (!done) {
+                    val conn = (URL(part).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 20_000
+                        readTimeout = 60_000
+                        for ((k, v) in entry.headers) setRequestProperty(k, v)
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code !in 200..299) {
+                            if (++attempt < 3) continue
+                            log("segment ${i + 1}/${entry.parts.size} HTTP $code")
+                            return
+                        }
+                        conn.inputStream.use { it.copyTo(sink, 64 * 1024) }
+                        done = true
+                    } finally {
+                        conn.disconnect()
+                    }
+                }
+            }
+        } catch (e: java.net.SocketException) {
+            // the player stopped reading
+        } finally {
+            runCatching { out.flush() }
         }
     }
 

@@ -17,6 +17,7 @@ import com.watchuu.musicbox.core.objects
 import com.watchuu.musicbox.core.optIntOrNull
 import com.watchuu.musicbox.core.optLongOrNull
 import com.watchuu.musicbox.core.optStringOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -178,8 +179,18 @@ object Jellyfin : MusicProvider {
         return "${serverUrl()}/Items/$imageId/Images/Primary?maxHeight=600&quality=90&tag=$tag"
     }
 
+    private fun stringArray(arr: JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i, "").trim()
+            if (s.isNotEmpty()) out.add(s)
+        }
+        return out
+    }
+
     private fun artistString(it: JSONObject): String {
-        val artists = it.array("Artists")?.objects()?.mapNotNull { o -> o.toString().trim('"') } ?: emptyList()
+        val artists = stringArray(it.optJSONArray("Artists"))
         if (artists.isNotEmpty()) return artists.joinToString(", ")
         return it.optStringOrNull("AlbumArtist") ?: ""
     }
@@ -192,8 +203,9 @@ object Jellyfin : MusicProvider {
 
     private fun trackOf(it: JSONObject): Track? {
         val itemId = it.optStringOrNull("Id") ?: return null
-        val artists = it.array("Artists")?.objects()?.mapNotNull { o -> o.toString().trim('"') }
-            ?: listOfNotNull(it.optStringOrNull("AlbumArtist"))
+        val artists = stringArray(it.optJSONArray("Artists")).ifEmpty {
+            listOfNotNull(it.optStringOrNull("AlbumArtist"))
+        }
         val release = releaseDate(it)
         return Track(
             provider = id,

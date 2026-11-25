@@ -12,11 +12,7 @@ class XXXTubeProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(
-        TvType.NSFW,
-        TvType.Movie,
-        TvType.TvSeries
-    )
+    override val supportedTypes = setOf(TvType.NSFW)
 
     private val cfInterceptor by lazy { CloudflareKiller() }
 
@@ -226,7 +222,7 @@ class XXXTubeProvider : MainAPI() {
             val mainPoster = episodes.firstOrNull()?.posterUrl
                 ?: fixUrlNull(document.selectFirst(".thumb img")?.attr("src"))
 
-            return newTvSeriesLoadResponse(rawTitle, url, TvType.TvSeries, episodes) {
+            return newTvSeriesLoadResponse(rawTitle, url, TvType.NSFW, episodes) {
                 this.posterUrl = mainPoster
                 this.plot = description
             }

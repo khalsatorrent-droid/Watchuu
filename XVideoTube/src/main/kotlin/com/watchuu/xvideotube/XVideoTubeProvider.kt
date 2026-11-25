@@ -36,7 +36,7 @@ class XVideoTubeProvider : MainAPI() {
     override var mainUrl = "https://x-video.tube"
     override var name = "XVideoTube"
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.NSFW, TvType.Movie)
+    override val supportedTypes = setOf(TvType.NSFW)
 
     override val mainPage = mainPageOf(
         "" to "Latest",

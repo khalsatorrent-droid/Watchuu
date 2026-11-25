@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 7
+version = 8
 
 cloudstream {
     language = "en"
@@ -7,6 +7,6 @@ cloudstream {
     authors = listOf("khalsatorrent-droid")
 
     status = 1
-    tvTypes = listOf("NSFW", "Movie")
+    tvTypes = listOf("NSFW")
     iconUrl = "https://www.google.com/s2/favicons?domain=x-video.tube&sz=%size%"
 }

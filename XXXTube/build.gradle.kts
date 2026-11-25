@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 3
+version = 4
 
 cloudstream {
     language = "en"
@@ -14,11 +14,7 @@ cloudstream {
      * 3: Beta only
      * */
     status = 1
-    tvTypes = listOf(
-        "NSFW",
-        "Movie",
-        "TvSeries"
-    )
+    tvTypes = listOf("NSFW")
 
     iconUrl = "https://x-x-x.tube/favicon.ico"
 }

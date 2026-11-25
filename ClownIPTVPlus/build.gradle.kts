@@ -1,9 +1,9 @@
-version = 5
+version = 6
 
 cloudstream {
     language = "en"
     description = "Clown IPTV playlist with a country / region filter and an NSFW toggle (settings gear)"
-    authors = listOf("khalsatorrent-droid")
+    authors = listOf("NivinCNC")
 
     status = 1
     tvTypes = listOf("Live")
